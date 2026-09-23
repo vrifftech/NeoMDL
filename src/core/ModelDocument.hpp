@@ -213,6 +213,9 @@ private:
                                   const std::vector<std::string>& names = {});
     void appendParserWarnings(const neomdl::model::Model& model,
                               const std::string& prefix = {});
+    bool appendLoadedSupermodels(const neomdl::model::Model& model,
+                                  std::vector<neomdl::model::Model>& destination,
+                                  const std::string& prefix);
     std::vector<std::string> referencedTextures() const;
     void rebuildMaterials();
     std::vector<std::string> auxiliaryTextures();

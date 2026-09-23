@@ -13,10 +13,15 @@ void applyAsciiLightmap(RawNode& raw, Reader& reader) {
     {
         auto bytes=reader.resources()(texture,".lmt");
         if(!bytes) return;
-        Reader sidecar(*bytes,texture+".lmt",reader.job(),reader.resources());
+        Reader sidecar(*bytes,reader.game(),texture+".lmt",reader.job(),reader.resources());
         Line line;
         while(sidecar.next(line)) {
+            auto offset=std::size_t{};
+            while(offset<line.text.size() && (line.text[offset]==' ' || line.text[offset]=='\t')) ++offset;
+            line=sidecar.fieldLine(offset);
             if(equal(line.tokens.front(),"tverts1offset")) {
+                // The shared engine Parse<int> retains old initialized
+                // offsets if a later counted directive ends at EOF.
                 readScalarArray(line,sidecar,offsets,4u,
                     [](const Line& row,const Reader&,std::int32_t& value) {
                         return scanInteger(row.text.c_str(),value);
@@ -27,8 +32,13 @@ void applyAsciiLightmap(RawNode& raw, Reader& reader) {
                             (std::uint32_t(value[1])<<8u) |
                             (std::uint32_t(value[2])<<16u) |
                             (std::uint32_t(value[3])<<24u));
-                    });
-            } else if(equal(line.tokens.front(),"texture1")) {
+                    },true);
+            }
+            // The offset parser shares this resource's line buffer. Its
+            // last consumed row can supply the later texture1 check; the
+            // parent MDL resource retains its own independent buffer.
+            line=sidecar.fieldLine(offset);
+            if(equal(line.tokens.front(),"texture1")) {
                 const auto arguments=line.text.find(line.tokens.front())+line.tokens.front().size();
                 scanString(line.text.c_str()+arguments,texture);
             }

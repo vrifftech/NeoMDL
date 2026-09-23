@@ -733,6 +733,7 @@ void ModelDocument::loadSupermodelsFromDirectory(
     const neomdl::model::Model* current = &model_;
     while (true) {
         resourceLoadJob().check();
+        if (appendLoadedSupermodels(*current, supermodels_, "Supermodel ")) return;
         const auto next = hierarchyResref(current->supermodel);
         if (next.empty()) return;
         const auto key = lower(next);
@@ -764,6 +765,7 @@ void ModelDocument::loadSupermodelsFromDirectory(
 
 void ModelDocument::loadSupermodelsFromResolver(
     const ResourceResolver& resolver, const std::string& initialResref) {
+    if (appendLoadedSupermodels(model_, supermodels_, "Supermodel ")) return;
     const auto initialSupermodel = hierarchyResref(model_.supermodel);
     if (!resolver) {
         if (!initialSupermodel.empty())
@@ -778,6 +780,7 @@ void ModelDocument::loadSupermodelsFromResolver(
     const neomdl::model::Model* current = &model_;
     while (true) {
         resourceLoadJob().check();
+        if (appendLoadedSupermodels(*current, supermodels_, "Supermodel ")) return;
         const auto next = hierarchyResref(current->supermodel);
         if (next.empty()) return;
         const auto key = lower(next);
@@ -841,10 +844,17 @@ void ModelDocument::loadReferencesFromDirectory(
 
             std::unordered_set<std::string> visited{key};
             const neomdl::model::Model* current = &asset->model;
-            while (asset->supermodels.size() < maximumSupermodels) {
+            while (true) {
                 resourceLoadJob().check();
+                if (appendLoadedSupermodels(*current, asset->supermodels,
+                        "Reference " + resref + " supermodel ")) break;
                 const auto next = hierarchyResref(current->supermodel);
                 if (next.empty()) break;
+                if (asset->supermodels.size() >= maximumSupermodels) {
+                    messages_.push_back("Reference " + resref +
+                        " supermodel chain exceeded the 64-model safety limit.");
+                    break;
+                }
                 const auto nextKey = lower(next);
                 if (!visited.emplace(nextKey).second) {
                     messages_.push_back("Reference " + resref +
@@ -861,11 +871,6 @@ void ModelDocument::loadReferencesFromDirectory(
                 appendParserWarnings(asset->supermodels.back(),
                     "Reference " + resref + " supermodel " + next + ": ");
                 current = &asset->supermodels.back();
-            }
-            if (asset->supermodels.size() == maximumSupermodels &&
-                !hierarchyResref(current->supermodel).empty()) {
-                messages_.push_back("Reference " + resref +
-                    " supermodel chain exceeded the 64-model safety limit.");
             }
             cache.emplace(key, asset);
             return asset;
@@ -996,10 +1001,17 @@ void ModelDocument::loadReferencesFromResolver(
 
         std::unordered_set<std::string> visited{key};
         const neomdl::model::Model* current = &asset->model;
-        while (asset->supermodels.size() < maximumSupermodels) {
+        while (true) {
             resourceLoadJob().check();
+            if (appendLoadedSupermodels(*current, asset->supermodels,
+                    "Reference " + resref + " supermodel ")) break;
             const auto next = hierarchyResref(current->supermodel);
             if (next.empty()) break;
+            if (asset->supermodels.size() >= maximumSupermodels) {
+                messages_.push_back("Reference " + resref +
+                    " supermodel chain exceeded the 64-model safety limit.");
+                break;
+            }
             const auto nextKey = lower(next);
             if (!visited.emplace(nextKey).second) {
                 messages_.push_back("Reference " + resref +
@@ -1017,11 +1029,6 @@ void ModelDocument::loadReferencesFromResolver(
             appendParserWarnings(asset->supermodels.back(),
                 "Reference " + resref + " supermodel " + next + ": ");
             current = &asset->supermodels.back();
-        }
-        if (asset->supermodels.size() == maximumSupermodels &&
-            !hierarchyResref(current->supermodel).empty()) {
-            messages_.push_back("Reference " + resref +
-                " supermodel chain exceeded the 64-model safety limit.");
         }
         cache.emplace(key, asset);
         return asset;
@@ -1167,6 +1174,25 @@ void ModelDocument::loadChunkModels(const ResourceResolver& resolver) {
 void ModelDocument::appendParserWarnings(const neomdl::model::Model& model,
                                          const std::string& prefix) {
     for (const auto& warning : model.warnings) messages_.push_back(prefix + warning);
+}
+
+bool ModelDocument::appendLoadedSupermodels(const neomdl::model::Model& model,
+    std::vector<neomdl::model::Model>& destination, const std::string& prefix) {
+    // Hold the chain before appending: model can itself be an element of
+    // destination, whose storage may move. Its pointer identity was already
+    // checked by the loader; equal model names do not imply a cycle.
+    const auto retained = model.asciiSupermodels;
+    if (!retained) return false;
+    for (const auto& inherited : *retained) {
+        resourceLoadJob().check();
+        if (destination.size() >= 64u) {
+            messages_.push_back(prefix + "chain exceeded the 64-model safety limit at: " + inherited.name);
+            break;
+        }
+        destination.push_back(inherited);
+        appendParserWarnings(destination.back(), prefix + inherited.name + ": ");
+    }
+    return true;
 }
 
 std::vector<std::string> ModelDocument::auxiliaryTextures() {

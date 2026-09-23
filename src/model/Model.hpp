@@ -625,6 +625,13 @@ struct Model {
     std::string name;
     std::string supermodel;
     std::string engineSupermodelName;
+    // ASCII FindModel selects registered objects, which may share a name or
+    // exist only in the same source file. Preserve those exact superclass
+    // edges for the document handoff instead of resolving the names again.
+    // Null means no retained load result (ordinary packed loading); an
+    // empty retained chain means the ASCII lookup resolved no superclass.
+    // Entries are flat snapshots and do not own nested chain handles.
+    std::shared_ptr<const std::vector<Model>> asciiSupermodels;
     std::uint16_t classification{};
     std::uint8_t subclassification{};
     bool fog{};

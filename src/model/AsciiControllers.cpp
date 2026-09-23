@@ -107,6 +107,7 @@ std::vector<Key> readKeys(const Line& line,Reader& reader) {
                 key.words[j]=littleWord(bytes,offset+j*4u);
             result.push_back(key);
         }
+        reader.finishPackedArray(line);
     } else if(fields==1) {
         for(long i=0;i<count;++i) {
             Line row;
@@ -204,9 +205,28 @@ void appendController(Node& node,const ControllerField& field,const std::vector<
 
 } // namespace
 
-bool parseControllerField(const Line& line,Reader& reader,RawNode& raw,GameVersion) {
+void parseBaseTransformFields(const Line& line,Reader& reader,RawNode& raw) {
+    const auto keyword=lower(line.tokens.front());
+    const auto* arguments=fieldArguments(line);
+    if(keyword=="position") {
+        std::sscanf(arguments,"%f %f %f",&raw.node.position.x,
+                    &raw.node.position.y,&raw.node.position.z);
+    } else if(keyword=="orientation") {
+        float x{},y{},z{},angle;
+        const auto count=std::sscanf(arguments,"%f %f %f %f",&x,&y,&z,&angle);
+        if(x==0.0f && y==0.0f && z==0.0f) raw.node.orientation={};
+        else {
+            if(count!=4) reader.fail(line,"Incomplete orientation record");
+            raw.node.orientation=engineAxisAngle({x,y,z},angle);
+        }
+    }
+}
+
+bool parseControllerField(const Line& line,Reader& reader,RawNode& raw,GameVersion,
+                          std::string_view group,bool updateBaseTransform) {
     const auto keyword=lower(line.tokens.front());
     for(const auto& field:controllerFields) {
+        if(!group.empty() && field.name!=group) continue;
         if((raw.node.flags&field.nodeFlag)==0u) continue;
         const bool single=keyword==field.name;
         const bool linear=keyword==std::string(field.name)+"key";
@@ -215,22 +235,8 @@ bool parseControllerField(const Line& line,Reader& reader,RawNode& raw,GameVersi
 
         if(single) {
             const auto* arguments=fieldArguments(line);
-            if(field.type==kControllerPosition && field.nodeFlag==kNodeBase) {
-                // MdlNode's separate base-position parse writes successful
-                // conversions directly, leaving later components unchanged.
-                std::sscanf(arguments,"%f %f %f",&raw.node.position.x,
-                            &raw.node.position.y,&raw.node.position.z);
-            } else if(field.type==kControllerOrientation && field.nodeFlag==kNodeBase) {
-                float x{},y{},z{},angle;
-                const auto count=std::sscanf(arguments,"%f %f %f %f",&x,&y,&z,&angle);
-                // MdlNode::InternalParseField explicitly stores identity for
-                // a zero axis before independently adding its controller.
-                if(x==0.0f && y==0.0f && z==0.0f) raw.node.orientation={};
-                else {
-                    if(count!=4) reader.fail(line,"Incomplete orientation record");
-                    raw.node.orientation=engineAxisAngle({x,y,z},angle);
-                }
-            }
+            if(updateBaseTransform && field.nodeFlag==kNodeBase)
+                parseBaseTransformFields(line,reader,raw);
             Key source;
             parseKey(arguments,source);
             const auto columns=source.count;

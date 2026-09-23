@@ -2972,8 +2972,20 @@ EngineCpuSkinSource decodeEngineMeshTopology(const EngineMeshSource& input,bool 
         const auto drawCount=primitive==3u && input.game==GameVersion::Kotor2
             ? (runtimeCount/3u)*3u : runtimeCount;
         out.draws.push_back({primitive,out.indices.size(),drawCount});
-        for(std::size_t index=0;index<drawCount;++index)
-            out.indices.push_back(mdl.u16(source+index*2u,"skin draw index"));
+        for(std::size_t index=0;index<drawCount;++index) {
+            const auto at=source+index*2u;
+            // K1 ResetTriMeshParts rounds an odd count before copying the
+            // serialized pool (0x321343..0x3213d6), but its writer emits the
+            // original pool size. A final batch can therefore lack the
+            // extra ushort. Only a non-CPU GL_TRIANGLES tail that cannot
+            // form a complete primitive may use an inert placeholder;
+            // preserve both readable padding and the engine draw count.
+            const bool ignoredPadding=!includeCpuTraversal &&
+                input.game==GameVersion::Kotor1 && primitive==3u &&
+                index>=authored && index>=(drawCount/3u)*3u;
+            out.indices.push_back(ignoredPadding && !mdl.contains(at,2u)
+                ?0u:mdl.u16(at,"skin draw index"));
+        }
     }
     // The trailing count is independently rounded and written back at
     // ResetTriMeshParts 0xf54a3..0xf54a8 before both transform and draw calls.

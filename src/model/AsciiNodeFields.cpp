@@ -1,4 +1,5 @@
 #include <model/AsciiModelInternal.hpp>
+#include <model/AsciiControllerFields.hpp>
 #include <model/Emitter.hpp>
 
 #include <cmath>
@@ -237,6 +238,13 @@ void initializeNode(RawNode& raw, GameVersion game) {
         raw.mesh->diffuse={0.8f,0.8f,0.8f};
         raw.mesh->ambient={0.2f,0.2f,0.2f};
         raw.mesh->castsShadow=true;
+        if(flags&kNodeAabb) {
+
+
+
+            raw.mesh->castsShadow=false;
+            raw.mesh->render=false;
+        }
         raw.mesh->skinned=(flags&kNodeSkin)!=0u;
         raw.mesh->animated=(flags&kNodeAnimation)!=0u;
         raw.mesh->engineBounds.emplace();
@@ -269,7 +277,7 @@ void initializeNode(RawNode& raw, GameVersion game) {
     if (flags&kNodeAnimation) raw.node.animmesh.emplace();
 }
 
-bool parseNodeField(const Line& line, Reader& reader, RawNode& raw, GameVersion) {
+bool parseNodeValue(const Line& line, Reader& reader, RawNode& raw) {
     if(raw.node.flags==0xa1u && animMeshField(line,reader,raw)) return true;
     if (raw.node.light && lightField(line,reader,*raw.node.light)) return true;
     if (raw.node.emitter && emitterField(line,*raw.node.emitter)) return true;
@@ -293,5 +301,41 @@ bool parseNodeField(const Line& line, Reader& reader, RawNode& raw, GameVersion)
         return true;
     }
     return false;
+}
+
+bool parseNodeField(const Line& header, Reader& reader, RawNode& raw, GameVersion game) {
+    const auto offset=header.bufferOffset;
+    bool parsed=false;
+    const auto controllers=[&](std::uint16_t flag) {
+        for(const auto& field:controllerFields) if(field.nodeFlag==flag) {
+            const auto line=reader.fieldLine(offset);
+            parsed=parseControllerField(line,reader,raw,game,field.name,false)||parsed;
+        }
+    };
+    if(raw.node.light) {
+        controllers(kNodeLight);
+        // Engine Light re-reads its retained resource-buffer pointer after
+        // each array, then delegates to Base. Earlier stages are not retried.
+        static constexpr std::string_view fields[]{
+            "ambientonly","shadow","isdynamic","ndynamictype","affectdynamic",
+            "lightpriority","generateflare","texturenames","flaresizes",
+            "flarepositions","flarecolorshifts","flareradius","fadinglight"};
+        for(const auto field:fields) {
+            const auto line=reader.fieldLine(offset);
+            if(equal(line.tokens.front(),field))
+                parsed=lightField(line,reader,*raw.node.light)||parsed;
+        }
+    } else if(raw.node.emitter) {
+        parsed=emitterField(reader.fieldLine(offset),*raw.node.emitter);
+        controllers(kNodeEmitter);
+    } else if(raw.mesh && raw.mesh->dangly) {
+        for(const auto field:{"displacement","period","tightness","constraints"}) {
+            const auto line=reader.fieldLine(offset);
+            if(equal(line.tokens.front(),field)) parsed=parseNodeValue(line,reader,raw)||parsed;
+        }
+    } else {
+        parsed=parseNodeValue(reader.fieldLine(offset),reader,raw);
+    }
+    return parsed;
 }
 } // namespace neomdl::model::ascii

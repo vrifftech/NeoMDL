@@ -52,6 +52,7 @@ void vectorList(const Line& header,Reader& reader,std::vector<Vec3>& values) {
         if(fields==2) {
             const auto data=reader.takeBytes(values.size()*12u,header);
             for(std::size_t i=0;i<values.size();++i) values[i]=vector(data.data()+i*12u);
+            reader.finishPackedArray(header);
         } else {
             for(auto& value:values) {
                 Line row;
@@ -85,7 +86,14 @@ void faceList(const Line& header,Reader& reader,std::vector<RawFace>& values) {
     int count{};char marker{};
     const auto fields=std::sscanf(arguments(header).c_str(),"%d %c",&count,&marker);
     if(fields==2) {
-        if(count==0) {values.clear();return;}
+        if(count==0) {
+            values.clear();
+
+
+            reader.takeBytes(0u,header);
+            reader.finishPackedArray(header);
+            return;
+        }
         reader.fail(header,"Packed engine face records contain process pointers and cannot be relocated from an ASCII resource");
     }
     if(fields==1) {
@@ -529,10 +537,9 @@ void lightsaber(RawNode& raw,Mesh& mesh,GameVersion game) {
 
 } // namespace
 
-bool parseMeshField(const Line& line,Reader& reader,RawNode& raw,GameVersion game) {
+static bool parseMeshValue(const Line& line,Reader& reader,RawNode& raw,GameVersion game) {
     if(!raw.mesh) return false;
     auto& mesh=*raw.mesh;
-    if(raw.node.flags==0x61u && parseSkinField(line,reader,raw,game)) return true;
     const auto key=lower(line.tokens.front());
     if(key=="verts") vectorList(line,reader,raw.vertices);
     else if(key=="tverts") vectorList(line,reader,raw.texcoords[0]);
@@ -552,21 +559,26 @@ bool parseMeshField(const Line& line,Reader& reader,RawNode& raw,GameVersion gam
         // count (K2 0x7a9158); later duplicate removal changes count only.
         mesh.engineFaceCapacity=static_cast<std::uint32_t>(raw.faces.size());
     }
+
+
     else if(key=="vertexindicescount") readScalarArray(line,reader,raw.vertexIndicesCount,4u,
         [](const Line& row,const Reader&,std::int32_t& value){return scanInteger(row.text.c_str(),value);},
-        [](const std::uint8_t* p){return static_cast<std::int32_t>(word(p));});
+        [](const std::uint8_t* p){return static_cast<std::int32_t>(word(p));},true);
     else if(key=="leftoverfaces") {
-        // Parse<unsigned int>'s inlined adapter retains one signed temporary
-        // for the complete list, independently of its destination rows.
-        // K1 0x5acc64/0x5acd74; K2 0x7aaa55/0x7aabd5.
+
+
+
+
+
         std::int32_t temporary{};bool initialized=false;
-        readArray(line,reader,raw.leftoverFaces,4u,
+        readScalarArray(line,reader,raw.leftoverFaces,4u,
             [&](const Line& row,const Reader& input,std::uint32_t& value) {
                 if(scanInteger(row.text.c_str(),temporary)) initialized=true;
                 else if(!initialized)
                     input.fail(row,"ASCII scalar has no initialized engine value");
                 value=static_cast<std::uint32_t>(temporary);
-            },[](const std::uint8_t* p){return word(p);});
+                return true;
+            },[](const std::uint8_t* p){return word(p);},true);
     }
     else if(key=="vertexindices") indexArrays(line,reader,raw.vertexIndices);
     else if(key=="texture0" || key=="bitmap") {
@@ -612,6 +624,51 @@ bool parseMeshField(const Line& line,Reader& reader,RawNode& raw,GameVersion gam
     else if(raw.node.flags==0xa1u && key=="animtverts") vectorList(line,reader,raw.animatedTexcoords);
     else return false;
     return true;
+}
+
+bool parseMeshField(const Line& initial,Reader& reader,RawNode& raw,GameVersion game) {
+    if(!raw.mesh) return false;
+    const auto offset=initial.bufferOffset;
+    // Preserve the explicit NW animmesh extension's existing producer; its
+    // fields are outside the four KOTOR InternalParseField implementations.
+    const auto extension=lower(initial.tokens.front());
+    if(raw.node.flags==0xa1u && (extension=="sampleperiod" ||
+            extension=="animverts" || extension=="animtverts")) {
+        parseMeshValue(initial,reader,raw,game);
+        applyAsciiLightmap(raw,reader);
+        return true;
+    }
+    bool handled=false;
+    if(raw.node.flags==0x61u) handled=parseSkinField(initial,reader,raw,game);
+    const auto stage=[&](const char* field) {
+        const auto line=reader.fieldLine(offset);
+        if(equal(line.tokens.front(),field)) {
+            handled=parseMeshValue(line,reader,raw,game) || handled;
+        }
+    };
+
+
+
+
+    for(const auto* field:{"texture0","texture1","bitmap","verts","tverts",
+            "animateuv","uvdirectionx","uvdirectiony","uvjitter","uvjitterspeed",
+            "tverts1","tverts2","tverts3","colors","texindices1","texindices2","texindices3"})
+        stage(field);
+    applyAsciiLightmap(raw,reader);
+    for(const auto* field:{"faces","diffuse","ambient","shadow","transparencyhint",
+            "beaming","render","rotatetexture","bmin","bmax","vertexindicescount",
+            "leftoverfaces","vertexindices","lightmapped","m_bIsBackgroundGeometry"})
+        stage(field);
+    if(game==GameVersion::Kotor2)
+        for(const auto* field:{"dirt_enabled","dirt_texture","dirt_worldspace","hologram_donotdraw"})
+            stage(field);
+    // The scalar/key/bezier alternatives are exclusive within each group;
+    // an array can expose the next group, but cannot restart its own group.
+    for(const auto* group:{"selfillumcolor","alpha"}) {
+        const auto line=reader.fieldLine(offset);
+        handled=parseControllerField(line,reader,raw,game,group,false) || handled;
+    }
+    return handled;
 }
 
 void postProcessSkinNode(RawNode& raw,const neoshared::bif::JobControl& job) {

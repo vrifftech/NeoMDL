@@ -8,10 +8,10 @@
 
 namespace neomdl::model::ascii {
 
-Reader::Reader(const std::vector<std::uint8_t>& bytes, const std::string& sourceLabel,
+Reader::Reader(const std::vector<std::uint8_t>& bytes, GameVersion game, const std::string& sourceLabel,
                const neoshared::bif::JobControl& job,
                const AsciiResourceResolver& resources)
-    : bytes_(bytes), sourceLabel_(sourceLabel), job_(job), resources_(resources) {}
+    : bytes_(bytes), game_(game), sourceLabel_(sourceLabel), job_(job), resources_(resources) {}
 
 bool Reader::next(Line& line) {
     job_.check();
@@ -19,7 +19,11 @@ bool Reader::next(Line& line) {
     line.number=++lineNumber_;
     line.tokens.clear();
     const auto start=cursor_;
-    while(cursor_<bytes_.size() && bytes_[cursor_]!='\r' && bytes_[cursor_]!='\n') ++cursor_;
+
+
+
+    while(cursor_<bytes_.size() && bytes_[cursor_]!='\n' &&
+          (game_!=GameVersion::Kotor1 || bytes_[cursor_]!='\r')) ++cursor_;
     const auto end=cursor_;
     line.text.assign(reinterpret_cast<const char*>(bytes_.data()+start),end-start);
     if(const auto terminator=line.text.find('\0');terminator!=std::string::npos)
@@ -28,17 +32,65 @@ bool Reader::next(Line& line) {
         const auto terminator=bytes_[cursor_++];
         if(terminator=='\r' && cursor_<bytes_.size() && bytes_[cursor_]=='\n') ++cursor_;
     }
+
+
+
+    const auto written=end-start+(end<bytes_.size()?1u:0u);
+    if(buffer_.size()<written+1u) buffer_.resize(written+1u);
+    std::copy_n(bytes_.begin()+static_cast<std::ptrdiff_t>(start),written,buffer_.begin());
+    buffer_[written]=0u;
+    line.bufferOffset=0u;
     auto position=start;
     while(position<end && bytes_[position]!=0u) {
-        while(position<end && (bytes_[position]==' ' || bytes_[position]=='\t')) ++position;
+        while(position<end && (bytes_[position]==' ' || bytes_[position]=='\t' ||
+              (!line.tokens.empty() && bytes_[position]=='\r'))) ++position;
         const auto token=position;
-        while(position<end && bytes_[position]!=0u && bytes_[position]!=' ' && bytes_[position]!='\t') ++position;
-        if(position!=token) line.tokens.emplace_back(reinterpret_cast<const char*>(bytes_.data()+token),position-token);
+        while(position<end && bytes_[position]!=0u && bytes_[position]!=' ' &&
+              bytes_[position]!='\t' && bytes_[position]!='\r') ++position;
+        // Engine field tokens stop at CR, but LoadMaxTree/ParseNode skip
+        // only space/tab before dispatch. A leading CR therefore denotes
+        // an empty field, not permission to parse a later command on it.
+        if(position!=token || (line.tokens.empty() && position<end && bytes_[position]=='\r'))
+            line.tokens.emplace_back(reinterpret_cast<const char*>(bytes_.data()+token),position-token);
         if(position<end && bytes_[position]==0u) break;
+        if(position<end && bytes_[position]=='\r') ++position;
     }
     if(line.tokens.empty()) line.tokens.emplace_back();
     if((lineNumber_&255u)==0u) job_.update(cursor_,bytes_.size(),"Parsing ASCII model: "+sourceLabel_);
     return true;
+}
+
+Line Reader::fieldLine(std::size_t offset) const {
+    Line line;
+    line.number=lineNumber_;
+    line.bufferOffset=offset;
+    if(offset<buffer_.size()) {
+        auto end=offset;
+        while(end<buffer_.size() && buffer_[end]!=0u) ++end;
+        line.text.assign(reinterpret_cast<const char*>(buffer_.data()+offset),end-offset);
+    }
+    // Unlike ParseNode's initial skipspace, subsequent engine field stages
+    // dereference the retained pointer without skipping new indentation.
+    std::size_t position{};
+    const auto delimiter=[](char value) {
+        return value==' ' || value=='\t' || value=='\r' || value=='\n';
+    };
+    do {
+        const auto start=position;
+        while(position<line.text.size() && !delimiter(line.text[position])) ++position;
+        line.tokens.emplace_back(line.text.substr(start,position-start));
+        while(position<line.text.size() && delimiter(line.text[position])) ++position;
+    } while(position<line.text.size());
+    return line;
+}
+
+void Reader::finishPackedArray(const Line& header) {
+    const auto leading=header.text.find_first_not_of(" \t");
+    const auto offset=header.bufferOffset+(leading==std::string::npos?header.text.size():leading)+
+                      header.tokens.front().size();
+    // Packed Parse<T> clears the old argument pointer after copying its
+    // payload, even though GetData has already overwritten the buffer.
+    if(offset<buffer_.size()) buffer_[offset]=0u;
 }
 
 std::vector<std::uint8_t> Reader::takeBytes(std::size_t count, const Line& line) {
@@ -46,7 +98,18 @@ std::vector<std::uint8_t> Reader::takeBytes(std::size_t count, const Line& line)
     if(count>bytes_.size()-cursor_) fail(line,"Truncated embedded array");
     std::vector<std::uint8_t> result(bytes_.begin()+static_cast<std::ptrdiff_t>(cursor_),
                                    bytes_.begin()+static_cast<std::ptrdiff_t>(cursor_+count));
-    cursor_+=count;
+
+
+
+
+
+    const auto consumed=count==0u && cursor_<bytes_.size()?1u:count;
+    if(consumed!=0u) {
+        if(buffer_.size()<consumed+1u) buffer_.resize(consumed+1u);
+        std::copy_n(bytes_.begin()+static_cast<std::ptrdiff_t>(cursor_),consumed,buffer_.begin());
+        buffer_[consumed]=0u;
+    }
+    cursor_+=consumed;
     return result;
 }
 
@@ -236,10 +299,20 @@ void parseNode(const Line& header, Reader& reader, Model& model,
 
 
 
-        if(prefix(field,"parent")) {
-            std::vector<char> parent(line.text.size()+1u);
-            if(std::sscanf(fieldStart(line)+6u,"%s",parent.data())!=1)
-                reader.fail(line,"Incomplete parent record");
+        const auto first=line.text.find_first_not_of(" \t");
+        const auto offset=first==std::string::npos?line.text.size():first;
+        // Engine typed stages and Base retain this initial skipspace offset
+        // even when a nested array overwrites the shared resource buffer.
+        parseNodeField(reader.fieldLine(offset),reader,raw,model.game);
+        if(raw.mesh) parseMeshField(reader.fieldLine(offset),reader,raw,model.game);
+        parseBaseTransformFields(reader.fieldLine(offset),reader,raw);
+        for(const auto group:{"position","orientation","scale"})
+            parseControllerField(reader.fieldLine(offset),reader,raw,model.game,group,false);
+        const auto parentLine=reader.fieldLine(offset);
+        if(prefix(parentLine.tokens.front(),"parent")) {
+            std::vector<char> parent(parentLine.text.size()+1u);
+            if(std::sscanf(parentLine.text.c_str()+6u,"%s",parent.data())!=1)
+                reader.fail(parentLine,"Incomplete parent record");
             raw.parentName=parent.data();
             if(equal(raw.parentName,"NULL")) {
                 raw.node.parent.reset();
@@ -249,16 +322,11 @@ void parseNode(const Line& header, Reader& reader, Model& model,
                 raw.node.parent=findRawNode(nodes,root,raw.parentName);
                 if(raw.node.parent) nodes[*raw.node.parent].node.children.push_back(index);
             }
-        } else if(parseControllerField(line,reader,raw,model.game)) {
-        } else if(parseMeshField(line,reader,raw,model.game)) {
-        } else {
-            // Engine field dispatch ignores names it does not recognize.
-            parseNodeField(line,reader,raw,model.game);
         }
-        if(raw.mesh) applyAsciiLightmap(raw,reader);
     }
-    // ParseNode explicitly throws for an unparented node that is not the
-    // current root (K1 0x5ae9bc; K2 corresponding ParseNode exception branch).
+
+
+
     if(!raw.node.parent && root!=index) reader.fail(header,"Node has no parent in the current model tree: "+raw.node.name);
     // K2 ParseNode 0x7ac90b appends model-node names without deduplication.
     // Animation names reverse-search that same table (0x7aca00), retaining
@@ -451,6 +519,31 @@ struct AsciiLoadContext {
         if(superclass) ++registration(superclass)->references;
     }
 
+    void retainSuperclasses(Model& model) {
+        auto chain=std::make_shared<std::vector<Model>>();
+        std::vector<const Model*> visited{&model};
+        auto* current=&model;
+        while(true) {
+            const auto entry=registration(current);
+            if(entry==models.end() || !entry->superclass) break;
+            current=entry->superclass;
+            if(std::find(visited.begin(),visited.end(),current)!=visited.end()) {
+                model.warnings.push_back("Loaded supermodel pointer cycle stopped at: "+current->name);
+                break;
+            }
+            if(chain->size()>=64u) {
+                model.warnings.push_back("Loaded supermodel chain exceeded the 64-model safety limit at: "+current->name);
+                break;
+            }
+            visited.push_back(current);
+            chain->push_back(*current);
+            // The outer chain supplies ownership without retaining registry
+            // edges or creating shared_ptr cycles between models.
+            chain->back().asciiSupermodels.reset();
+        }
+        model.asciiSupermodels=std::move(chain);
+    }
+
     std::shared_ptr<Model> find(const std::string& name, GameVersion game,
         const neoshared::bif::JobControl& job, const AsciiResourceResolver& resources) {
         if(ascii::equal(name,"NULL")) return {};
@@ -487,7 +580,7 @@ std::shared_ptr<Model> decodeAsciiModelInContext(const std::vector<std::uint8_t>
                             const AsciiResourceResolver& resources,
                             AsciiLoadContext& context) {
     using namespace ascii;
-    Reader reader(bytes,sourceLabel,job,resources);
+    Reader reader(bytes,game,sourceLabel,job,resources);
     std::shared_ptr<Model> current;
     std::shared_ptr<Model> superclass;
     std::vector<RawNode> modelNodes;
@@ -640,6 +733,7 @@ Model decodeAsciiModelBytes(const std::vector<std::uint8_t>& bytes, GameVersion 
                             const AsciiResourceResolver& resources) {
     AsciiLoadContext context;
     auto model=decodeAsciiModelInContext(bytes,game,sourceLabel,job,resources,context);
+    context.retainSuperclasses(*model);
     return std::move(*model);
 }
 

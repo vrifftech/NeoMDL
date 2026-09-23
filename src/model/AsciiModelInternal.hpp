@@ -11,6 +11,7 @@ namespace neomdl::model::ascii {
 
 struct Line {
     std::size_t number{};
+    std::size_t bufferOffset{};
     std::vector<std::string> tokens;
     std::string text;
 };
@@ -20,19 +21,24 @@ struct Line {
 // A Reader belongs to one load; nested model/node/array readers share it.
 class Reader {
 public:
-    Reader(const std::vector<std::uint8_t>& bytes, const std::string& sourceLabel,
+    Reader(const std::vector<std::uint8_t>& bytes, GameVersion game, const std::string& sourceLabel,
            const neoshared::bif::JobControl& job,
            const AsciiResourceResolver& resources = {});
     bool next(Line& line);
+    Line fieldLine(std::size_t offset) const;
+    void finishPackedArray(const Line& header);
     std::vector<std::uint8_t> takeBytes(std::size_t count, const Line& line);
     [[noreturn]] void fail(const Line& line, const std::string& message) const;
+    GameVersion game() const noexcept { return game_; }
     const neoshared::bif::JobControl& job() const noexcept { return job_; }
     const AsciiResourceResolver& resources() const noexcept { return resources_; }
 private:
     const std::vector<std::uint8_t>& bytes_;
+    GameVersion game_;
     std::string sourceLabel_;
     const neoshared::bif::JobControl& job_;
     AsciiResourceResolver resources_;
+    std::vector<std::uint8_t> buffer_;
     std::size_t cursor_{}, lineNumber_{};
 };
 
@@ -76,6 +82,7 @@ void readArray(const Line& header, Reader& reader, std::vector<T>& values,
         if(stride && fields==2) {
             const auto block=reader.takeBytes(static_cast<std::size_t>(count)*stride,header);
             for(std::size_t i=0;i<values.size();++i) values[i]=bytes(block.data()+i*stride);
+            reader.finishPackedArray(header);
             return;
         }
         for(auto& value:values) {
@@ -167,7 +174,9 @@ void initializeNode(RawNode& raw, GameVersion game);
 bool parseNodeField(const Line& line, Reader& reader, RawNode& raw, GameVersion game);
 bool parseMeshField(const Line& line, Reader& reader, RawNode& raw, GameVersion game);
 bool parseSkinField(const Line& line, Reader& reader, RawNode& raw, GameVersion game);
-bool parseControllerField(const Line& line, Reader& reader, RawNode& raw, GameVersion game);
+void parseBaseTransformFields(const Line& line, Reader& reader, RawNode& raw);
+bool parseControllerField(const Line& line, Reader& reader, RawNode& raw, GameVersion game,
+                          std::string_view group = {}, bool updateBaseTransform = true);
 void applyAsciiLightmap(RawNode& raw, Reader& reader);
 void postProcessSkinNode(RawNode& raw,const neoshared::bif::JobControl& job);
 void buildMesh(Model& model, RawNode& raw, std::size_t nodeIndex,
