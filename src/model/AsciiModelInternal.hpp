@@ -25,6 +25,7 @@ public:
            const neoshared::bif::JobControl& job,
            const AsciiResourceResolver& resources = {});
     bool next(Line& line);
+    void trimCommandLine(Line& line);
     Line fieldLine(std::size_t offset) const;
     void finishPackedArray(const Line& header);
     std::vector<std::uint8_t> takeBytes(std::size_t count, const Line& line);

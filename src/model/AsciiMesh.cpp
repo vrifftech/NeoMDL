@@ -1,4 +1,5 @@
 #include <model/AsciiModelInternal.hpp>
+#include <model/AsciiFixedString.hpp>
 #include <model/EngineArithmetic.hpp>
 
 #include <algorithm>
@@ -585,9 +586,15 @@ static bool parseMeshValue(const Line& line,Reader& reader,RawNode& raw,GameVers
         // The engine %s scan leaves the existing texture unchanged on EOF;
         // bitmap likewise copies its temporary only after a word was read.
         // K1 0x5aaa78/0x5aabc8; K2 0x7a8546/0x7a879b.
+        const auto previous=mesh.texture0;
         scanString(arguments(line).c_str(),mesh.texture0);
+        retainAsciiFixedString(mesh.asciiTexture0,previous,mesh.texture0);
     }
-    else if(key=="texture1") scanString(arguments(line).c_str(),mesh.texture1);
+    else if(key=="texture1") {
+        const auto previous=mesh.texture1;
+        scanString(arguments(line).c_str(),mesh.texture1);
+        retainAsciiFixedString(mesh.asciiTexture1,previous,mesh.texture1);
+    }
     else if(game==GameVersion::Kotor2 && (key=="dirt_enabled" || key=="hologram_donotdraw")) {
         auto& field=key=="dirt_enabled"?mesh.k2Material->dirtEnabledRaw:mesh.k2Material->hologramDoNotDrawRaw;
         bool value=field!=0u;boolean(line,value);field=static_cast<std::uint8_t>(value);
@@ -696,8 +703,15 @@ void buildMesh(Model& model,RawNode& raw,std::size_t nodeIndex,
     if(animated) mesh.animated=true;
     if(raw.node.flags==0x61u && !mesh.inverseBindTranslations.empty()) return;
     if(raw.node.flags==0x21u || raw.node.flags==0x221u) {
-        if(mesh.texture0.empty()) mesh.texture0="NULL";
-        if(mesh.texture1.size()>=17u) mesh.texture1.resize(16u);
+        if(mesh.texture0.empty()) {
+            mesh.texture0="NULL";
+            retainAsciiFixedString(mesh.asciiTexture0,{},mesh.texture0);
+        }
+        if(mesh.texture1.size()>=17u) {
+            const auto previous=mesh.texture1;
+            mesh.texture1.resize(16u);
+            retainAsciiFixedString(mesh.asciiTexture1,previous,mesh.texture1);
+        }
     }
     const auto normalIndices=mesh.skinned?std::move(raw.processedSkinNormals):
         animated?processAnimVertices(raw,mesh,job):processVertices(raw,mesh,job);

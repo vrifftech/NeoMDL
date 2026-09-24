@@ -101,7 +101,7 @@ std::uint32_t writeAnimation(Context& context,const Animation& animation) {
     out.u8(offset+76u,5u);
     out.f32(offset+80u,animation.length);
     out.f32(offset+84u,animation.transitionTime);
-    fixedName(out,offset+88u,animation.root,"Animation root name");
+    out.string(offset+88u,animation.root,animation.asciiRoot);
     if(!animation.events.empty()) {
         const auto events=out.array(offset+120u,animation.events.size(),36u);
         for(std::size_t i=0;i<animation.events.size();++i) {

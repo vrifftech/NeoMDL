@@ -1,5 +1,6 @@
 #include <model/AsciiModelInternal.hpp>
 #include <model/AsciiControllerFields.hpp>
+#include <model/AsciiFixedString.hpp>
 #include <model/Emitter.hpp>
 
 #include <cmath>
@@ -29,8 +30,11 @@ void directInteger(const Line& line, std::int32_t& field) {
 void directFloat(const Line& line, float& field) {
     std::sscanf(fieldArguments(line),"%f",&field);
 }
-void directString(const Line& line, std::string& field) {
+template<std::size_t N>
+void directString(const Line& line, std::string& field,std::array<std::uint8_t,N>& retained) {
+    const auto previous=field;
     scanString(fieldArguments(line),field);
+    retainAsciiFixedString(retained,previous,field);
 }
 bool enabled(const Line& line) {
     bool value=false;
@@ -199,12 +203,12 @@ bool emitterField(const Line& line, EmitterNodeData& emitter) {
             if (*value&1) emitter.rawWords.back()|=emitter_flags::RandomFrame;
             if (*value&2) emitter.rawWords.back()|=emitter_flags::RandomOrder;
         }
-    } else if (field=="update") directString(line,emitter.updateMode);
-    else if (field=="render") directString(line,emitter.renderMode);
-    else if (field=="blend") directString(line,emitter.blendMode);
-    else if (field=="texture") directString(line,emitter.texture);
-    else if (field=="chunkname") directString(line,emitter.chunkName);
-    else if (field=="m_sdepthtexturename") directString(line,emitter.depthTexture);
+    } else if (field=="update") directString(line,emitter.updateMode,emitter.asciiUpdateMode);
+    else if (field=="render") directString(line,emitter.renderMode,emitter.asciiRenderMode);
+    else if (field=="blend") directString(line,emitter.blendMode,emitter.asciiBlendMode);
+    else if (field=="texture") directString(line,emitter.texture,emitter.asciiTexture);
+    else if (field=="chunkname") directString(line,emitter.chunkName,emitter.asciiChunkName);
+    else if (field=="m_sdepthtexturename") directString(line,emitter.depthTexture,emitter.asciiDepthTexture);
     else if (field=="spawntype") {
         if (const auto value=integerValue(line)) emitter.spawnType=static_cast<std::uint32_t>(*value);
     } else if (field=="xgrid") {
@@ -283,7 +287,9 @@ bool parseNodeValue(const Line& line, Reader& reader, RawNode& raw) {
     if (raw.node.emitter && emitterField(line,*raw.node.emitter)) return true;
     const auto field=lower(line.tokens[0]);
     if (raw.node.reference) {
-        if (field=="refmodel") {directString(line,raw.node.reference->model);return true;}
+        if (field=="refmodel") {
+            directString(line,raw.node.reference->model,raw.node.reference->asciiModel);return true;
+        }
         if (field=="reattachable") {directInteger(line,raw.node.reference->reattachable);return true;}
     }
     if (raw.mesh && raw.mesh->dangly) {

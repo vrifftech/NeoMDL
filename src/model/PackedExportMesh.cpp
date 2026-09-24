@@ -70,7 +70,8 @@ void meshHeader(Context& context,const Node& node,const Mesh& mesh,std::uint32_t
     }
     out.vec3(base+60u,mesh.diffuse);out.vec3(base+72u,mesh.ambient);
     out.u32(base+84u,mesh.transparencyHint);
-    out.string(base+88u,mesh.texture0,32u);out.string(base+120u,mesh.texture1,32u);
+    out.string(base+88u,mesh.texture0,mesh.asciiTexture0);
+    out.string(base+120u,mesh.texture1,mesh.asciiTexture1);
     // Process-local callbacks and render-pool handles have no portable
     // identity. ResetTriMesh replaces them on loading.
     // The writer clears the raw index-pointer table but retains its count

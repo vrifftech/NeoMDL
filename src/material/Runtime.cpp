@@ -26,8 +26,16 @@ const TextureBinding& k2EnvironmentBinding(const Material& material) {
 
 bool k2BumpMap(const Material& material) {
     if (!resolvedTexture(material.bumpMap)) return false;
-    return props(material.bumpMap).bumpMapKind.value_or(BumpMapKind::None) !=
-           BumpMapKind::None;
+    const auto& properties = props(material.bumpMap);
+    const auto kind = properties.engineBumpMapKind.value_or(
+        static_cast<std::int32_t>(properties.bumpMapKind.value_or(BumpMapKind::None)));
+    const auto& facts = material.bumpMap.metadata->facts;
+
+
+
+    return kind != 0 && (facts.engineProcessed ||
+        (kind == 1 && facts.engineBytesPerPixel == 1) ||
+        (kind == 2 && facts.engineBytesPerPixel == 4));
 }
 
 bool k2BumpyShinyMap(const Material& material) {

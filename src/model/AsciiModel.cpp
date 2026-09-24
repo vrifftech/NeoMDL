@@ -1,4 +1,5 @@
 #include <model/AsciiModelInternal.hpp>
+#include <model/AsciiFixedString.hpp>
 #include <model/UvAnimation.hpp>
 
 #include <algorithm>
@@ -82,6 +83,23 @@ Line Reader::fieldLine(std::size_t offset) const {
         while(position<line.text.size() && delimiter(line.text[position])) ++position;
     } while(position<line.text.size());
     return line;
+}
+
+void Reader::trimCommandLine(Line& line) {
+
+
+
+
+
+    std::size_t start{};
+    while(start<buffer_.size() && (buffer_[start]==' ' || buffer_[start]=='\t')) ++start;
+    if(start==buffer_.size() || buffer_[start]==0u || buffer_[start]=='#') return;
+    auto end=start;
+    while(end<buffer_.size() && buffer_[end]!=0u) ++end;
+    while(end>start && (buffer_[end-1u]==' ' || buffer_[end-1u]=='\t' ||
+                       buffer_[end-1u]=='\r' || buffer_[end-1u]=='\n'))
+        buffer_[--end]=0u;
+    line=fieldLine(0u);
 }
 
 void Reader::finishPackedArray(const Line& header) {
@@ -401,7 +419,9 @@ void parseAnimationField(const Line& line, Reader& reader, Animation& animation)
         std::vector<char> ignored(line.text.size()+1u);
         std::sscanf(fieldStart(line)+10u,"%s %f",ignored.data(),&animation.length);
     } else if(field=="animroot") {
+        const auto previous=animation.root;
         scanString(fieldStart(line)+8u,animation.root);
+        retainAsciiFixedString(animation.asciiRoot,previous,animation.root);
     } else if(prefix(line.tokens.front(),"event")) {
         AnimationEvent event;
         int consumed{};
@@ -590,6 +610,7 @@ std::shared_ptr<Model> decodeAsciiModelInContext(const std::vector<std::uint8_t>
     Line line;
     job.update(0u,bytes.size(),"Parsing ASCII model: "+sourceLabel);
     while(reader.next(line)) {
+        reader.trimCommandLine(line);
         const auto arguments=commandArguments(line);
         const auto& command=line.tokens.front();
         // FuncInterp's console-command comparison is case-sensitive.
@@ -662,7 +683,9 @@ std::shared_ptr<Model> decodeAsciiModelInContext(const std::vector<std::uint8_t>
             model.animations.push_back(std::move(animation));
         } else if(command=="setsupermodel") {
             requireTokens(line,3u,reader);
+            const auto previous=current->engineSupermodelName;
             current->engineSupermodelName=line.tokens[2];
+            retainAsciiFixedString(current->asciiSupermodelName,previous,current->engineSupermodelName);
             current->supermodel=equal(line.tokens[2],"NULL")?std::string{}:lower(line.tokens[2]);
             // setsupermodel releases the previous model before FindModel and
             // rejects the current model itself (K2 0x7ae432..0x7ae476).

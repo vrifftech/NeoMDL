@@ -31,7 +31,7 @@ PackedExportResult exportPackedModel(const Model& model,
     output.vec3(0x74u,model.engineBounds.maximum);
     output.f32(0x80u,model.engineRadius);
     output.f32(0x84u,model.animationScale);
-    output.string(0x88u,model.engineSupermodelName,32u);
+    output.string(0x88u,model.engineSupermodelName,model.asciiSupermodelName);
     output.u32(0xb0u,static_cast<std::uint32_t>(context.mdx.bytes.size()));
 
     // K2 IODispatcher::Write 0x7ce11b: names precede animations, including

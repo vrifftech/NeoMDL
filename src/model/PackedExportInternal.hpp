@@ -40,6 +40,15 @@ struct Buffer {
             throw ModelError("Packed model string exceeds its engine fixed-width field: "+value);
         copy(at,value.data(),value.size());
     }
+    template<std::size_t N>
+    void string(std::size_t at,const std::string& value,
+                const std::array<std::uint8_t,N>& retained) {
+        copy(at,retained.data(),N);
+        string(at,value,N);
+        // Explicitly terminate a later semantic edit without clearing the
+        // initialized tail copied by the engine complete-record writer.
+        u8(at+value.size(),0u);
+    }
     std::uint32_t text(const std::string& value) {
         const auto at=append(value.size()+1u);copy(at,value.data(),value.size());return at;
     }

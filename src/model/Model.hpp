@@ -273,6 +273,9 @@ struct EmitterNodeData {
     std::uint16_t renderOrder{};
     bool frameBlending{};
     std::string depthTexture;
+    std::array<std::uint8_t,32> asciiUpdateMode{},asciiRenderMode{},asciiBlendMode{},
+        asciiTexture{},asciiDepthTexture{};
+    std::array<std::uint8_t,16> asciiChunkName{};
     // The packed record contains additional engine-specific flags and values.
     // Keeping the complete 224-byte extension as words makes diagnostics and
     // later controller/particle parity work possible without unsafe aliasing.
@@ -296,6 +299,7 @@ struct TriggerNodeData {
 
 struct ReferenceNodeData {
     std::string model;
+    std::array<std::uint8_t,32> asciiModel{};
     std::int32_t reattachable{};
 };
 
@@ -410,6 +414,7 @@ struct Mesh {
     std::size_t nodeIndex{};
     std::string texture0;
     std::string texture1;
+    std::array<std::uint8_t,32> asciiTexture0{},asciiTexture1{};
     Vec3 diffuse{1.0f, 1.0f, 1.0f};
     Vec3 ambient{0.2f, 0.2f, 0.2f};
     std::uint32_t transparencyHint{};
@@ -572,6 +577,7 @@ struct Animation {
     float length{};
     float transitionTime{};
     std::string root;
+    std::array<std::uint8_t,32> asciiRoot{};
     std::vector<Node> nodes;
     std::vector<AnimationEvent> events;
 };
@@ -625,6 +631,7 @@ struct Model {
     std::string name;
     std::string supermodel;
     std::string engineSupermodelName;
+    std::array<std::uint8_t,32> asciiSupermodelName{};
     // ASCII FindModel selects registered objects, which may share a name or
     // exist only in the same source file. Preserve those exact superclass
     // edges for the document handoff instead of resolving the names again.

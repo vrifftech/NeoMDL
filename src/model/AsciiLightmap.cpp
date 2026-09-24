@@ -1,4 +1,5 @@
 #include <model/AsciiModelInternal.hpp>
+#include <model/AsciiFixedString.hpp>
 
 namespace neomdl::model::ascii {
 
@@ -40,7 +41,9 @@ void applyAsciiLightmap(RawNode& raw, Reader& reader) {
             line=sidecar.fieldLine(offset);
             if(equal(line.tokens.front(),"texture1")) {
                 const auto arguments=line.text.find(line.tokens.front())+line.tokens.front().size();
+                const auto previous=texture;
                 scanString(line.text.c_str()+arguments,texture);
+                retainAsciiFixedString(raw.mesh->asciiTexture1,previous,texture);
             }
         }
     }

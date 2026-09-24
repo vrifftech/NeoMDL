@@ -70,7 +70,7 @@ void writeNodeFields(Context& context,const Node& node,std::uint32_t nodeOffset)
         if(!node.emitter)throw ModelError("Packed export is missing the emitter extension for "+node.name);
         const auto& emitter=*node.emitter;
         // Authoring stores semantic values in the typed fields and OR flags
-        // in rawWords.back(). Unspecified fixed-string tails remain zero.
+        // in rawWords.back(). Known fixed-string tails retain earlier writes.
         out.f32(at+80u,emitter.deadSpace);
         out.f32(at+84u,emitter.blastRadius);
         out.f32(at+88u,emitter.blastLength);
@@ -79,20 +79,20 @@ void writeNodeFields(Context& context,const Node& node,std::uint32_t nodeOffset)
         out.u32(at+100u,emitter.xGrid);
         out.u32(at+104u,emitter.yGrid);
         out.u32(at+108u,emitter.spawnType);
-        out.string(at+112u,emitter.updateMode,32u);
-        out.string(at+144u,emitter.renderMode,32u);
-        out.string(at+176u,emitter.blendMode,32u);
-        out.string(at+208u,emitter.texture,32u);
-        out.string(at+240u,emitter.chunkName,16u);
+        out.string(at+112u,emitter.updateMode,emitter.asciiUpdateMode);
+        out.string(at+144u,emitter.renderMode,emitter.asciiRenderMode);
+        out.string(at+176u,emitter.blendMode,emitter.asciiBlendMode);
+        out.string(at+208u,emitter.texture,emitter.asciiTexture);
+        out.string(at+240u,emitter.chunkName,emitter.asciiChunkName);
         out.u32(at+256u,static_cast<std::uint32_t>(emitter.twoSidedTexture));
         out.u32(at+260u,static_cast<std::uint32_t>(emitter.loop));
         out.u16(at+264u,emitter.renderOrder);
         out.u8(at+266u,emitter.frameBlending?1u:0u);
-        out.string(at+267u,emitter.depthTexture,32u);
+        out.string(at+267u,emitter.depthTexture,emitter.asciiDepthTexture);
         out.u32(at+300u,emitter.rawWords.back());
     } else if(node.flags==(kNodeBase|kNodeReference)) {
         if(!node.reference)throw ModelError("Packed export is missing the reference extension for "+node.name);
-        out.string(at+80u,node.reference->model,32u);
+        out.string(at+80u,node.reference->model,node.reference->asciiModel);
         out.u32(at+112u,static_cast<std::uint32_t>(node.reference->reattachable));
     }
     // Base, camera and trigger records have no extension. Mesh and AABB
