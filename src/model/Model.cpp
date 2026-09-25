@@ -2478,6 +2478,27 @@ std::optional<Quaternion> controllerQuaternion(const Node& node, const Controlle
     return slerp(*left, *right, sample.alpha);
 }
 
+std::optional<float> bindControllerFloat(const Node& node,const Controller& controller,
+                                         float time) noexcept {
+    const auto first=controllerFloat(node,controller,-1.0f,true);
+    const auto second=controllerFloat(node,controller,time,true);
+    if(!first || !second) return std::nullopt;
+    // ControlDispatch(-1,0,1) samples both endpoints: only firstTime < -95
+    // uses the previous Part value. Keep the zero-weight first product so
+    // authored nonfinite keys retain engine arithmetic behavior.
+    return engineAnimationLerp(*first,*second,1.0f);
+}
+
+std::optional<Vec3> bindControllerVector(const Node& node,const Controller& controller,
+                                       float time) noexcept {
+    const auto first=controllerVector(node,controller,-1.0f,true);
+    const auto second=controllerVector(node,controller,time,true);
+    if(!first || !second) return std::nullopt;
+    return Vec3{engineAnimationLerp(first->x,second->x,1.0f),
+                engineAnimationLerp(first->y,second->y,1.0f),
+                engineAnimationLerp(first->z,second->z,1.0f)};
+}
+
 void applyMaterialControllers(const Node& node, float time,
                               MaterialValueSource source,
                               NodeMaterialState& material,
@@ -2490,28 +2511,24 @@ void applyMaterialControllers(const Node& node, float time,
     // not the discriminator: Control resolves offsets from the target part.
     for (const auto& controller : node.controllers) {
         if (controller.type == kControllerAlpha) {
-            if (const auto value = controllerFloat(node, controller, time, engineControl);
+            if (const auto value = engineControl ? bindControllerFloat(node,controller,time)
+                                                : controllerFloat(node,controller,time);
                 value && (engineControl || finite(*value))) {
-                material.alpha = engineControl
-                    ? engineAnimationLerp(material.alpha,*value,1.0f) : *value;
+                material.alpha = *value;
                 material.alphaSource = source;
             }
         } else if (controller.type == kControllerSelfIllumColor) {
             if (engineControl && controller.valueKind == ControllerValueKind::Float) {
-                if (const auto value = controllerFloat(node, controller, time, true)) {
-                    material.selfIllumination[0] = engineAnimationLerp(
-                        material.selfIllumination[0], *value, 1.0f);
+                if (const auto value = bindControllerFloat(node,controller,time)) {
+                    material.selfIllumination[0] = *value;
                     material.selfIlluminationSource = source;
                 }
                 continue;
             }
-            if (const auto value = controllerVector(node, controller, time, engineControl);
+            if (const auto value = engineControl ? bindControllerVector(node,controller,time)
+                                                : controllerVector(node,controller,time);
                 value && (engineControl || (finite(value->x) && finite(value->y) && finite(value->z)))) {
-                material.selfIllumination = engineControl
-                    ? std::array<float,3>{{engineAnimationLerp(material.selfIllumination[0],value->x,1.0f),
-                                          engineAnimationLerp(material.selfIllumination[1],value->y,1.0f),
-                                          engineAnimationLerp(material.selfIllumination[2],value->z,1.0f)}}
-                    : std::array<float,3>{{value->x,value->y,value->z}};
+                material.selfIllumination = {{value->x,value->y,value->z}};
                 material.selfIlluminationSource = source;
             }
         }
@@ -2523,19 +2540,16 @@ void applyLightControllers(const Node& node,float time,MaterialValueSource sourc
     for(const auto& controller:node.controllers) {
         if(controller.type==kControllerLightColor) {
             if(engineControl && controller.valueKind==ControllerValueKind::Float) {
-                if(const auto v=controllerFloat(node,controller,time,true)) {
-                    light.color[0]=engineAnimationLerp(light.color[0],*v,1.0f);
+                if(const auto v=bindControllerFloat(node,controller,time)) {
+                    light.color[0]=*v;
                     light.sources[0]=source;
                 }
                 continue;
             }
-            if(const auto v=controllerVector(node,controller,time,engineControl);
+            if(const auto v=engineControl ? bindControllerVector(node,controller,time)
+                                         : controllerVector(node,controller,time);
                v && (engineControl || (finite(v->x) && finite(v->y) && finite(v->z)))) {
-                light.color=engineControl
-                    ? std::array<float,3>{{engineAnimationLerp(light.color[0],v->x,1.0f),
-                                          engineAnimationLerp(light.color[1],v->y,1.0f),
-                                          engineAnimationLerp(light.color[2],v->z,1.0f)}}
-                    : std::array<float,3>{{v->x,v->y,v->z}};
+                light.color={{v->x,v->y,v->z}};
                 light.sources[0]=source;
             }
             continue;
@@ -2548,9 +2562,10 @@ void applyLightControllers(const Node& node,float time,MaterialValueSource sourc
         case kControllerLightMultiplier: field=&light.multiplier;slot=4;break;
         default: break;
         }
-        if(field) if(const auto v=controllerFloat(node,controller,time,engineControl);
+        if(field) if(const auto v=engineControl ? bindControllerFloat(node,controller,time)
+                                               : controllerFloat(node,controller,time);
                      v && (engineControl || finite(*v))) {
-            *field=engineControl?engineAnimationLerp(*field,*v,1.0f):*v;
+            *field=*v;
             light.sources[slot]=source;
         }
     }
@@ -2578,12 +2593,12 @@ void applyEmitterControllers(const Node& node, float time, MaterialValueSource s
     for (const auto& controller : node.controllers) {
         if(engineControl && controller.valueKind==ControllerValueKind::Vector) {
             if(const auto bindings=emitterVectorBindings(controller.type)) {
-                if(const auto value=controllerVector(node,controller,time,true)) {
+                if(const auto value=bindControllerVector(node,controller,time)) {
                     const std::array<float,3> values{{value->x,value->y,value->z}};
                     for(std::size_t lane=0;lane<bindings->size();++lane) {
                         const auto& binding=*(*bindings)[lane];
                         auto& field=emitter.*(binding.field);
-                        field=engineAnimationLerp(field,values[lane],1.0f);
+                        field=values[lane];
                         emitter.sources[static_cast<std::size_t>(binding.property)]=source;
                     }
                 }
@@ -2592,10 +2607,11 @@ void applyEmitterControllers(const Node& node, float time, MaterialValueSource s
         }
         for (const auto& binding : kEmitterScalarBindings) {
             if (controller.type != binding.id) continue;
-            if (const auto value=controllerFloat(node,controller,time,engineControl);
+            if (const auto value=engineControl ? bindControllerFloat(node,controller,time)
+                                              : controllerFloat(node,controller,time);
                 value && (engineControl || finite(*value))) {
                 auto& field=emitter.*(binding.field);
-                field=engineControl?engineAnimationLerp(field,*value,1.0f):*value;
+                field=*value;
                 emitter.sources[static_cast<std::size_t>(binding.property)]=source;
             }
             break;
@@ -2609,19 +2625,16 @@ void applyEmitterControllers(const Node& node, float time, MaterialValueSource s
         default: break;
         }
         if(field && engineControl && controller.valueKind==ControllerValueKind::Float) {
-            if(const auto v=controllerFloat(node,controller,time,true)) {
-                (*field)[0]=engineAnimationLerp((*field)[0],*v,1.0f);
+            if(const auto v=bindControllerFloat(node,controller,time)) {
+                (*field)[0]=*v;
                 emitter.sources[static_cast<std::size_t>(property)]=source;
             }
             continue;
         }
-        if (field) if (const auto v=controllerVector(node,controller,time,engineControl);
+        if (field) if (const auto v=engineControl ? bindControllerVector(node,controller,time)
+                                                : controllerVector(node,controller,time);
             v && (engineControl || (finite(v->x) && finite(v->y) && finite(v->z)))) {
-            *field=engineControl
-                ? std::array<float,3>{{engineAnimationLerp((*field)[0],v->x,1.0f),
-                                      engineAnimationLerp((*field)[1],v->y,1.0f),
-                                      engineAnimationLerp((*field)[2],v->z,1.0f)}}
-                : std::array<float,3>{{v->x,v->y,v->z}};
+            *field={{v->x,v->y,v->z}};
             emitter.sources[static_cast<std::size_t>(property)]=source;
         }
     }
@@ -3531,9 +3544,13 @@ void constructedNodeFrame(const Node& node,Vec3& position,
     position={};orientation={};
     // CreateInstanceTreeR initializes each Part, then runs the same typed
     // ControlDispatch(-1,0,1) used by animation playback in all four executables.
+    // Engine Control uses the existing Part only for firstTime < -95, so -1
+    // samples the controller twice. Even at blend 1 this matters: slerp can
+    // return its first sample for dot >= 1, and an earlier controller's NaN
+    // must not enter the retained zero-weight scalar/vector product.
     for(const auto& controller:node.controllers)
         if(controller.type==kControllerPosition || controller.type==kControllerOrientation)
-            controlTransform(node,node,controller,-1.0f,0.0f,1.0f,false,1.0f,
+            controlTransform(node,node,controller,-1.0f,0.0f,1.0f,true,1.0f,
                              position,orientation,game);
 }
 
@@ -4354,8 +4371,8 @@ Pose engineAnimationBindPose(const Model& model,
                              model.game);
         for (const auto& controller : node.controllers) {
             if (controller.type != kControllerScale) continue;
-            if (const auto scale = controllerFloat(node,controller,0.0f,true))
-                pose.scales[index] = engineAnimationLerp(pose.scales[index],*scale,1.0f);
+            if (const auto scale = bindControllerFloat(node,controller,0.0f))
+                pose.scales[index] = *scale;
         }
     }
     calculatePoseTransformsAndBounds(model,pose,job,true);

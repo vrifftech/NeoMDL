@@ -494,9 +494,10 @@ void neighbors(RawNode& raw,Mesh& mesh) {
     }
 }
 
-void lightsaber(RawNode& raw,Mesh& mesh,GameVersion game) {
-    // K1 0x5c7158 and K2 0x6e5bc0 read RAW vertex/color/UV/normal arrays,
-    // unlike the compiled MDX selector-color decoder. Color*255+.5 truncates.
+void lightsaber(RawNode& raw,Mesh& mesh) {
+
+
+
     auto& out=*raw.node.lightsaber;
     out.positions.resize(LightsaberNodeData::generatedVertexCount);
     out.originalPositions.resize(LightsaberNodeData::generatedVertexCount+1u);
@@ -529,7 +530,10 @@ void lightsaber(RawNode& raw,Mesh& mesh,GameVersion game) {
         auto destination=base+LightsaberNodeData::pieceVertices;
         for(std::size_t segment=0;segment<segments;++segment)
             for(std::size_t corner=0;corner<4u;++corner)
-                copy(destination++,half && corner==0u && game==GameVersion::Kotor2?0u:base+corner);
+                // Both games retain the selected back-piece indices for
+                // all four corners (K2 0x6e611b, 0x6e618d); corner zero
+                // is back-piece row 88, just like the other three corners.
+                copy(destination++,base+corner);
     }
     out.postprocessed=true;
     mesh.vertices.clear();mesh.indices.clear();mesh.engineDrawIndices.clear();mesh.engineDraws.clear();
@@ -716,11 +720,17 @@ void buildMesh(Model& model,RawNode& raw,std::size_t nodeIndex,
     const auto normalIndices=mesh.skinned?std::move(raw.processedSkinNormals):
         animated?processAnimVertices(raw,mesh,job):processVertices(raw,mesh,job);
     // Dangly's PostProcess shares the no-face exit after ProcessVerts; no
-    // vertex/index pools or MDX layout are generated (K1 0x5c7934, K2 0x6e63a4).
-    if(raw.faces.empty() && (raw.node.flags==0x21u || raw.node.flags==0x221u || mesh.dangly)) return;
+    // vertex/index pools or MDX layout are generated (K1 0x5e96cc, K2 0x6e63a4).
+    if(raw.faces.empty() && (raw.node.flags==0x21u || raw.node.flags==0x221u || mesh.dangly)) {
+        // Dangly constraints already belong to the persistent node list.
+        // Only InternalGenVertices replaces them with the welded list; the
+        // no-face exit preserves every authored row (K2 0x6e63a4/0x6e6809).
+        if(mesh.dangly) mesh.dangly->constraints=raw.constraints;
+        return;
+    }
     const auto generated=animated?generateAnimVertices(raw,mesh,normalIndices,job):
         generateVertices(raw,mesh,normalIndices,job);
-    if(raw.node.flags==0x821u) {lightsaber(raw,mesh,model.game);return;}
+    if(raw.node.flags==0x821u) {lightsaber(raw,mesh);return;}
     neighbors(raw,mesh);
     // NW's authored tangent4 pool makes CalculateTangentSpaceBasis return
     // immediately (0x457710). Do not rebuild it as a KOTOR nine-float basis.
