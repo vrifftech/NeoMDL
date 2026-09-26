@@ -65,7 +65,12 @@ ResourceResolver directoryResourceResolver(const std::filesystem::path& director
         resourceLoadJob().update(0u, 0u, "Reading model resource: " + name);
         const auto extension = modelResourceExtension(type);
         if (extension.empty()) return std::nullopt;
-        const auto stem = resourceStem(name);
+        // Resolver input is already a resource stem. Preserve its dots:
+        // an explicitly selected foo.ascii.mdl
+        // and its foo.ascii.mdx companion must not resolve as foo.mdl/foo.mdx.
+        auto stem = name;
+        const auto slash = stem.find_last_of("/\\");
+        if (slash != std::string::npos) stem.erase(0u, slash + 1u);
         if (stem.empty()) return std::nullopt;
         const auto path = uniqueCaseInsensitiveFile(root, stem + extension);
         if (!path) return std::nullopt;
