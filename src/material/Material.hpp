@@ -71,6 +71,12 @@ struct MappedTxiEntry {
     MappingStatus status{MappingStatus::NonDirective};
 };
 
+struct EngineMaterialTextureNames {
+    std::string bumpMap;
+    std::string bumpyShiny;
+    std::string environmentMap;
+};
+
 struct TxiMetadata {
     // Exact input to this mapper; the texture decoder may already have sanitized
     // the original footer/sidecar. Nothing here rewrites the caller's TXI.
@@ -78,6 +84,9 @@ struct TxiMetadata {
     TxiProperties properties;
     std::vector<MappedTxiEntry> entries;
     std::vector<neoshared::texture::TxiValidationIssue> issues;
+    // Material::Init has its own first-token parser. Keep that initialized
+    // binding state separate from the editor's complete directive values.
+    std::optional<EngineMaterialTextureNames> engineTextureNames;
 };
 
 // Limits are checked before calling the shared TXI tokenizer/validator. The
