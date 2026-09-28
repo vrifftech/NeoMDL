@@ -89,7 +89,10 @@ void meshHeader(Context& context,const Node& node,const Mesh& mesh,std::uint32_t
     out.vec2(base+236u,mesh.uvAnimation.direction);
     out.f32(base+244u,mesh.uvAnimation.jitter);
     out.f32(base+248u,mesh.uvAnimation.jitterSpeed);
-    out.u32(base+252u,mesh.mdxRowSize==0u?0xffffffffu:mesh.mdxRowSize);
+    // Saber PostProcess clears the stride because its vertices live in
+    // separate MDL streams. Retain the unbuilt-layout sentinel for other
+    // zero-row meshes (K2 InternalPostProcess 0x6e6350).
+    out.u32(base+252u,mesh.mdxRowSize==0u&&!node.lightsaber?0xffffffffu:mesh.mdxRowSize);
     out.u32(base+256u,mesh.mdxBitmap);
     out.u32(base+260u,mesh.mdxRowSize==0u?0xffffffffu:0u);
     out.u32(base+264u,mesh.mdxNormalOffset);

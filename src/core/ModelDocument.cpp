@@ -287,18 +287,42 @@ bool ModelDocument::openResource(neoshared::ResourceDocument resource,
     rebuildMaterials();
     const auto auxiliary=auxiliaryTextures();
     if(!auxiliary.empty()) { loadTexturesFromResolver(resolver,auxiliary); rebuildMaterials(); }
-    const auto finalizeAscii=[&](model::Model& model,const std::vector<material::Material>& materials) {
+    // Compile against a fresh engine texture cache. InitializeTextures creates
+    // pending texture references and reads sidecar TXI before any image load;
+    // HasBumpMap accepts a named pending bump without inspecting its pixels or
+    // bump kind. The decoded materials above remain the runtime render view.
+    std::unordered_map<std::string,bool> compilerBumpMaps;
+    const auto compilerHasBumpMap=[&](const std::string& primary,model::GameVersion game) {
+        const auto key=material::textureResourceKey(primary);
+        if(key.empty() || !resolver)return false;
+        const auto cacheKey=std::to_string(static_cast<int>(game))+":"+key;
+        const auto found=compilerBumpMaps.find(cacheKey);
+        if(found!=compilerBumpMaps.end())return found->second;
+        bool hasBump=false;
+        try {
+            job.check();
+            if(const auto sidecar=resolver(key,kTxiResourceType)) {
+                const auto txi=material::parseAsciiMaterialTxi(bytesToText(sidecar->bytes),
+                    game==model::GameVersion::Kotor1);
+                hasBump=txi.engineTextureNames &&
+                    !material::textureResourceKey(txi.engineTextureNames->bumpMap).empty();
+            }
+        } catch(const neoshared::bif::JobCancelled&) {
+            throw;
+        } catch(const std::exception& error) {
+            messages_.push_back("Unable to read compiler texture metadata "+key+": "+error.what());
+        }
+        compilerBumpMaps.emplace(cacheKey,hasBump);
+        return hasBump;
+    };
+    const auto finalizeAscii=[&](model::Model& model) {
         if(!model.asciiBuilt||model.asciiMaterialsFinalized)return;
-        const material::TextureMetadataLookup lookup=[this](const std::string& key) {
-            return textureMetadata(key);
-        };
         for(auto& allocation:model.asciiMdxAllocations) {
 
 
 
 
-            if(allocation.materialTangents && material::engineMaterialHasBumpMap(
-                    material::makeMaterial(allocation.primaryTexture,{},lookup))) {
+            if(allocation.materialTangents && compilerHasBumpMap(allocation.primaryTexture,model.game)) {
                 // Cached reference assets copy the Model while retaining its
                 // source snapshots. Finalize this copy's deferred producer
                 // once, without changing another copy's completed stride.
@@ -310,7 +334,7 @@ bool ModelDocument::openResource(neoshared::ResourceDocument resource,
         }
         for(std::size_t i=0;i<model.meshes.size();++i) {
             auto& mesh=model.meshes[i];
-            if(mesh.asciiTangentSource&&material::engineMaterialHasBumpMap(materials[i]))
+            if(mesh.asciiTangentSource&&compilerHasBumpMap(mesh.texture0,model.game))
                 model::rebuildAsciiTangentBasis(mesh,job);
             if(mesh.asciiMdxAllocation) {
                 auto& allocation=model.asciiMdxAllocations[*mesh.asciiMdxAllocation];
@@ -327,9 +351,9 @@ bool ModelDocument::openResource(neoshared::ResourceDocument resource,
         model::initializeProceduralUvPools(model);
         model.asciiMaterialsFinalized=true;
     };
-    finalizeAscii(model_,materials_);
+    finalizeAscii(model_);
     for(std::size_t i=0;i<references_.size();++i)
-        finalizeAscii(references_[i].model,referenceMaterials_[i]);
+        finalizeAscii(references_[i].model);
     instantiateParts();
     job.update(1u, 1u, "Loaded model: " + stem);
     open_ = true;
