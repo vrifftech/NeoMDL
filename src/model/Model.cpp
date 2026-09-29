@@ -636,8 +636,11 @@ private:
             for (std::size_t index = 0u; index < textures->second; ++index) {
                 const auto nameOffset=payload_->u32(textures->first + index * 4u,
                                                    "light flare texture-name offset");
-                data.textureNames.push_back(normalizedResourceName(payload_->cString(
-                    nameOffset, limits_.maximumNameLength, "light flare texture name")));
+                // ResetLight forwards the stored name verbatim to the texture
+                // lookup. Keep NULL/NONE spellings for engine ASCII export;
+                // resource binding owns any interpretation of those names.
+                data.textureNames.push_back(payload_->cString(
+                    nameOffset, limits_.maximumNameLength, "light flare texture name"));
             }
         }
         const auto sizes = readArrayDefinition(
@@ -713,18 +716,17 @@ private:
         data.updateMode = payload_->fixedString(extension + 32u, 32u, "emitter update mode");
         data.renderMode = payload_->fixedString(extension + 64u, 32u, "emitter render mode");
         data.blendMode = payload_->fixedString(extension + 96u, 32u, "emitter blend mode");
-        data.texture = normalizedResourceName(
-            payload_->fixedString(extension + 128u, 32u, "emitter texture"));
-        data.chunkName = normalizedResourceName(
-            payload_->fixedString(extension + 160u, 16u, "emitter chunk name"));
+        // ResetEmitter retains these fixed strings. In particular, a named
+        // chunk remains nonempty even when its resource cannot be resolved.
+        data.texture = payload_->fixedString(extension + 128u, 32u, "emitter texture");
+        data.chunkName = payload_->fixedString(extension + 160u, 16u, "emitter chunk name");
         data.twoSidedTexture = payload_->i32(extension + 176u,
                                              "emitter two-sided texture flag");
         data.loop = payload_->i32(extension + 180u, "emitter loop flag");
         data.renderOrder = payload_->u16(extension + 184u, "emitter render order");
         data.frameBlending = payload_->u8(extension + 186u,
                                           "emitter frame-blending flag") != 0u;
-        data.depthTexture = normalizedResourceName(
-            payload_->fixedString(extension + 187u, 32u, "emitter depth texture"));
+        data.depthTexture = payload_->fixedString(extension + 187u, 32u, "emitter depth texture");
         if (model_.game == GameVersion::Kotor1) {
             model_.warnings.push_back("Emitter node " + model_.nodes[nodeIndex].name +
                 " uses the packed-verified 224-byte K1 extension; mode-specific runtime parity is reported by the renderer.");

@@ -99,7 +99,12 @@ ResourceResolver overlayResolver(ResourceResolver first, ResourceResolver second
 }
 
 std::string hierarchyResref(const std::string& name) {
-    auto result = resourceStem(name);
+    // Authored model dependencies are already ResRefs, not filenames.
+    // ReadSync(char*) forwards the complete name independently of its .mdl
+    // and .mdx resource types in all four references. Dots distinguish models.
+    auto result = name;
+    const auto slash = result.find_last_of("/\\");
+    if (slash != std::string::npos) result.erase(0u, slash + 1u);
     const auto folded = lower(result);
     // Both engine sentinel spellings are accepted by the resource adapter.
     // NONE remains a valid asset name in both games.
@@ -114,6 +119,46 @@ std::string bytesToText(const std::vector<std::uint8_t>& bytes) {
 struct ReferenceAsset {
     neomdl::model::Model model;
     std::vector<neomdl::model::Model> supermodels;
+};
+
+// FindModel searches live registered models before requesting a resource.
+// Retained superclass chains are the live registrations known at document
+// handoff. Preserve their declared names and remaining inheritance suffix;
+// a resource alias need not equal the registered Model name. This deliberately
+// does not reconstruct unrelated registrations or guess engine midpoint
+// selection when more than one retained model has the same name.
+class RetainedReferenceAssets {
+public:
+    void remember(const std::vector<neomdl::model::Model>& chain,
+                  std::shared_ptr<const ReferenceAsset> owner={}) {
+        for (std::size_t index=0;index<chain.size();++index) {
+            const auto key=lower(chain[index].name);
+            if (key.empty()) continue;
+            const auto found=assets_.find(key);
+            if (found!=assets_.end()) { found->second={}; continue; }
+            assets_.emplace(key,Candidate{&chain,index,owner});
+        }
+    }
+    std::shared_ptr<ReferenceAsset> find(const std::string& key) const {
+        const auto found=assets_.find(key);
+        if (found==assets_.end() || !found->second.chain) return {};
+        const auto& candidate=found->second;
+        const auto& chain=*candidate.chain;
+        auto asset=std::make_shared<ReferenceAsset>();
+        asset->model=chain[candidate.index];
+        asset->supermodels.assign(chain.begin()+candidate.index+1u,chain.end());
+        return asset;
+    }
+private:
+    struct Candidate {
+        const std::vector<neomdl::model::Model>* chain{};
+        std::size_t index{};
+        // The document's root chain stays stable throughout either loader.
+        // Newly decoded reference chains retain their owner even if a later
+        // cache insertion throws; no candidate borrows a temporary asset.
+        std::shared_ptr<const ReferenceAsset> owner;
+    };
+    std::unordered_map<std::string,Candidate> assets_;
 };
 
 template <typename Visitor>
@@ -403,7 +448,7 @@ void ModelDocument::instantiateParts() {
             auto instance=templates[source];
             instance.parentInstance=parent;instance.parentNodeIndex=child.second;
             instance.model=model::instantiateModelParts(templateSources[source],resourceLoadJob());
-            instance.pose=model::bindPose(instance.model,resourceLoadJob());
+            instance.pose=model::constructedBindPose(instance.model,resourceLoadJob());
             std::vector<material::Material> materials;
             materials.reserve(instance.model.partSourceMeshes.size());
             for(const auto mesh:instance.model.partSourceMeshes)
@@ -534,7 +579,7 @@ std::shared_ptr<ModelDocument> ModelDocument::visualView(
                 lower(mesh.texture0)!="p_baodur_arm"))
                 mesh.texture0=resourceKey(attachment.texture);
         }
-        root.pose=model::bindPose(root.model, resourceLoadJob());
+        root.pose=model::constructedBindPose(root.model, resourceLoadJob());
         const auto base=result->references_.size();roots.push_back(base);result->references_.push_back(std::move(root));
         for(auto ref:document.references_) {
             resourceLoadJob().check();
@@ -757,7 +802,7 @@ void ModelDocument::loadSupermodelsFromDirectory(
     const std::filesystem::path& directory, const std::string& initialResref) {
     constexpr std::size_t maximumSupermodels = 64u;
     std::unordered_set<std::string> visited;
-    if (!initialResref.empty()) visited.emplace(lower(resourceStem(initialResref)));
+    if (!initialResref.empty()) visited.emplace(lower(hierarchyResref(initialResref)));
 
     const neomdl::model::Model* current = &model_;
     while (true) {
@@ -805,7 +850,7 @@ void ModelDocument::loadSupermodelsFromResolver(
 
     constexpr std::size_t maximumSupermodels = 64u;
     std::unordered_set<std::string> visited;
-    if (!initialResref.empty()) visited.emplace(lower(resourceStem(initialResref)));
+    if (!initialResref.empty()) visited.emplace(lower(hierarchyResref(initialResref)));
     const neomdl::model::Model* current = &model_;
     while (true) {
         resourceLoadJob().check();
@@ -857,13 +902,19 @@ void ModelDocument::loadReferencesFromDirectory(
     constexpr std::size_t maximumReferenceInstances = 512u;
     constexpr std::size_t maximumSupermodels = 64u;
     std::unordered_map<std::string, std::shared_ptr<ReferenceAsset>> cache;
+    RetainedReferenceAssets retained;
+    retained.remember(supermodels_);
 
     const auto load = [&](const std::string& resref)
             -> std::shared_ptr<const ReferenceAsset> {
         resourceLoadJob().update(0u, 0u, "Loading reference model: " + resref);
-        const auto key = lower(resourceStem(resref));
+        const auto key = lower(hierarchyResref(resref));
         const auto cached = cache.find(key);
         if (cached != cache.end()) return cached->second;
+        if (auto registered=retained.find(key)) {
+            cache.emplace(key,registered);
+            return registered;
+        }
         const auto mdlPath = uniqueCaseInsensitiveFile(directory, resref + ".mdl");
         if (!mdlPath) return {};
         try {
@@ -901,6 +952,7 @@ void ModelDocument::loadReferencesFromDirectory(
                     "Reference " + resref + " supermodel " + next + ": ");
                 current = &asset->supermodels.back();
             }
+            retained.remember(asset->supermodels,asset);
             cache.emplace(key, asset);
             return asset;
         } catch (const neoshared::bif::JobCancelled&) {
@@ -951,7 +1003,7 @@ void ModelDocument::loadReferencesFromDirectory(
             references_.push_back(ReferenceInstance{
                 parentInstance, nodeIndex, node.name, resref,
                 node.reference->reattachable != 0, asset->model, asset->supermodels,
-                neomdl::model::bindPose(asset->model, resourceLoadJob()),false,VisualAttachmentKind::None,0u,1.0f,false,{},{}});
+                neomdl::model::constructedBindPose(asset->model, resourceLoadJob()),false,VisualAttachmentKind::None,0u,1.0f,false,{},{}});
             auto nextChain = chain;
             nextChain.emplace(key);
             // NewCAurObject recursively creates the referenced object's owned
@@ -961,28 +1013,21 @@ void ModelDocument::loadReferencesFromDirectory(
     };
 
     std::unordered_set<std::string> initial;
-    const auto rootKey = lower(resourceStem(rootResref));
+    const auto rootKey = lower(hierarchyResref(rootResref));
     if (!rootKey.empty()) initial.emplace(rootKey);
     visit(model_, std::nullopt, 0u, std::move(initial));
 }
 
 void ModelDocument::loadReferencesFromResolver(
     const ResourceResolver& resolver, const std::string& rootResref) {
-    bool hasReferences = false;
-    visitModelNodesDepthFirst(model_, [&](std::size_t, const neomdl::model::Node& node) {
-        if (node.reference) hasReferences = true;
-    });
-    if (!resolver) {
-        if (hasReferences)
-            messages_.push_back("No host resource resolver is available for referenced models.");
-        return;
-    }
-
     constexpr std::size_t maximumReferenceDepth = 64u;
     constexpr std::size_t maximumReferenceInstances = 512u;
     constexpr std::size_t maximumSupermodels = 64u;
     std::unordered_map<std::string, std::shared_ptr<ReferenceAsset>> cache;
+    RetainedReferenceAssets retained;
+    retained.remember(supermodels_);
     std::unordered_set<std::string> missing;
+    bool warnedMissingResolver=false;
 
     const auto decode = [&](const std::string& resref,
                             const std::string& diagnosticPrefix)
@@ -1015,10 +1060,21 @@ void ModelDocument::loadReferencesFromResolver(
     const auto load = [&](const std::string& resref)
             -> std::shared_ptr<const ReferenceAsset> {
         resourceLoadJob().update(0u, 0u, "Loading reference model: " + resref);
-        const auto key = lower(resourceStem(resref));
+        const auto key = lower(hierarchyResref(resref));
         const auto cached = cache.find(key);
         if (cached != cache.end()) return cached->second;
+        if (auto registered=retained.find(key)) {
+            cache.emplace(key,registered);
+            return registered;
+        }
         if (missing.find(key) != missing.end()) return {};
+        if (!resolver) {
+            if (!warnedMissingResolver)
+                messages_.push_back("No host resource resolver is available for referenced models.");
+            warnedMissingResolver=true;
+            missing.emplace(key);
+            return {};
+        }
         const auto decoded = decode(resref, "Reference " + resref + ": ");
         if (!decoded) {
             missing.emplace(key);
@@ -1059,6 +1115,7 @@ void ModelDocument::loadReferencesFromResolver(
                 "Reference " + resref + " supermodel " + next + ": ");
             current = &asset->supermodels.back();
         }
+        retained.remember(asset->supermodels,asset);
         cache.emplace(key, asset);
         return asset;
     };
@@ -1103,7 +1160,7 @@ void ModelDocument::loadReferencesFromResolver(
             references_.push_back(ReferenceInstance{
                 parentInstance, nodeIndex, node.name, resref,
                 node.reference->reattachable != 0, asset->model, asset->supermodels,
-                neomdl::model::bindPose(asset->model, resourceLoadJob()),false,VisualAttachmentKind::None,0u,1.0f,false,{},{}});
+                neomdl::model::constructedBindPose(asset->model, resourceLoadJob()),false,VisualAttachmentKind::None,0u,1.0f,false,{},{}});
             auto nextChain = chain;
             nextChain.emplace(key);
             visit(asset->model, instanceIndex, depth + 1u, std::move(nextChain));
@@ -1111,13 +1168,13 @@ void ModelDocument::loadReferencesFromResolver(
     };
 
     std::unordered_set<std::string> initial;
-    const auto rootKey = lower(resourceStem(rootResref));
+    const auto rootKey = lower(hierarchyResref(rootResref));
     if (!rootKey.empty()) initial.emplace(rootKey);
     visit(model_, std::nullopt, 0u, std::move(initial));
 }
 
 const ModelDocument* ModelDocument::chunkModel(const std::string& resref) const {
-    const auto found=chunkModels_.find(lower(resourceStem(resref)));
+    const auto found=chunkModels_.find(lower(hierarchyResref(resref)));
     return found==chunkModels_.end()
         ? (resourceParent_ ? resourceParent_->chunkModel(resref) : nullptr) : found->second.get();
 }
@@ -1128,7 +1185,7 @@ void ModelDocument::loadChunkModelsFromDirectory(const std::filesystem::path& di
         ->std::optional<neoshared::ResourceDocument> {
         const auto extension=modelResourceExtension(type);
         if(extension.empty()) return {};
-        const auto path=uniqueCaseInsensitiveFile(root,resourceStem(name)+extension);
+        const auto path=uniqueCaseInsensitiveFile(root,hierarchyResref(name)+extension);
         if(!path) return {};
         neoshared::ResourceDocument resource;resource.fileName=name+extension;resource.type=type;
         resource.identity=resourceFileIdentity(*path,true);resource.sourceDescription=neoshared::genericPathToUtf8(*path);

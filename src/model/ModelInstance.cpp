@@ -61,7 +61,7 @@ Model instantiateModelParts(std::shared_ptr<const Model> sourceModel,
     for(std::size_t sourceIndex=0;sourceIndex<source.nodes.size();++sourceIndex)
         if(!source.nodes[sourceIndex].parent) create(sourceIndex,std::nullopt);
 
-    const auto pose=bindPose(result,job);
+    const auto pose=constructedBindPose(result,job);
     result.worldTransforms=pose.worldTransforms;
     result.bounds=pose.bounds;
     return result;
