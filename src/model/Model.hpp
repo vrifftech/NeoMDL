@@ -612,6 +612,8 @@ struct SkinSeamStatistics {
     std::size_t adjustedVertices{};
 };
 
+struct AsciiLoadSession;
+
 struct Model {
     GameVersion game{GameVersion::Kotor1};
     bool asciiBuilt{};
@@ -639,6 +641,11 @@ struct Model {
     // empty retained chain means the ASCII lookup resolved no superclass.
     // Entries are flat snapshots and do not own nested chain handles.
     std::shared_ptr<const std::vector<Model>> asciiSupermodels;
+    // Outward snapshots can retain their live load registry. Registered
+    // models themselves never own this handle, so superclass/registry edges
+    // cannot form shared_ptr cycles. IDs identify registrations, not names.
+    std::shared_ptr<AsciiLoadSession> asciiLoadSession;
+    std::uint64_t asciiRegistrationId{};
     std::uint16_t classification{};
     std::uint8_t subclassification{};
     bool fog{};

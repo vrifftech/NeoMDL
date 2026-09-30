@@ -902,12 +902,37 @@ void ModelDocument::loadReferencesFromDirectory(
     constexpr std::size_t maximumReferenceInstances = 512u;
     constexpr std::size_t maximumSupermodels = 64u;
     std::unordered_map<std::string, std::shared_ptr<ReferenceAsset>> cache;
+    std::unordered_map<std::uint64_t, std::shared_ptr<ReferenceAsset>> registeredCache;
+    model::retainAsciiModelInstance(model_);
     RetainedReferenceAssets retained;
     retained.remember(supermodels_);
 
     const auto load = [&](const std::string& resref)
             -> std::shared_ptr<const ReferenceAsset> {
         resourceLoadJob().update(0u, 0u, "Loading reference model: " + resref);
+        if (model_.asciiLoadSession) {
+            try {
+                // FindModel searches the current registry on every occurrence.
+                // A nested read can change which equal-name midpoint is selected.
+                auto selected=model::resolveAsciiModelInstance(
+                    model_,resref,resourceLoadJob(),asciiResources_);
+                if (!selected) return {};
+                const auto found=registeredCache.find(selected->asciiRegistrationId);
+                if (found!=registeredCache.end()) return found->second;
+                auto asset=std::make_shared<ReferenceAsset>();
+                asset->model=std::move(*selected);
+                appendParserWarnings(asset->model,"Reference "+resref+": ");
+                appendLoadedSupermodels(asset->model,asset->supermodels,
+                    "Reference "+resref+" supermodel ");
+                registeredCache.emplace(asset->model.asciiRegistrationId,asset);
+                return asset;
+            } catch (const neoshared::bif::JobCancelled&) {
+                throw;
+            } catch (const std::exception& error) {
+                messages_.push_back("Unable to load reference model " + resref + ": " + error.what());
+                return {};
+            }
+        }
         const auto key = lower(hierarchyResref(resref));
         const auto cached = cache.find(key);
         if (cached != cache.end()) return cached->second;
@@ -1024,6 +1049,8 @@ void ModelDocument::loadReferencesFromResolver(
     constexpr std::size_t maximumReferenceInstances = 512u;
     constexpr std::size_t maximumSupermodels = 64u;
     std::unordered_map<std::string, std::shared_ptr<ReferenceAsset>> cache;
+    std::unordered_map<std::uint64_t, std::shared_ptr<ReferenceAsset>> registeredCache;
+    model::retainAsciiModelInstance(model_);
     RetainedReferenceAssets retained;
     retained.remember(supermodels_);
     std::unordered_set<std::string> missing;
@@ -1060,6 +1087,27 @@ void ModelDocument::loadReferencesFromResolver(
     const auto load = [&](const std::string& resref)
             -> std::shared_ptr<const ReferenceAsset> {
         resourceLoadJob().update(0u, 0u, "Loading reference model: " + resref);
+        if (model_.asciiLoadSession) {
+            try {
+                auto selected=model::resolveAsciiModelInstance(
+                    model_,resref,resourceLoadJob(),asciiResources_);
+                if (!selected) return {};
+                const auto found=registeredCache.find(selected->asciiRegistrationId);
+                if (found!=registeredCache.end()) return found->second;
+                auto asset=std::make_shared<ReferenceAsset>();
+                asset->model=std::move(*selected);
+                appendParserWarnings(asset->model,"Reference "+resref+": ");
+                appendLoadedSupermodels(asset->model,asset->supermodels,
+                    "Reference "+resref+" supermodel ");
+                registeredCache.emplace(asset->model.asciiRegistrationId,asset);
+                return asset;
+            } catch (const neoshared::bif::JobCancelled&) {
+                throw;
+            } catch (const std::exception& error) {
+                messages_.push_back("Unable to load reference model " + resref + ": " + error.what());
+                return {};
+            }
+        }
         const auto key = lower(hierarchyResref(resref));
         const auto cached = cache.find(key);
         if (cached != cache.end()) return cached->second;

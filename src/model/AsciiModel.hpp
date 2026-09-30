@@ -18,6 +18,14 @@ Model decodeAsciiModelBytes(const std::vector<std::uint8_t>& bytes,
                             const std::string& sourceLabel = {},
                             const neoshared::bif::JobControl& job = {},
                             const AsciiResourceResolver& resources = {});
+// Hold the primary model before constructing its reference objects. The
+// document calls this once; each successful reference lookup holds its own
+// selected registration even when earlier occurrences used the same name.
+void retainAsciiModelInstance(const Model& model);
+std::optional<Model> resolveAsciiModelInstance(const Model& owner,
+                            const std::string& name,
+                            const neoshared::bif::JobControl& job = {},
+                            const AsciiResourceResolver& resources = {});
 // Synchronize the geometry built by the current beginmodelgeom block. The
 // caller has already seeded that block's node counter from the superclass.
 void synchronizeAsciiModelTree(Model& model, const Model& supermodel);

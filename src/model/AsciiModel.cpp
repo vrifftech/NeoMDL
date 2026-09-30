@@ -473,14 +473,17 @@ void loadTree(Reader& reader, Model& model, std::vector<RawNode>& nodes,
 namespace neomdl::model {
 namespace {
 
-struct AsciiLoadContext;
+void finalizeAsciiInstance(Model& model, std::vector<ascii::RawNode>& modelNodes,
+                           const neoshared::bif::JobControl& job);
 std::shared_ptr<Model> decodeAsciiModelInContext(
     const std::vector<std::uint8_t>& bytes, GameVersion game,
     const std::string& sourceLabel, const neoshared::bif::JobControl& job,
     const AsciiResourceResolver& resources,
-    AsciiLoadContext& context);
+    AsciiLoadSession& context);
 
-struct AsciiLoadContext {
+} // namespace
+
+struct AsciiLoadSession {
     // FindModel searches registered models before it reads a resource.
     // newmodel replaces the current-model pointer without releasing its old
     // registered object (K2 0x7adb30..0x7adb6b). Explicit superclass references
@@ -491,8 +494,10 @@ struct AsciiLoadContext {
         std::shared_ptr<Model> model;
         std::uint32_t references{};
         Model* superclass{};
+        std::optional<std::vector<ascii::RawNode>> pendingNodes;
     };
     std::vector<Registration> models;
+    std::uint64_t nextRegistrationId{1u};
     // Preserve engine temporary UV-index lists across nodes and nested reads
     // in this load. No prior external process-global contents are assumed.
     std::array<std::vector<Vec3>,3> textureIndices;
@@ -511,7 +516,29 @@ struct AsciiLoadContext {
             [](const std::string& value,const Registration& candidate) {
                 return value<ascii::lower(candidate.model->name);
             });
-        models.insert(position,{model,model->engineReferenceCount,superclass});
+        model->asciiRegistrationId=nextRegistrationId++;
+        model->asciiLoadSession.reset();
+        models.insert(position,{model,model->engineReferenceCount,superclass,std::nullopt});
+    }
+
+    void savePending(Model* model,std::vector<ascii::RawNode>& nodes) {
+        model->declaredAnimationCount=static_cast<std::uint32_t>(model->animations.size());
+        registration(model)->pendingNodes=std::move(nodes);
+    }
+
+    void finalize(Model* model,const neoshared::bif::JobControl& job) {
+        auto& pending=registration(model)->pendingNodes;
+        if(!pending) return;
+        finalizeAsciiInstance(*model,*pending,job);
+        pending.reset();
+    }
+
+    void retain(std::uint64_t identity) {
+        const auto entry=std::find_if(models.begin(),models.end(),
+            [identity](const Registration& value) {
+                return value.model->asciiRegistrationId==identity;
+            });
+        if(entry!=models.end()) ++entry->references;
     }
 
     void release(Model* model) {
@@ -560,6 +587,7 @@ struct AsciiLoadContext {
             // The outer chain supplies ownership without retaining registry
             // edges or creating shared_ptr cycles between models.
             chain->back().asciiSupermodels.reset();
+            chain->back().asciiLoadSession.reset();
         }
         model.asciiSupermodels=std::move(chain);
     }
@@ -594,11 +622,13 @@ struct AsciiLoadContext {
     }
 };
 
+namespace {
+
 std::shared_ptr<Model> decodeAsciiModelInContext(const std::vector<std::uint8_t>& bytes, GameVersion game,
                             const std::string& sourceLabel,
                             const neoshared::bif::JobControl& job,
                             const AsciiResourceResolver& resources,
-                            AsciiLoadContext& context) {
+                            AsciiLoadSession& context) {
     using namespace ascii;
     Reader reader(bytes,game,sourceLabel,job,resources);
     std::shared_ptr<Model> current;
@@ -615,6 +645,7 @@ std::shared_ptr<Model> decodeAsciiModelInContext(const std::vector<std::uint8_t>
         const auto& command=line.tokens.front();
         // FuncInterp's console-command comparison is case-sensitive.
         if(command=="newmodel") {
+            if(current) context.savePending(current.get(),modelNodes);
             superclass.reset();
             current=std::make_shared<Model>();
             current->game=game;
@@ -712,7 +743,15 @@ std::shared_ptr<Model> decodeAsciiModelInContext(const std::vector<std::uint8_t>
         // commands have no model effect; no extra authoring dialect is added.
     }
     if(!current) reader.fail(line,"The input did not construct a model");
-    auto& model=*current;
+    context.savePending(current.get(),modelNodes);
+    context.finalize(current.get(),job);
+    job.update(bytes.size(),bytes.size(),"Decoded ASCII model: "+sourceLabel);
+    return current;
+}
+
+void finalizeAsciiInstance(Model& model,std::vector<ascii::RawNode>& modelNodes,
+                           const neoshared::bif::JobControl& job) {
+    using namespace ascii;
     model.declaredAnimationCount=static_cast<std::uint32_t>(model.animations.size());
     // CreateInstanceTree calls the final root's Part::PostProcess. Skin
     // overrides it without traversing children; discarded roots and skin
@@ -744,8 +783,6 @@ std::shared_ptr<Model> decodeAsciiModelInContext(const std::vector<std::uint8_t>
     const auto pose=bindPose(model,job);
     model.worldTransforms=pose.worldTransforms;
     model.bounds=pose.bounds;
-    job.update(bytes.size(),bytes.size(),"Decoded ASCII model: "+sourceLabel);
-    return current;
 }
 
 } // namespace
@@ -754,10 +791,37 @@ Model decodeAsciiModelBytes(const std::vector<std::uint8_t>& bytes, GameVersion 
                             const std::string& sourceLabel,
                             const neoshared::bif::JobControl& job,
                             const AsciiResourceResolver& resources) {
-    AsciiLoadContext context;
-    auto model=decodeAsciiModelInContext(bytes,game,sourceLabel,job,resources,context);
-    context.retainSuperclasses(*model);
-    return std::move(*model);
+    auto context=std::make_shared<AsciiLoadSession>();
+    auto model=decodeAsciiModelInContext(bytes,game,sourceLabel,job,resources,*context);
+    context->retainSuperclasses(*model);
+    if(std::none_of(model->nodes.begin(),model->nodes.end(),
+                    [](const Node& node) { return node.reference.has_value(); }))
+        return std::move(*model);
+    Model result=*model;
+    result.asciiLoadSession=std::move(context);
+    return result;
+}
+
+void retainAsciiModelInstance(const Model& model) {
+    if(model.asciiLoadSession)
+        model.asciiLoadSession->retain(model.asciiRegistrationId);
+}
+
+std::optional<Model> resolveAsciiModelInstance(const Model& owner,const std::string& name,
+                            const neoshared::bif::JobControl& job,
+                            const AsciiResourceResolver& resources) {
+    const auto& context=owner.asciiLoadSession;
+    if(!context) return std::nullopt;
+    // NewCAurObject always searches the current full sorted registry before
+    // AddRef. Nested loads can change the midpoint selected for equal names.
+    const auto model=context->find(name,owner.game,job,resources);
+    if(!model) return std::nullopt;
+    context->retain(model->asciiRegistrationId);
+    context->finalize(model.get(),job);
+    context->retainSuperclasses(*model);
+    Model result=*model;
+    result.asciiLoadSession=context;
+    return result;
 }
 
 } // namespace neomdl::model
