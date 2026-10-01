@@ -162,20 +162,23 @@ private:
 };
 
 template <typename Visitor>
-void visitModelNodesDepthFirst(const neomdl::model::Model& model, Visitor&& visitor) {
-    std::vector<bool> visited(model.nodes.size(), false);
+void visitModelPartOccurrences(const neomdl::model::Model& model, Visitor&& visitor) {
+    std::vector<bool> active(model.nodes.size(), false);
+    std::size_t partIndex{};
     std::function<void(std::size_t)> walk = [&](std::size_t index) {
         resourceLoadJob().check();
-        if (index >= model.nodes.size() || visited[index]) return;
-        visited[index] = true;
-        visitor(index, model.nodes[index]);
+        if (index >= model.nodes.size() || active[index])
+            throw model::ModelError("Invalid reference Part tree");
+        active[index] = true;
+        // CreateReferenceObjects visits every live Part, including repeated
+        // source nodes. Use the same root/DFS occurrence order as
+        // instantiateModelParts; a nested lookup can change a later choice.
+        visitor(partIndex++, model.nodes[index]);
         for (const auto child : model.nodes[index].children) walk(child);
+        active[index] = false;
     };
     for (std::size_t index = 0u; index < model.nodes.size(); ++index)
         if (!model.nodes[index].parent) walk(index);
-    // Malformed or disconnected records still participate in the runtime
-    // traversal once, after the declared roots.
-    for (std::size_t index = 0u; index < model.nodes.size(); ++index) walk(index);
 }
 
 } // namespace
@@ -416,50 +419,22 @@ void ModelDocument::instantiateParts() {
     for(const auto source:model_.partSourceMeshes)
         materials_.push_back(sourceMaterials[source]);
 
-    // Resource discovery decoded each MdlNode reference once. Engine
-    // CreateReferenceObjects instead visits each live Part and creates that
-    // reference's complete owned subtree before resuming its owner traversal.
-    // Reuse the finalized assets/materials; no resource read or model producer
-    // runs again when the same source node occurs beneath another parent.
-    auto templates=std::move(references_);
-    const auto templateMaterials=std::move(referenceMaterials_);
-    std::vector<std::shared_ptr<const model::Model>> templateSources;
-    templateSources.reserve(templates.size());
-    for(auto& instance:templates)
-        templateSources.push_back(std::make_shared<const model::Model>(std::move(instance.model)));
-    references_.clear();referenceMaterials_.clear();
-    std::function<void(const model::Model&,std::optional<std::size_t>,
-                       std::optional<std::size_t>)> append;
-    append=[&](const model::Model& owner,std::optional<std::size_t> sourceParent,
-               std::optional<std::size_t> parent) {
-        std::vector<std::pair<std::size_t,std::size_t>> children;
-        for(std::size_t node=0;node<owner.nodes.size();++node) {
-            resourceLoadJob().check();
-            if(!owner.nodes[node].reference)continue;
-            for(std::size_t source=0;source<templates.size();++source)
-                if(templates[source].parentInstance==sourceParent &&
-                   templates[source].parentNodeIndex==owner.partSourceNodes[node])
-                    children.emplace_back(source,node);
-        }
-        // Capture the child list before appending: references_ growth may move
-        // the ReferenceInstance that owns the supplied runtime Model.
-        for(const auto& child:children) {
-            const auto source=child.first;
-            auto instance=templates[source];
-            instance.parentInstance=parent;instance.parentNodeIndex=child.second;
-            instance.model=model::instantiateModelParts(templateSources[source],resourceLoadJob());
-            instance.pose=model::constructedBindPose(instance.model,resourceLoadJob());
-            std::vector<material::Material> materials;
-            materials.reserve(instance.model.partSourceMeshes.size());
-            for(const auto mesh:instance.model.partSourceMeshes)
-                materials.push_back(templateMaterials[source][mesh]);
-            const auto index=references_.size();
-            references_.push_back(std::move(instance));
-            referenceMaterials_.push_back(std::move(materials));
-            append(references_[index].model,source,index);
-        }
-    };
-    append(model_,std::nullopt,std::nullopt);
+    // Discovery already selected one asset for each reference Part, in
+    // engine creation order. Expanding shared MdlNodes here would replay an
+    // earlier selection after nested resource reads changed the registry.
+    // Keep each selected source graph intact for model-owned producers/export.
+    for(std::size_t index=0;index<references_.size();++index) {
+        auto& instance=references_[index];
+        auto source=std::make_shared<const model::Model>(std::move(instance.model));
+        instance.model=model::instantiateModelParts(std::move(source),resourceLoadJob());
+        instance.pose=model::constructedBindPose(instance.model,resourceLoadJob());
+        auto sourceMaterials=std::move(referenceMaterials_[index]);
+        auto& materials=referenceMaterials_[index];
+        materials.clear();
+        materials.reserve(instance.model.partSourceMeshes.size());
+        for(const auto mesh:instance.model.partSourceMeshes)
+            materials.push_back(sourceMaterials[mesh]);
+    }
 }
 
 std::shared_ptr<ModelDocument> ModelDocument::sceneView(
@@ -1000,7 +975,7 @@ void ModelDocument::loadReferencesFromDirectory(
             messages_.push_back("Reference hierarchy exceeded the 64-model safety limit.");
             return;
         }
-        visitModelNodesDepthFirst(owner, [&](std::size_t nodeIndex,
+        visitModelPartOccurrences(owner, [&](std::size_t partIndex,
                                              const neomdl::model::Node& node) {
             if (exhausted || !node.reference) return;
             const auto resref = hierarchyResref(node.reference->model);
@@ -1026,7 +1001,7 @@ void ModelDocument::loadReferencesFromDirectory(
             }
             const auto instanceIndex = references_.size();
             references_.push_back(ReferenceInstance{
-                parentInstance, nodeIndex, node.name, resref,
+                parentInstance, partIndex, node.name, resref,
                 node.reference->reattachable != 0, asset->model, asset->supermodels,
                 neomdl::model::constructedBindPose(asset->model, resourceLoadJob()),false,VisualAttachmentKind::None,0u,1.0f,false,{},{}});
             auto nextChain = chain;
@@ -1180,7 +1155,7 @@ void ModelDocument::loadReferencesFromResolver(
             messages_.push_back("Reference hierarchy exceeded the 64-model safety limit.");
             return;
         }
-        visitModelNodesDepthFirst(owner, [&](std::size_t nodeIndex,
+        visitModelPartOccurrences(owner, [&](std::size_t partIndex,
                                              const neomdl::model::Node& node) {
             if (exhausted || !node.reference) return;
             const auto resref = hierarchyResref(node.reference->model);
@@ -1206,7 +1181,7 @@ void ModelDocument::loadReferencesFromResolver(
             }
             const auto instanceIndex = references_.size();
             references_.push_back(ReferenceInstance{
-                parentInstance, nodeIndex, node.name, resref,
+                parentInstance, partIndex, node.name, resref,
                 node.reference->reattachable != 0, asset->model, asset->supermodels,
                 neomdl::model::constructedBindPose(asset->model, resourceLoadJob()),false,VisualAttachmentKind::None,0u,1.0f,false,{},{}});
             auto nextChain = chain;
