@@ -318,7 +318,8 @@ struct LightsaberNodeData {
 
     // K1/K2 MdlNodeLightsaber::InternalPostProcess builds four parallel arrays.
     // positions/normals/texcoords contain the generated 176-vertex stream;
-    // originalPositions mirrors the engine's count+1 baseline position array.
+    // originalPositions retains the independent CPU baseline: count+1 rows
+    // during ASCII construction, exactly count stored rows after packed load.
     std::vector<Vec3> positions;
     std::vector<Vec3> originalPositions;
     std::vector<Vec3> normals;

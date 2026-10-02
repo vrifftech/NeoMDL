@@ -364,11 +364,19 @@ ReconstructedMesh writeMesh(Writer& out,const Model& model,const Node& node,cons
         out.line("displacement "+out.scalar(dangly.displacement));
         out.line("tightness "+out.scalar(dangly.tightness));
         out.line("period "+out.scalar(dangly.period));
-        out.line("constraints "+std::to_string(result.sourceVertices.size()));
         bool different=false;
-        for(const auto index:result.sourceVertices) {
-            out.line(out.scalar(dangly.constraints.at(index)));
-            if(dangly.restPositions) different|=!same(dangly.restPositions->at(index),vertices[index].position);
+        if(vertices.empty() && mesh.faces.empty()) {
+            // The engine no-face producer retains the authored constraint
+            // pool independently of its empty generated vertex/rest pools.
+            out.line("constraints "+std::to_string(dangly.constraints.size()));
+            for(const auto constraint:dangly.constraints)
+                out.line(out.scalar(constraint));
+        } else {
+            out.line("constraints "+std::to_string(result.sourceVertices.size()));
+            for(const auto index:result.sourceVertices) {
+                out.line(out.scalar(dangly.constraints.at(index)));
+                if(dangly.restPositions) different|=!same(dangly.restPositions->at(index),vertices[index].position);
+            }
         }
         if(different)
             out.warning("Mesh "+node.name+": compiled dangly rest positions differ from its drawing positions; the ASCII builder derives its rest pool from verts");

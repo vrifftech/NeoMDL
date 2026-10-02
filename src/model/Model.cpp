@@ -1074,77 +1074,44 @@ private:
         return offset != 0xFFFFFFFFu && offset <= rowSize && bytes <= rowSize - offset;
     }
 
-    void postProcessLightsaber(std::size_t nodeIndex, const Mesh& mesh) {
-        auto& node = model_.nodes[nodeIndex];
-        if (!node.lightsaber) return;
-        auto& lightsaber = *node.lightsaber;
-        if (!mesh.hasVertexColors || mesh.vertices.empty()) {
-            model_.warnings.push_back("Lightsaber node " + node.name +
-                " has no readable MDX selector colors; its authored source mesh was retained.");
-            return;
-        }
+    void parseLightsaber(std::size_t meshOffset, std::size_t nodeIndex,
+                         const Mesh& mesh) {
+        auto& node=model_.nodes[nodeIndex];
+        if(!node.lightsaber) return;
+        if(node.flags!=(kNodeBase|kNodeMesh|kNodeLightsaber))
+            throw ModelError(sourcePrefix(label_)+"Invalid combined lightsaber node flags");
+        auto& saber=*node.lightsaber;
+        const auto extension=meshOffset+(model_.game==GameVersion::Kotor1
+            ?kK1MeshHeaderSize:kK2MeshHeaderSize);
+        payload_->require(extension,20u,"lightsaber extension");
 
-        std::array<std::size_t, LightsaberNodeData::pieceVertices> frontSources{};
-        std::array<std::size_t, LightsaberNodeData::pieceVertices> backSources{};
-        for (std::size_t code = 0u; code < LightsaberNodeData::pieceVertices; ++code) {
-            const auto front = std::find_if(mesh.vertices.begin(), mesh.vertices.end(),
-                [code](const Vertex& vertex) { return vertex.color[0] == code; });
-            const auto back = std::find_if(mesh.vertices.begin(), mesh.vertices.end(),
-                [code](const Vertex& vertex) { return vertex.color[2] == code; });
-            if (front == mesh.vertices.end() || back == mesh.vertices.end()) {
-                model_.warnings.push_back("Lightsaber node " + node.name +
-                    " is missing red/blue selector " + std::to_string(code) +
-                    " required by MdlNodeLightsaber::InternalPostProcess; "
-                    "its authored source mesh was retained.");
-                return;
+
+
+
+        const auto count=static_cast<std::int16_t>(mesh.enginePrelightVertexCount);
+        if(count<0)
+            throw ModelError(sourcePrefix(label_)+"Invalid lightsaber signed vertex count");
+        const auto pool=[&](std::size_t field,std::size_t stride,const char* label) {
+            const auto offset=payload_->u32(extension+field,label);
+            if(count!=0) {
+                if(offset==0u || offset==0xffffffffu)
+                    throw ModelError(sourcePrefix(label_)+"Missing "+label);
+                payload_->require(offset,static_cast<std::size_t>(count)*stride,label);
             }
-            frontSources[code] = static_cast<std::size_t>(front - mesh.vertices.begin());
-            backSources[code] = static_cast<std::size_t>(back - mesh.vertices.begin());
+            return offset;
+        };
+        const auto positions=pool(0u,12u,"lightsaber positions");
+        const auto texcoords=pool(4u,8u,"lightsaber texture coordinates");
+        const auto normals=pool(8u,12u,"lightsaber normals");
+        for(std::size_t i=0;i<static_cast<std::size_t>(count);++i) {
+            saber.positions.push_back(payload_->vec3(positions+i*12u,"lightsaber position"));
+            saber.texcoords.push_back(payload_->vec2(texcoords+i*8u,"lightsaber texture coordinate"));
+            saber.normals.push_back(payload_->vec3(normals+i*12u,"lightsaber normal"));
         }
-
-        lightsaber.positions.resize(LightsaberNodeData::generatedVertexCount);
-        lightsaber.originalPositions.assign(LightsaberNodeData::generatedVertexCount + 1u, {});
-        lightsaber.normals.resize(LightsaberNodeData::generatedVertexCount);
-        lightsaber.texcoords.resize(LightsaberNodeData::generatedVertexCount);
-        const auto copySource = [&](std::size_t destination, std::size_t source) {
-            const auto& vertex = mesh.vertices[source];
-            lightsaber.positions[destination] = vertex.position;
-            lightsaber.originalPositions[destination] = vertex.position;
-            lightsaber.normals[destination] = vertex.normal;
-            lightsaber.texcoords[destination] = vertex.texcoord0;
-        };
-        const auto copyGenerated = [&](std::size_t destination, std::size_t source) {
-            lightsaber.positions[destination] = lightsaber.positions[source];
-            lightsaber.originalPositions[destination] = lightsaber.positions[source];
-            lightsaber.normals[destination] = lightsaber.normals[source];
-            lightsaber.texcoords[destination] = lightsaber.texcoords[source];
-        };
-
-        for (std::size_t code = 0u; code < LightsaberNodeData::pieceVertices; ++code)
-            copySource(LightsaberNodeData::frontPieceOffset + code, frontSources[code]);
-
-        auto destination = LightsaberNodeData::frontSegmentOffset;
-        for (std::size_t segment = 0u; segment < LightsaberNodeData::frontSegments; ++segment)
-            for (std::size_t vertex = 0u; vertex < LightsaberNodeData::segmentVertices; ++vertex)
-                copyGenerated(destination++, LightsaberNodeData::frontPieceOffset + vertex);
-
-        for (std::size_t code = 0u; code < LightsaberNodeData::pieceVertices; ++code)
-            copySource(LightsaberNodeData::backPieceOffset + code, backSources[code]);
-
-
-
-        const std::array<std::size_t, LightsaberNodeData::segmentVertices> backTemplate{{
-            model_.game == GameVersion::Kotor1 ? LightsaberNodeData::backPieceOffset
-                                              : LightsaberNodeData::frontPieceOffset,
-            LightsaberNodeData::backPieceOffset + 1u,
-            LightsaberNodeData::backPieceOffset + 2u,
-            LightsaberNodeData::backPieceOffset + 3u,
-        }};
-        destination = LightsaberNodeData::backSegmentOffset;
-        for (std::size_t segment = 0u; segment < LightsaberNodeData::backSegments; ++segment)
-            for (const auto source : backTemplate) copyGenerated(destination++, source);
-
-        lightsaber.postprocessed = destination == LightsaberNodeData::generatedVertexCount;
+        if(mesh.cpuPositions) saber.originalPositions=*mesh.cpuPositions;
+        // The scene's fixed piece/segment topology requires the full stream.
+        // Retain other bounded counts for inspection without enabling it.
+        saber.postprocessed=static_cast<std::size_t>(count)==LightsaberNodeData::generatedVertexCount;
     }
 
     void parseAabbTree(std::size_t meshOffset, std::size_t nodeIndex,
@@ -1546,10 +1513,11 @@ private:
                 mesh.inverseBindTranslations.reserve(inverseTranslations->second);
                 for (std::size_t index = 0u; index < inverseTranslations->second; ++index) {
                     const auto record = inverseTranslations->first + index * 12u;
-                    mesh.inverseBindTranslations.push_back(safeVec3(
-                        payload_->vec3(record, "inverse-bind translation"), model_.warnings,
-                        "Skin mesh " + model_.nodes[nodeIndex].name +
-                            " inverse-bind translation " + std::to_string(index)));
+                    // ResetSkin preserves these stored IEEE words, just as
+                    // it preserves the quaternion pool. Substituting zeros
+                    // changes initialized engine deformation inputs.
+                    mesh.inverseBindTranslations.push_back(
+                        payload_->vec3(record, "inverse-bind translation"));
                 }
             }
 
@@ -1904,7 +1872,7 @@ private:
         }
 
         parseAabbTree(offset, nodeIndex, mesh);
-        postProcessLightsaber(nodeIndex, mesh);
+        parseLightsaber(offset, nodeIndex, mesh);
         model_.nodes[nodeIndex].mesh = model_.meshes.size();
         model_.meshes.push_back(std::move(mesh));
     }
