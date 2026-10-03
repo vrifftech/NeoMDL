@@ -124,7 +124,10 @@ void headerTransforms(Writer& writer,const Node& node) {
     // couples these fields to time-zero controllers, so disclose that change.
     bool added=false;
     if(!directController(node,kControllerPosition) &&
-       (node.position.x!=0.0f||node.position.y!=0.0f||node.position.z!=0.0f)) {
+       (node.position.x!=0.0f||node.position.y!=0.0f||node.position.z!=0.0f||
+        std::signbit(node.position.x)||std::signbit(node.position.y)||std::signbit(node.position.z))) {
+        // The engine constructor initializes positive zero. A negative-zero
+        // header still needs a field so its sign survives engine ASCII load.
         writer.line("position "+writer.vector(node.position));added=true;
     }
     if(!directController(node,kControllerOrientation) &&
@@ -134,8 +137,11 @@ void headerTransforms(Writer& writer,const Node& node) {
     if(added)writer.warning("Node '"+node.name+"': static header transforms require time-zero fields in engine ASCII.");
     if(const auto* position=directController(node,kControllerPosition)) {
         const auto at=position->dataIndex;
-        if(node.position.x!=controllerFloat(node,at)||node.position.y!=controllerFloat(node,at+1u)||
-           node.position.z!=controllerFloat(node,at+2u))
+        const auto differs=[](float header,float controller) {
+            return header!=controller || (header==0.0f && std::signbit(header)!=std::signbit(controller));
+        };
+        if(differs(node.position.x,controllerFloat(node,at))||differs(node.position.y,controllerFloat(node,at+1u))||
+           differs(node.position.z,controllerFloat(node,at+2u)))
             writer.warning("Node '"+node.name+"': its stored position header differs from the last direct controller; engine ASCII derives the header from that controller.");
     }
     if(const auto* rotation=directController(node,kControllerOrientation)) {

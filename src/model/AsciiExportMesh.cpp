@@ -148,8 +148,13 @@ void diagnoseTopology(Writer& out,const Node& node,const Mesh& mesh) {
 void materialFields(Writer& out,const Model& model,const Node& node,const Mesh& mesh) {
     if(!mesh.texture0.empty()) out.line("texture0 "+out.token(mesh.texture0,"mesh "+node.name+" texture0"));
     if(!mesh.texture1.empty()) out.line("texture1 "+out.token(mesh.texture1,"mesh "+node.name+" texture1"));
-    out.line("diffuse "+out.vector(mesh.diffuse));
-    out.line("ambient "+out.vector(mesh.ambient));
+    // Compiled colors, like compiled vertex channels above, retain their
+    // authored IEEE values. The inspection decoder's finite substitutes
+    // must not become new material data when exporting a packed model.
+    const auto diffuse=mesh.enginePrelightInput?vector(mesh.rawMeshHeader,60u):mesh.diffuse;
+    const auto ambient=mesh.enginePrelightInput?vector(mesh.rawMeshHeader,72u):mesh.ambient;
+    out.line("diffuse "+out.vector(diffuse));
+    out.line("ambient "+out.vector(ambient));
     const auto flag=[&](const char* name,bool value){out.line(std::string(name)+(value?" 1":" 0"));};
     flag("shadow",mesh.castsShadow);
     flag("render",mesh.render);

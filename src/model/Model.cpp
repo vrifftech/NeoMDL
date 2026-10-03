@@ -829,8 +829,10 @@ private:
         node.parent = parent;
         node.name = nameIndex < names_.size() ? names_[nameIndex] : std::string{};
         if (node.name.empty()) node.name = "node_" + std::to_string(node.id);
-        node.position = safeVec3(payload_->vec3(offset + 16u, "node position"), model_.warnings,
-                                 "Node " + node.name);
+        // Engine packed reset/conversion copies the three stored words.
+        // Keep NaN payloads, infinities and signed zero just like orientation;
+        // this header is also the source for static-position ASCII export.
+        node.position = payload_->vec3(offset + 16u, "node position");
 
 
         node.orientation =
@@ -916,9 +918,7 @@ private:
         node.parent = parent;
         node.name = nameIndex < names_.size() ? names_[nameIndex] : std::string{};
         if (node.name.empty()) node.name = "node_" + std::to_string(node.id);
-        node.position = safeVec3(payload_->vec3(offset + 16u, "animation node position"),
-                                 model_.warnings,
-                                 "Animation " + animation.name + " node " + node.name);
+        node.position = payload_->vec3(offset + 16u, "animation node position");
         node.orientation =
             {payload_->f32(offset + 32u, "animation node quaternion x"),
              payload_->f32(offset + 36u, "animation node quaternion y"),
