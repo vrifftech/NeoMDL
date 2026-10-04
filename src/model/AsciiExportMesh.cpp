@@ -32,6 +32,18 @@ float scalar(const std::vector<std::uint8_t>& bytes,std::size_t at) {
 Vec3 vector(const std::vector<std::uint8_t>& bytes,std::size_t at) {
     return {scalar(bytes,at),scalar(bytes,at+4u),scalar(bytes,at+8u)};
 }
+std::string textureName(const Mesh& mesh,std::size_t channel) {
+    if(!mesh.enginePrelightInput)return channel==0u?mesh.texture0:mesh.texture1;
+    // Inspection trims resource names and treats NULL/NONE as absent. Export
+    // the stored spelling; engine text tokens cannot encode its whitespace.
+    std::string result;
+    for(std::size_t i=0;i<32u;++i) {
+        const auto value=static_cast<char>(mesh.rawMeshHeader.at(88u+32u*channel+i));
+        if(!value)break;
+        result+=value;
+    }
+    return result;
+}
 Vec2 uv(const Vertex& vertex,std::size_t channel) {
     switch(channel) {
     case 0u:return vertex.texcoord0;
@@ -146,8 +158,17 @@ void diagnoseTopology(Writer& out,const Node& node,const Mesh& mesh) {
 }
 
 void materialFields(Writer& out,const Model& model,const Node& node,const Mesh& mesh) {
-    if(!mesh.texture0.empty()) out.line("texture0 "+out.token(mesh.texture0,"mesh "+node.name+" texture0"));
-    if(!mesh.texture1.empty()) out.line("texture1 "+out.token(mesh.texture1,"mesh "+node.name+" texture1"));
+    const auto texture0=textureName(mesh,0u),texture1=textureName(mesh,1u);
+    if(!texture0.empty()) out.line("texture0 "+out.token(texture0,"mesh "+node.name+" texture0"));
+    if(!texture1.empty()) out.line("texture1 "+out.token(texture1,"mesh "+node.name+" texture1"));
+    if(node.flags==(kNodeBase|kNodeMesh) || node.flags==(kNodeBase|kNodeMesh|kNodeAabb)) {
+        // Ordinary/AABB postprocessing rewrites these names even with no
+        // faces. ASCII has no later field that bypasses that producer.
+        if(texture0.empty())
+            out.warning("Mesh "+node.name+": engine ASCII load replaces an empty texture0 with a default null texture name");
+        if(texture1.size()>16u)
+            out.warning("Mesh "+node.name+": engine ASCII load truncates texture1 to 16 bytes");
+    }
     // Compiled colors, like compiled vertex channels above, retain their
     // authored IEEE values. The inspection decoder's finite substitutes
     // must not become new material data when exporting a packed model.
@@ -340,7 +361,7 @@ ReconstructedMesh writeMesh(Writer& out,const Model& model,const Node& node,cons
             }
         out.warning("Animmesh "+node.name+": frame-major authoring arrays are generated from the final vertex-major sample pools; original third UV components, face mirror values and smoothing groups are unavailable, so regenerated animated normals and vertex merging can differ");
     }
-    if(!mesh.texture1.empty() && (mesh.mdxBitmap&4u))
+    if(!textureName(mesh,1u).empty() && (mesh.mdxBitmap&4u))
         out.warning("Mesh "+node.name+": secondary UVs contain any compiled lightmap transform; original .lmt data is unavailable and an active .lmt sidecar would be applied again during ASCII load");
     if(hasColors && !node.lightsaber) {
         out.line("colors "+std::to_string(result.sourceVertices.size()));

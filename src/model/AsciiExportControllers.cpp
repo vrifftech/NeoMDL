@@ -106,6 +106,20 @@ void writeControllers(Writer& writer,const Node& node,std::uint16_t fieldFlags) 
             writer.line(name+" "+rowValues(writer,node,controller,0u,width));
             continue;
         }
+        // Scalar/vector Control adds the MdlNode source selected by this
+        // offset. Engine keyed fields have fixed offsets (position +16,
+        // orientation +28, generic fields -1). For example, spelling an
+        // absolute compiled position key as positionkey would add the static
+        // header to every sample. A direct field cannot retain multiple rows
+        // or a time other than +0, so do not silently change that meaning.
+        // Quaternion kinds have a different consumer that ignores this
+        // offset; their existing warned axis-angle conversion is unchanged.
+        if((controller.rawFlags==0x01u || controller.rawFlags==0x03u ||
+            controller.rawFlags==0x11u || controller.rawFlags==0x13u) &&
+           controller.sourceOffset!=field.keyedSourceOffset)
+            throw ModelError(controllerDescription(node,controller)+
+                " cannot preserve source offset "+std::to_string(controller.sourceOffset)+
+                " with a keyed ASCII field requiring "+std::to_string(field.keyedSourceOffset));
         writer.line(name+(bezier?"bezierkey ":"key ")+std::to_string(rows));
         for(std::size_t row=0;row<rows;++row) {
             writer.job().check();

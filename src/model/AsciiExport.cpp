@@ -1,6 +1,7 @@
 #include <model/AsciiExportInternal.hpp>
 
 #include <algorithm>
+#include <array>
 #include <cmath>
 #include <cstring>
 #include <functional>
@@ -122,12 +123,35 @@ void headerTransforms(Writer& writer,const Node& node) {
     // Keyed fields do not populate the static node header. Emit its nondefault
     // frame when no single-value field already supplies it. The engine syntax
     // couples these fields to time-zero controllers, so disclose that change.
-    bool added=false;
-    if(!directController(node,kControllerPosition) &&
-       (node.position.x!=0.0f||node.position.y!=0.0f||node.position.z!=0.0f||
-        std::signbit(node.position.x)||std::signbit(node.position.y)||std::signbit(node.position.z))) {
-        // The engine constructor initializes positive zero. A negative-zero
-        // header still needs a field so its sign survives engine ASCII load.
+    const auto differs=[](float header,float controller) {
+        return header!=controller || (header==0.0f && std::signbit(header)!=std::signbit(controller));
+    };
+    // A scalar direct position is a defined partial header write. Replay the
+    // original sequence component by component: a later scalar replaces X
+    // while retaining Y/Z from an earlier vector or the +0 constructor.
+    // Adding a full position field unnecessarily introduces another engine
+    // controller and changes both the record list and its data pool.
+    std::array<float,3> position{};
+    std::array<bool,3> positionWritten{};
+    for(const auto& controller:node.controllers) {
+        if(controller.type!=kControllerPosition || controller.sourceOffset!=-1 ||
+           controller.rowCount!=1u || (controller.rawFlags!=1u && controller.rawFlags!=3u) ||
+           controller.timeIndex>=node.controllerDataWords.size() ||
+           node.controllerDataWords[controller.timeIndex]!=0u) continue;
+        const auto width=controller.rawFlags==3u?3u:1u;
+        for(std::size_t lane=0;lane<width;++lane) {
+            position[lane]=controllerFloat(node,static_cast<std::size_t>(controller.dataIndex)+lane);
+            positionWritten[lane]=true;
+        }
+    }
+    const std::array<float,3> storedPosition{node.position.x,node.position.y,node.position.z};
+    bool added=false,positionConflict=false,positionNeedsHeader=false;
+    for(std::size_t lane=0;lane<3u;++lane) {
+        if(!differs(storedPosition[lane],position[lane])) continue;
+        if(positionWritten[lane])positionConflict=true;
+        else positionNeedsHeader=true;
+    }
+    if(positionNeedsHeader) {
         writer.line("position "+writer.vector(node.position));added=true;
     }
     if(!directController(node,kControllerOrientation) &&
@@ -135,15 +159,8 @@ void headerTransforms(Writer& writer,const Node& node) {
         writer.line("orientation "+writer.quaternion(node.orientation));added=true;
     }
     if(added)writer.warning("Node '"+node.name+"': static header transforms require time-zero fields in engine ASCII.");
-    if(const auto* position=directController(node,kControllerPosition)) {
-        const auto at=position->dataIndex;
-        const auto differs=[](float header,float controller) {
-            return header!=controller || (header==0.0f && std::signbit(header)!=std::signbit(controller));
-        };
-        if(differs(node.position.x,controllerFloat(node,at))||differs(node.position.y,controllerFloat(node,at+1u))||
-           differs(node.position.z,controllerFloat(node,at+2u)))
-            writer.warning("Node '"+node.name+"': its stored position header differs from the last direct controller; engine ASCII derives the header from that controller.");
-    }
+    if(positionConflict)
+        writer.warning("Node '"+node.name+"': its stored position header differs from the last direct controller for that component; engine ASCII derives each written component from its last direct field.");
     if(const auto* rotation=directController(node,kControllerOrientation)) {
         const auto at=rotation->dataIndex;
         const auto q=rotation->rawFlags==2u?unpackEngineControllerQuaternion(node.controllerDataWords.at(at),writer.game()):
