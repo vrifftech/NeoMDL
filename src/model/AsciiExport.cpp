@@ -82,6 +82,21 @@ std::string folded(std::string text) {
     return text;
 }
 
+void commandLiteral(const std::string& value,const std::string& context) {
+    // FuncInterp evaluates unquoted brackets before locating the callback.
+    // Paired double quotes remain literal bytes but shield their contents.
+    // Its unterminated-quote path can scan beyond the terminator, so it cannot
+    // provide a defined representation of an arbitrary stored name.
+    for(std::size_t i=0;i<value.size();++i) {
+        if(value[i]=='"') {
+            i=value.find('"',i+1u);
+            if(i==std::string::npos)
+                throw ModelError("ASCII export cannot represent "+context+" with an unterminated engine command quote");
+        } else if(value[i]=='[')
+            throw ModelError("ASCII export cannot represent "+context+" containing a engine command expression");
+    }
+}
+
 std::string nodeType(std::uint16_t flags) {
     switch(flags) {
     case kNodeBase:return "dummy";
@@ -268,7 +283,20 @@ namespace neomdl::model {
 AsciiExportResult exportAsciiModel(const Model& model,const neoshared::bif::JobControl& job) {
     using namespace ascii_export;
     Writer writer(model.game,job);
-    const auto name=writer.token(model.name,"model name");
+    const auto& name=model.name;
+    // newmodel receives the complete command argument, not an sscanf token.
+    // Empty names and internal whitespace are defined constructor inputs.
+    // FuncInterp removes leading space/'=' and trailing space/tab; a physical
+    // line break, NUL or overlong engine fixed field cannot retain the name.
+    if(name.size()>=32u || name.find_first_of("\r\n\0",0u,3u)!=std::string::npos ||
+       (!name.empty() && (name.front()==' ' || name.front()=='=' || name.back()==' ' || name.back()=='\t')))
+        throw ModelError("ASCII export cannot represent the model name as a bounded engine command argument");
+    commandLiteral(name,"model name");
+    // setsupermodel scans and ignores its first token; newanim likewise ignores
+    // the model target after its animation name. Keep those placeholders single
+    // tokens so whitespace in the actual name cannot shift a later argument.
+    const auto modelTarget=name.empty() || name.find_first_of(" \t\v\f\"[")!=std::string::npos
+        ? std::string("_") : name;
     job.update(0u,model.animations.size()+1u,"Exporting ASCII model: "+name);
     if(model.collapsedRoomParts||!model.sceneNodeAdmission.empty())
         throw ModelError("ASCII export requires the source model asset, not a collapsed scene partition");
@@ -296,12 +324,16 @@ AsciiExportResult exportAsciiModel(const Model& model,const neoshared::bif::JobC
     // command preserves that state. FindModel does not exclude NONE
     // (K1 Desktop 0x3341df..0x3341f1), so its normalized resource view is not
     // a source for the engine authoring identity.
-    if(!model.engineSupermodelName.empty())
-        writer.line("setsupermodel "+name+" "+writer.token(model.engineSupermodelName,"supermodel"));
+    if(!model.engineSupermodelName.empty()) {
+        if(model.engineSupermodelName.size()>=32u)
+            throw ModelError("ASCII export cannot represent the supermodel name in its engine 32-byte field");
+        commandLiteral(model.engineSupermodelName,"supermodel name");
+        writer.line("setsupermodel "+modelTarget+" "+writer.token(model.engineSupermodelName,"supermodel"));
+    }
     classifications(writer,model);
     writer.line("ignorefog "+std::to_string(model.fog?0:1));
     writer.line("setanimationscale "+writer.scalar(model.animationScale));
-    writer.line("beginmodelgeom "+name);
+    writer.line("beginmodelgeom "+modelTarget);
     writeTree(writer,model,model.nodes,false);
     if(model.engineBounds.valid) {
         writer.line("bmin "+writer.vector(model.engineBounds.minimum));
@@ -313,12 +345,17 @@ AsciiExportResult exportAsciiModel(const Model& model,const neoshared::bif::JobC
         writer.line("sModelAnimationRootName "+writer.token(model.nodes[*model.animationRootNode].name,"animation root"));
     } else
         writer.warning("The absent model animation-root selection cannot be preserved: engine ASCII load assigns the tree root, enabling animation controllers that compiled playback leaves disabled.");
-    writer.line("endmodelgeom "+name);writer.line();
+    writer.line("endmodelgeom "+modelTarget);writer.line();
     for(std::size_t i=0;i<model.animations.size();++i) {
         const auto& animation=model.animations[i];
         job.update(i+1u,model.animations.size()+1u,"Exporting animation: "+animation.name);
         const auto clip=writer.token(animation.name,"animation name");
-        writer.line("newanim "+clip+" "+name);
+        if(clip.size()>=32u)
+            throw ModelError("ASCII export cannot represent the animation name in its engine 32-byte field");
+        if(clip.front()=='=')
+            throw ModelError("ASCII export cannot represent an animation name beginning with the engine command delimiter '='");
+        commandLiteral(clip,"animation name");
+        writer.line("newanim "+clip+" "+modelTarget);
         writer.line("length "+writer.scalar(animation.length));
         writer.line("transtime "+writer.scalar(animation.transitionTime));
         if(!animation.root.empty())writer.line("animroot "+writer.token(animation.root,"animation root"));
@@ -329,9 +366,9 @@ AsciiExportResult exportAsciiModel(const Model& model,const neoshared::bif::JobC
         for(auto event=animation.events.rbegin();event!=animation.events.rend();++event)
             writer.line("event "+writer.scalar(event->time)+(event->name.empty()?std::string{}:" "+writer.token(event->name,"event name")));
         writeTree(writer,model,animation.nodes,true);
-        writer.line("doneanim "+clip+" "+name);writer.line();
+        writer.line("doneanim "+clip+" "+modelTarget);writer.line();
     }
-    writer.line("donemodel "+name);
+    writer.line("donemodel "+modelTarget);
     job.update(model.animations.size()+1u,model.animations.size()+1u,"ASCII model export complete");
     return writer.finish();
 }

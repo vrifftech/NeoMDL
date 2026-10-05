@@ -12,12 +12,14 @@ namespace {
 bool same(Vec3 a,Vec3 b) {
     return a.x==b.x && a.y==b.y && a.z==b.z;
 }
-std::uint32_t bits(float value) {
-    // Engine equality treats positive and negative zero as the same value.
-    if(value==0.0f) return 0u;
+std::uint32_t rawBits(float value) {
     std::uint32_t result;
     std::memcpy(&result,&value,sizeof(result));
     return result;
+}
+std::uint32_t bits(float value) {
+    // Engine equality treats positive and negative zero as the same value.
+    return value==0.0f?0u:rawBits(value);
 }
 std::uint32_t word(const std::vector<std::uint8_t>& bytes,std::size_t at) {
     return std::uint32_t(bytes.at(at)) | (std::uint32_t(bytes.at(at+1u))<<8u) |
@@ -273,7 +275,10 @@ ReconstructedMesh writeMesh(Writer& out,const Model& model,const Node& node,cons
             key.push_back(color);
         }
         if(mesh.dangly) {
-            key.push_back(bits(mesh.dangly->constraints.at(index)));
+            // UV splits can retain distinct engine constraint zero signs.
+            // Keep their source rows separate; the engine generator still
+            // uses numeric equality when every generated attribute agrees.
+            key.push_back(rawBits(mesh.dangly->constraints.at(index)));
             if(mesh.dangly->restPositions) append(mesh.dangly->restPositions->at(index));
         }
         if(mesh.skinned) {
