@@ -8,6 +8,7 @@
 #include <algorithm>
 #include <array>
 #include <limits>
+#include <string_view>
 #include <vector>
 
 namespace neomdl::render {

@@ -177,7 +177,7 @@ EngineSceneStageActions leaveEngineSceneStage(Stage stage,const EngineSceneSetti
         if(k1)s.depthTest=true;
         break;
     case Stage::Paths:
-        if(k1 && cfg.pathsEnabled) {
+        if(cfg.pathsEnabled) {
             s.lighting=true;s.texture2D=true;s.depthTest=true;
         }
         break;
