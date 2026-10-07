@@ -1,0 +1,158 @@
+# Keep this file identical to the collection's .github/workflows/neomdl.yml.
+# GitHub discovers only the workflow at the current repository root.
+name: NeoMDL minimal builds
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    name: ${{ matrix.platform }}
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 120
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: ubuntu-24.04
+            platform: linux-x86_64
+            arch: x86_64
+          - runner: windows-2025
+            platform: windows-x86_64
+            arch: x86_64
+          - runner: macos-15
+            platform: apple-arm64
+            arch: arm64
+          - runner: macos-15-intel
+            platform: apple-x86_64
+            arch: x86_64
+
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v7
+        with:
+          path: source
+          persist-credentials: false
+
+      - name: Locate NeoMDL and NeoShared
+        id: layout
+        shell: bash
+        run: |
+          if [[ -f source/NeoMDL/CMakeLists.txt && -f source/neoshared/CMakeLists.txt ]]; then
+            echo 'tool=source/NeoMDL' >> "$GITHUB_OUTPUT"
+            echo 'shared=source/neoshared' >> "$GITHUB_OUTPUT"
+            echo 'fetch_shared=false' >> "$GITHUB_OUTPUT"
+          else
+            test -f source/CMakeLists.txt
+            echo 'tool=source' >> "$GITHUB_OUTPUT"
+            echo 'shared=neoshared' >> "$GITHUB_OUTPUT"
+            echo 'fetch_shared=true' >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Check out NeoShared for standalone builds
+        if: steps.layout.outputs.fetch_shared == 'true'
+        uses: actions/checkout@v7
+        with:
+          repository: vrifftech/neoshared
+          ref: main
+          path: neoshared
+          persist-credentials: false
+
+      - name: Install Linux dependencies
+        if: runner.os == 'Linux'
+        shell: bash
+        run: |
+          sudo apt-get update
+          sudo apt-get install --no-install-recommends -y \
+            build-essential cmake ninja-build pkg-config zlib1g-dev \
+            libwxgtk3.2-dev libwxgtk-gl3.2-dev libgl-dev
+
+      - name: Install desktop dependencies
+        if: runner.os == 'macOS'
+        shell: bash
+        env:
+          HOMEBREW_NO_AUTO_UPDATE: '1'
+          HOMEBREW_NO_INSTALL_CLEANUP: '1'
+        run: |
+          brew install cmake ninja wxwidgets
+          echo "$(brew --prefix wxwidgets)/bin" >> "$GITHUB_PATH"
+
+      - name: Build and package Linux or desktop
+        if: runner.os != 'Windows'
+        shell: bash
+        env:
+          TOOL_ROOT: ${{ github.workspace }}/${{ steps.layout.outputs.tool }}
+          SHARED_ROOT: ${{ github.workspace }}/${{ steps.layout.outputs.shared }}
+          BUILD_ARCH: ${{ matrix.arch }}
+          BUILD_PLATFORM: ${{ matrix.platform }}
+        run: |
+          test "$(uname -m)" = "$BUILD_ARCH"
+          stage="$RUNNER_TEMP/neomdl-stage"
+          extra=(-DNEOMDL_BUILD_WX_MODULE=OFF)
+          if [[ "$RUNNER_OS" == macOS ]]; then
+            extra+=("-DCMAKE_OSX_ARCHITECTURES=$BUILD_ARCH" -DCMAKE_OSX_DEPLOYMENT_TARGET=15.0)
+          fi
+          bash "$TOOL_ROOT/scripts/build.sh" \
+            --build-type Release --generator Ninja --jobs 2 \
+            --wx ON --require-wx ON --cli OFF --minimal-release ON \
+            --neoshared-root "$SHARED_ROOT" --install-prefix "$stage" \
+            -- "${extra[@]}"
+          if [[ "$RUNNER_OS" == macOS ]]; then
+            mkdir -p "$stage/NeoMDL.app/Contents/Resources/licenses"
+            cp "$stage/share/NeoMDL/licenses/"* "$stage/NeoMDL.app/Contents/Resources/licenses/"
+            bash "$SHARED_ROOT/scripts/package-macos-app.sh" \
+              --app "$stage/NeoMDL.app" --arch "$BUILD_ARCH" \
+              --deployment-target 15.0 \
+              --output "$RUNNER_TEMP/NeoMDL-$BUILD_PLATFORM.zip"
+          else
+            test -x "$stage/bin/NeoMDL"
+            tar -czf "$RUNNER_TEMP/NeoMDL-$BUILD_PLATFORM.tar.gz" -C "$stage" .
+          fi
+
+      - name: Install Windows dependencies
+        if: runner.os == 'Windows'
+        shell: pwsh
+        env:
+          SHARED_ROOT: ${{ github.workspace }}/${{ steps.layout.outputs.shared }}
+        run: |
+          & "$env:SHARED_ROOT/scripts/install-wxwidgets.ps1" `
+            -VcpkgRoot $env:VCPKG_INSTALLATION_ROOT `
+            -Triplet x64-windows-static
+
+      - name: Build and package Windows
+        if: runner.os == 'Windows'
+        shell: pwsh
+        env:
+          TOOL_ROOT: ${{ github.workspace }}/${{ steps.layout.outputs.tool }}
+          SHARED_ROOT: ${{ github.workspace }}/${{ steps.layout.outputs.shared }}
+          BUILD_PLATFORM: ${{ matrix.platform }}
+        run: |
+          $stage = Join-Path $env:RUNNER_TEMP 'neomdl-stage'
+          & "$env:TOOL_ROOT/scripts/build.ps1" `
+            -BuildType Release -Generator 'Visual Studio 17 2022' -Platform x64 `
+            -Wx ON -RequireWx ON -Cli OFF -MinimalRelease ON -Parallel 2 `
+            -NeoSharedRoot $env:SHARED_ROOT `
+            -VcpkgRoot $env:VCPKG_INSTALLATION_ROOT -VcpkgTriplet x64-windows-static `
+            -InstallPrefix $stage `
+            -ExtraCMakeArgs @('-DNEOMDL_BUILD_WX_MODULE=OFF')
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          if (-not (Test-Path "$stage/bin/NeoMDL.exe")) { throw 'NeoMDL.exe was not installed' }
+          Compress-Archive -Path "$stage/*" `
+            -DestinationPath "$env:RUNNER_TEMP/NeoMDL-$env:BUILD_PLATFORM.zip"
+
+      - name: Upload build
+        uses: actions/upload-artifact@v7
+        with:
+          name: NeoMDL-${{ matrix.platform }}
+          path: ${{ runner.temp }}/NeoMDL-${{ matrix.platform }}.*
+          if-no-files-found: error
+          retention-days: 7
