@@ -8,7 +8,7 @@
 
 namespace neomdl::detail {
 // Existing AreaLoad table reader, shared by object/creature visual mapping.
-// Scoped loading and the existing size limit belong to the host loader.
+// Scoped loading belongs to the host loader.
 // Engine column lookup and source-cell semantics belong to Engine2DA.
 inline void areaTableRequire(bool value,const std::string& message) {
     if(!value)throw std::runtime_error("Area load: "+message);
@@ -20,14 +20,11 @@ inline std::string areaTableLower(std::string value) {
 struct AreaLoadTables {
     ResourceResolver resolver;
     std::map<std::string,neo2da::TwoDAFile> files;
-    bool applyExistingSizeLimit{true};
     const neo2da::TwoDAFile& table(const std::string& file) {
         const auto& job=resourceLoadJob();job.check();
         auto it=files.find(file);
         if(it==files.end()) {
             const auto r=resolver(file,0x7e1);areaTableRequire(bool(r),"missing "+file+".2da");
-            if(applyExistingSizeLimit)
-                areaTableRequire(r->bytes.size()<=16u*1024u*1024u,"2DA exceeds 16 MiB host limit");
             job.update(0,0,"Decoding "+file+".2da");
             neo2da::TwoDAFile t;t.loadBytes(r->bytes);job.check();it=files.emplace(file,std::move(t)).first;
         }

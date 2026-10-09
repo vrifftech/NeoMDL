@@ -5,7 +5,6 @@
 #include <model/AsciiModel.hpp>
 
 #include <neoshared/PathUtf8.hpp>
-#include <neoshared/texture/FileUtil.hpp>
 
 #include <algorithm>
 #include <functional>
@@ -37,7 +36,7 @@ std::string resourceStem(const std::string& name) {
 
 std::optional<std::filesystem::path> uniqueCaseInsensitiveFile(
     const std::filesystem::path& directory, const std::string& filename) {
-    try { return uniqueResourceFile(directory, filename, true); }
+    try { return uniqueResourceFile(directory, filename); }
     catch(const neoshared::bif::JobCancelled&) { throw; }
     catch(const std::runtime_error& error) { throw model::ModelError(error.what()); }
 }
@@ -51,11 +50,16 @@ std::string modelResourceExtension(std::uint16_t type) {
     }
 }
 
-std::uintmax_t maximumResourceBytes(std::uint16_t type) {
-    const neomdl::model::ParseLimits modelLimits;
-    if (type == kMdlResourceType) return modelLimits.maximumMdlBytes;
-    if (type == kMdxResourceType) return modelLimits.maximumMdxBytes;
-    return 512ull * 1024ull * 1024ull;
+neoshared::ResourceDocument readLocalResource(const std::filesystem::path& path,
+                                             std::uint16_t type) {
+    neoshared::ResourceDocument resource;
+    resource.fileName = neoshared::pathToUtf8(path.filename());
+    resource.type = type;
+    resource.bytes = readResourceFile(path);
+    resource.identity = resourceFileIdentity(path);
+    resource.sourceDescription = neoshared::genericPathToUtf8(path);
+    resource.protectedInputs.push_back(path);
+    return resource;
 }
 
 ResourceResolver directoryResourceResolver(const std::filesystem::path& directory) {
@@ -75,15 +79,7 @@ ResourceResolver directoryResourceResolver(const std::filesystem::path& director
         const auto path = uniqueCaseInsensitiveFile(root, stem + extension);
         if (!path) return std::nullopt;
 
-        neoshared::ResourceDocument resource;
-        resource.fileName = stem + extension;
-        resource.type = type;
-        resource.identity = resourceFileIdentity(*path, true);
-        resource.sourceDescription = neoshared::genericPathToUtf8(*path);
-        resource.protectedInputs.push_back(*path);
-        resource.bytes = neoshared::texture::readFileBytes(
-            *path, maximumResourceBytes(type));
-        return resource;
+        return readLocalResource(*path, type);
     };
 }
 
@@ -190,8 +186,7 @@ model::AsciiResourceResolver looseAsciiResources(const std::filesystem::path& di
         resourceLoadJob().check();
         const auto file=uniqueResourceFile(root,name+extension);
         if(!file)return {};
-        auto bytes=neoshared::texture::readFileBytes(*file,536870912u);
-        resourceLoadJob().check();return bytes;
+        return readResourceFile(*file);
     };
 }
 
@@ -218,23 +213,16 @@ bool ModelDocument::openFile(const std::filesystem::path& requestedPath,
     const auto directory = mdlPath.parent_path().empty()
         ? std::filesystem::path{"."} : mdlPath.parent_path();
     const auto localResolver = directoryResourceResolver(directory);
-    auto primary = localResolver(neoshared::pathToUtf8(mdlPath.stem()), kMdlResourceType);
-    if (!primary) {
-        throw neomdl::model::ModelError(
-            "The selected MDL could not be read as a unique local resource.");
-    }
+    auto primary = readLocalResource(mdlPath, kMdlResourceType);
 
     const auto resolver = overlayResolver(localResolver, fallbackResolver);
     // AurResGet's standalone authoring path can open .lmt sidecars. The
     // installed game's resource callback has no .lmt type mapping.
-    openResource(std::move(*primary), resolver,job,asciiGame,looseAsciiResources(directory));
+    openResource(std::move(primary), resolver,job,asciiGame,looseAsciiResources(directory));
     // Local documents retain their filesystem identity even though companion
     // resources may have come from an installed-game archive session.
     runtimeScopePinned_=bool(fallbackResolver);
     path_ = mdlPath;
-    identity_ = resourceFileIdentity(mdlPath, true);
-    title_ = neoshared::pathToUtf8(mdlPath.filename());
-    sourceDescription_ = neoshared::genericPathToUtf8(mdlPath);
     return true;
 }
 
@@ -300,7 +288,7 @@ bool ModelDocument::openResource(neoshared::ResourceDocument resource,
         return asciiResources ? asciiResources(name,extension) : std::nullopt;
     };
     auto nextModel = neomdl::model::decodeModelBytes(
-        mdlResource.bytes, mdx, mdlResource.sourceDescription, {}, job,asciiGame,loadResources);
+        mdlResource.bytes, mdx, mdlResource.sourceDescription, job,asciiGame,loadResources);
     asciiResources_=loadResources;
     runtimeScopePinned_=true;resolver_=resolver;trace_=std::move(trace);
     resourceParent_.reset();
@@ -347,18 +335,12 @@ bool ModelDocument::openResource(neoshared::ResourceDocument resource,
         const auto found=compilerBumpMaps.find(cacheKey);
         if(found!=compilerBumpMaps.end())return found->second;
         bool hasBump=false;
-        try {
-            job.check();
-            if(const auto sidecar=resolver(key,kTxiResourceType)) {
-                const auto txi=material::parseAsciiMaterialTxi(bytesToText(sidecar->bytes),
-                    game==model::GameVersion::Kotor1);
-                hasBump=txi.engineTextureNames &&
-                    !material::textureResourceKey(txi.engineTextureNames->bumpMap).empty();
-            }
-        } catch(const neoshared::bif::JobCancelled&) {
-            throw;
-        } catch(const std::exception& error) {
-            messages_.push_back("Unable to read compiler texture metadata "+key+": "+error.what());
+        job.check();
+        if(const auto sidecar=resolver(key,kTxiResourceType)) {
+            const auto txi=material::parseAsciiMaterialTxi(bytesToText(sidecar->bytes),
+                game==model::GameVersion::Kotor1);
+            hasBump=txi.engineTextureNames &&
+                !material::textureResourceKey(txi.engineTextureNames->bumpMap).empty();
         }
         compilerBumpMaps.emplace(cacheKey,hasBump);
         return hasBump;
@@ -637,22 +619,14 @@ void ModelDocument::rebuildMaterials() {
     for (const auto& key : keys) {
         resourceLoadJob().check();
         if(textureMetadata_.count(key)) continue;
-        try {
-            auto metadata = std::make_shared<const neomdl::material::TextureMetadata>(
-                neomdl::material::makeTextureMetadata(textures_.at(key)));
-            for (const auto& issue : metadata->txi.issues) {
-                if (issue.severity == neoshared::texture::TxiIssueSeverity::Info) continue;
-                messages_.push_back("Material " + key + ": TXI line " +
-                    std::to_string(issue.lineNumber) + " (" + issue.key + "): " + issue.message);
-            }
-            textureMetadata_.emplace(key, std::move(metadata));
-        } catch (const std::length_error& error) {
-            // An oversized optional TXI must not discard otherwise valid pixels
-            // or prevent a model from opening. Its original text is still in
-            // TextureData and the unbound metadata is explicit to consumers.
-            messages_.push_back("Material metadata was not mapped for " + key + ": " + error.what());
-            textureMetadata_.emplace(key,nullptr); // remember rejected optional metadata too
+        auto metadata = std::make_shared<const neomdl::material::TextureMetadata>(
+            neomdl::material::makeTextureMetadata(textures_.at(key)));
+        for (const auto& issue : metadata->txi.issues) {
+            if (issue.severity == neoshared::texture::TxiIssueSeverity::Info) continue;
+            messages_.push_back("Material " + key + ": TXI line " +
+                std::to_string(issue.lineNumber) + " (" + issue.key + "): " + issue.message);
         }
+        textureMetadata_.emplace(key, std::move(metadata));
     }
     const neomdl::material::TextureMetadataLookup lookup = [this](const std::string& key) {
         return textureMetadata(key);
@@ -773,45 +747,6 @@ void ModelDocument::rebuildAnimations() {
     animations_ = neomdl::model::enumerateAnimations(modelHierarchy());
 }
 
-void ModelDocument::loadSupermodelsFromDirectory(
-    const std::filesystem::path& directory, const std::string& initialResref) {
-    constexpr std::size_t maximumSupermodels = 64u;
-    std::unordered_set<std::string> visited;
-    if (!initialResref.empty()) visited.emplace(lower(hierarchyResref(initialResref)));
-
-    const neomdl::model::Model* current = &model_;
-    while (true) {
-        resourceLoadJob().check();
-        if (appendLoadedSupermodels(*current, supermodels_, "Supermodel ")) return;
-        const auto next = hierarchyResref(current->supermodel);
-        if (next.empty()) return;
-        const auto key = lower(next);
-        if (!visited.emplace(key).second) {
-            messages_.push_back("Supermodel cycle stopped at: " + next);
-            return;
-        }
-        if (supermodels_.size() >= maximumSupermodels) {
-            messages_.push_back("Supermodel chain exceeded the 64-model safety limit at: " + next);
-            return;
-        }
-        const auto mdlPath = uniqueCaseInsensitiveFile(directory, next + ".mdl");
-        if (!mdlPath) {
-            messages_.push_back("Supermodel MDL was not found uniquely beside the model: " + next);
-            return;
-        }
-        try {
-            supermodels_.push_back(neomdl::model::readModelFile(*mdlPath, std::nullopt, {}, resourceLoadJob(),model_.game,asciiResources_));
-            appendParserWarnings(supermodels_.back(), "Supermodel " + next + ": ");
-            current = &supermodels_.back();
-        } catch (const neoshared::bif::JobCancelled&) {
-            throw;
-        } catch (const std::exception& error) {
-            messages_.push_back("Unable to load supermodel " + next + ": " + error.what());
-            return;
-        }
-    }
-}
-
 void ModelDocument::loadSupermodelsFromResolver(
     const ResourceResolver& resolver, const std::string& initialResref) {
     if (appendLoadedSupermodels(model_, supermodels_, "Supermodel ")) return;
@@ -823,7 +758,6 @@ void ModelDocument::loadSupermodelsFromResolver(
         return;
     }
 
-    constexpr std::size_t maximumSupermodels = 64u;
     std::unordered_set<std::string> visited;
     if (!initialResref.empty()) visited.emplace(lower(hierarchyResref(initialResref)));
     const neomdl::model::Model* current = &model_;
@@ -837,10 +771,6 @@ void ModelDocument::loadSupermodelsFromResolver(
             messages_.push_back("Supermodel cycle stopped at: " + next);
             return;
         }
-        if (supermodels_.size() >= maximumSupermodels) {
-            messages_.push_back("Supermodel chain exceeded the 64-model safety limit at: " + next);
-            return;
-        }
         try {
             auto mdl = resolver(next, kMdlResourceType);
             if (!mdl) {
@@ -848,17 +778,13 @@ void ModelDocument::loadSupermodelsFromResolver(
                 return;
             }
             std::vector<std::uint8_t> mdx;
-            try {
-                if (!model::isAsciiModelInput(mdl->bytes))if (auto companion = resolver(next, kMdxResourceType))
+            if (!model::isAsciiModelInput(mdl->bytes)) {
+                if (auto companion = resolver(next, kMdxResourceType))
                     mdx = std::move(companion->bytes);
-            } catch (const neoshared::bif::JobCancelled&) {
-                throw;
-            } catch (const std::exception& error) {
-                messages_.push_back("Supermodel MDX lookup failed for " + next + ": " + error.what());
             }
             auto decoded = neomdl::model::decodeModelBytes(
                 mdl->bytes, mdx,
-                mdl->sourceDescription.empty() ? next + ".mdl" : mdl->sourceDescription, {}, resourceLoadJob(),model_.game,asciiResources_);
+                mdl->sourceDescription.empty() ? next + ".mdl" : mdl->sourceDescription, resourceLoadJob(),model_.game,asciiResources_);
             supermodels_.push_back(std::move(decoded));
             appendParserWarnings(supermodels_.back(), "Supermodel " + next + ": ");
             current = &supermodels_.back();
@@ -871,158 +797,8 @@ void ModelDocument::loadSupermodelsFromResolver(
     }
 }
 
-void ModelDocument::loadReferencesFromDirectory(
-    const std::filesystem::path& directory, const std::string& rootResref) {
-    constexpr std::size_t maximumReferenceDepth = 64u;
-    constexpr std::size_t maximumReferenceInstances = 512u;
-    constexpr std::size_t maximumSupermodels = 64u;
-    std::unordered_map<std::string, std::shared_ptr<ReferenceAsset>> cache;
-    std::unordered_map<std::uint64_t, std::shared_ptr<ReferenceAsset>> registeredCache;
-    model::retainAsciiModelInstance(model_);
-    RetainedReferenceAssets retained;
-    retained.remember(supermodels_);
-
-    const auto load = [&](const std::string& resref)
-            -> std::shared_ptr<const ReferenceAsset> {
-        resourceLoadJob().update(0u, 0u, "Loading reference model: " + resref);
-        if (model_.asciiLoadSession) {
-            try {
-                // FindModel searches the current registry on every occurrence.
-                // A nested read can change which equal-name midpoint is selected.
-                auto selected=model::resolveAsciiModelInstance(
-                    model_,resref,resourceLoadJob(),asciiResources_);
-                if (!selected) return {};
-                const auto found=registeredCache.find(selected->asciiRegistrationId);
-                if (found!=registeredCache.end()) return found->second;
-                auto asset=std::make_shared<ReferenceAsset>();
-                asset->model=std::move(*selected);
-                appendParserWarnings(asset->model,"Reference "+resref+": ");
-                appendLoadedSupermodels(asset->model,asset->supermodels,
-                    "Reference "+resref+" supermodel ");
-                registeredCache.emplace(asset->model.asciiRegistrationId,asset);
-                return asset;
-            } catch (const neoshared::bif::JobCancelled&) {
-                throw;
-            } catch (const std::exception& error) {
-                messages_.push_back("Unable to load reference model " + resref + ": " + error.what());
-                return {};
-            }
-        }
-        const auto key = lower(hierarchyResref(resref));
-        const auto cached = cache.find(key);
-        if (cached != cache.end()) return cached->second;
-        if (auto registered=retained.find(key)) {
-            cache.emplace(key,registered);
-            return registered;
-        }
-        const auto mdlPath = uniqueCaseInsensitiveFile(directory, resref + ".mdl");
-        if (!mdlPath) return {};
-        try {
-            auto asset = std::make_shared<ReferenceAsset>();
-            asset->model = neomdl::model::readModelFile(*mdlPath, std::nullopt, {}, resourceLoadJob(),model_.game,asciiResources_);
-            appendParserWarnings(asset->model, "Reference " + resref + ": ");
-
-            std::unordered_set<std::string> visited{key};
-            const neomdl::model::Model* current = &asset->model;
-            while (true) {
-                resourceLoadJob().check();
-                if (appendLoadedSupermodels(*current, asset->supermodels,
-                        "Reference " + resref + " supermodel ")) break;
-                const auto next = hierarchyResref(current->supermodel);
-                if (next.empty()) break;
-                if (asset->supermodels.size() >= maximumSupermodels) {
-                    messages_.push_back("Reference " + resref +
-                        " supermodel chain exceeded the 64-model safety limit.");
-                    break;
-                }
-                const auto nextKey = lower(next);
-                if (!visited.emplace(nextKey).second) {
-                    messages_.push_back("Reference " + resref +
-                        " supermodel cycle stopped at: " + next);
-                    break;
-                }
-                const auto path = uniqueCaseInsensitiveFile(directory, next + ".mdl");
-                if (!path) {
-                    messages_.push_back("Reference " + resref +
-                        " supermodel MDL was not found uniquely beside the model: " + next);
-                    break;
-                }
-                asset->supermodels.push_back(neomdl::model::readModelFile(*path, std::nullopt, {}, resourceLoadJob(),model_.game,asciiResources_));
-                appendParserWarnings(asset->supermodels.back(),
-                    "Reference " + resref + " supermodel " + next + ": ");
-                current = &asset->supermodels.back();
-            }
-            retained.remember(asset->supermodels,asset);
-            cache.emplace(key, asset);
-            return asset;
-        } catch (const neoshared::bif::JobCancelled&) {
-            throw;
-        } catch (const std::exception& error) {
-            messages_.push_back("Unable to load reference model " + resref + ": " + error.what());
-            return {};
-        }
-    };
-
-    bool exhausted = false;
-    std::function<void(const neomdl::model::Model&, std::optional<std::size_t>,
-                       std::size_t, std::unordered_set<std::string>)> visit;
-    visit = [&](const neomdl::model::Model& owner,
-                std::optional<std::size_t> parentInstance,
-                std::size_t depth,
-                std::unordered_set<std::string> chain) {
-        if (exhausted) return;
-        if (depth >= maximumReferenceDepth) {
-            messages_.push_back("Reference hierarchy exceeded the 64-model safety limit.");
-            return;
-        }
-        visitModelPartOccurrences(owner, [&](std::size_t partIndex,
-                                             const neomdl::model::Node& node) {
-            if (exhausted || !node.reference) return;
-            const auto resref = hierarchyResref(node.reference->model);
-            if (resref.empty()) {
-                messages_.push_back("Reference node " + node.name + " has no usable model ResRef.");
-                return;
-            }
-            const auto key = lower(resref);
-            if (chain.find(key) != chain.end()) {
-                messages_.push_back("Reference cycle stopped at: " + resref);
-                return;
-            }
-            if (references_.size() >= maximumReferenceInstances) {
-                messages_.push_back("Reference hierarchy exceeded the 512-instance safety limit.");
-                exhausted = true;
-                return;
-            }
-            const auto asset = load(resref);
-            if (!asset) {
-                messages_.push_back(
-                    "Reference MDL was not found uniquely beside the model: " + resref);
-                return;
-            }
-            const auto instanceIndex = references_.size();
-            references_.push_back(ReferenceInstance{
-                parentInstance, partIndex, node.name, resref,
-                node.reference->reattachable != 0, asset->model, asset->supermodels,
-                neomdl::model::constructedBindPose(asset->model, resourceLoadJob()),false,VisualAttachmentKind::None,0u,1.0f,false,{},{}});
-            auto nextChain = chain;
-            nextChain.emplace(key);
-            // NewCAurObject recursively creates the referenced object's owned
-            // references before CreateReferenceObjects resumes on this owner.
-            visit(asset->model, instanceIndex, depth + 1u, std::move(nextChain));
-        });
-    };
-
-    std::unordered_set<std::string> initial;
-    const auto rootKey = lower(hierarchyResref(rootResref));
-    if (!rootKey.empty()) initial.emplace(rootKey);
-    visit(model_, std::nullopt, 0u, std::move(initial));
-}
-
 void ModelDocument::loadReferencesFromResolver(
     const ResourceResolver& resolver, const std::string& rootResref) {
-    constexpr std::size_t maximumReferenceDepth = 64u;
-    constexpr std::size_t maximumReferenceInstances = 512u;
-    constexpr std::size_t maximumSupermodels = 64u;
     std::unordered_map<std::string, std::shared_ptr<ReferenceAsset>> cache;
     std::unordered_map<std::uint64_t, std::shared_ptr<ReferenceAsset>> registeredCache;
     model::retainAsciiModelInstance(model_);
@@ -1038,18 +814,13 @@ void ModelDocument::loadReferencesFromResolver(
             auto mdl = resolver(resref, kMdlResourceType);
             if (!mdl) return std::nullopt;
             std::vector<std::uint8_t> mdx;
-            try {
-                if (!model::isAsciiModelInput(mdl->bytes))if (auto companion = resolver(resref, kMdxResourceType))
+            if (!model::isAsciiModelInput(mdl->bytes)) {
+                if (auto companion = resolver(resref, kMdxResourceType))
                     mdx = std::move(companion->bytes);
-            } catch (const neoshared::bif::JobCancelled&) {
-                throw;
-            } catch (const std::exception& error) {
-                messages_.push_back(diagnosticPrefix + "MDX lookup failed for " +
-                                    resref + ": " + error.what());
             }
             return neomdl::model::decodeModelBytes(
                 mdl->bytes, mdx,
-                mdl->sourceDescription.empty() ? resref + ".mdl" : mdl->sourceDescription, {}, resourceLoadJob(),model_.game,asciiResources_);
+                mdl->sourceDescription.empty() ? resref + ".mdl" : mdl->sourceDescription, resourceLoadJob(),model_.game,asciiResources_);
         } catch (const neoshared::bif::JobCancelled&) {
             throw;
         } catch (const std::exception& error) {
@@ -1115,11 +886,6 @@ void ModelDocument::loadReferencesFromResolver(
                     "Reference " + resref + " supermodel ")) break;
             const auto next = hierarchyResref(current->supermodel);
             if (next.empty()) break;
-            if (asset->supermodels.size() >= maximumSupermodels) {
-                messages_.push_back("Reference " + resref +
-                    " supermodel chain exceeded the 64-model safety limit.");
-                break;
-            }
             const auto nextKey = lower(next);
             if (!visited.emplace(nextKey).second) {
                 messages_.push_back("Reference " + resref +
@@ -1143,21 +909,14 @@ void ModelDocument::loadReferencesFromResolver(
         return asset;
     };
 
-    bool exhausted = false;
     std::function<void(const neomdl::model::Model&, std::optional<std::size_t>,
-                       std::size_t, std::unordered_set<std::string>)> visit;
+                       std::unordered_set<std::string>)> visit;
     visit = [&](const neomdl::model::Model& owner,
                 std::optional<std::size_t> parentInstance,
-                std::size_t depth,
                 std::unordered_set<std::string> chain) {
-        if (exhausted) return;
-        if (depth >= maximumReferenceDepth) {
-            messages_.push_back("Reference hierarchy exceeded the 64-model safety limit.");
-            return;
-        }
         visitModelPartOccurrences(owner, [&](std::size_t partIndex,
                                              const neomdl::model::Node& node) {
-            if (exhausted || !node.reference) return;
+            if (!node.reference) return;
             const auto resref = hierarchyResref(node.reference->model);
             if (resref.empty()) {
                 messages_.push_back("Reference node " + node.name + " has no usable model ResRef.");
@@ -1166,11 +925,6 @@ void ModelDocument::loadReferencesFromResolver(
             const auto key = lower(resref);
             if (chain.find(key) != chain.end()) {
                 messages_.push_back("Reference cycle stopped at: " + resref);
-                return;
-            }
-            if (references_.size() >= maximumReferenceInstances) {
-                messages_.push_back("Reference hierarchy exceeded the 512-instance safety limit.");
-                exhausted = true;
                 return;
             }
             const auto asset = load(resref);
@@ -1186,35 +940,20 @@ void ModelDocument::loadReferencesFromResolver(
                 neomdl::model::constructedBindPose(asset->model, resourceLoadJob()),false,VisualAttachmentKind::None,0u,1.0f,false,{},{}});
             auto nextChain = chain;
             nextChain.emplace(key);
-            visit(asset->model, instanceIndex, depth + 1u, std::move(nextChain));
+            visit(asset->model, instanceIndex, std::move(nextChain));
         });
     };
 
     std::unordered_set<std::string> initial;
     const auto rootKey = lower(hierarchyResref(rootResref));
     if (!rootKey.empty()) initial.emplace(rootKey);
-    visit(model_, std::nullopt, 0u, std::move(initial));
+    visit(model_, std::nullopt, std::move(initial));
 }
 
 const ModelDocument* ModelDocument::chunkModel(const std::string& resref) const {
     const auto found=chunkModels_.find(lower(hierarchyResref(resref)));
     return found==chunkModels_.end()
         ? (resourceParent_ ? resourceParent_->chunkModel(resref) : nullptr) : found->second.get();
-}
-void ModelDocument::loadChunkModelsFromDirectory(const std::filesystem::path& directory) {
-    if(!allowChunkModels_) return;
-    const auto root=std::filesystem::absolute(directory).lexically_normal();
-    const ResourceResolver resolver=[root](const std::string& name,std::uint16_t type)
-        ->std::optional<neoshared::ResourceDocument> {
-        const auto extension=modelResourceExtension(type);
-        if(extension.empty()) return {};
-        const auto path=uniqueCaseInsensitiveFile(root,hierarchyResref(name)+extension);
-        if(!path) return {};
-        neoshared::ResourceDocument resource;resource.fileName=name+extension;resource.type=type;
-        resource.identity=resourceFileIdentity(*path,true);resource.sourceDescription=neoshared::genericPathToUtf8(*path);
-        resource.bytes=neoshared::texture::readFileBytes(*path,67108864u);return resource;
-    };
-    loadChunkModels(resolver);
 }
 void ModelDocument::loadChunkModels(const ResourceResolver& resolver) {
     if(!allowChunkModels_) return;
@@ -1226,42 +965,17 @@ void ModelDocument::loadChunkModels(const ResourceResolver& resolver) {
         }
     };
     collect(model_);for(const auto& reference:references_) collect(reference.model);
-    std::size_t vertices=0,pixels=0,attempts=0;
-    auto bytes=std::make_shared<std::size_t>(0);
-    const ResourceResolver bounded=[resolver,bytes](const std::string& name,std::uint16_t type) {
-        if(!resolver) return std::optional<neoshared::ResourceDocument>{};
-        auto resource=resolver(name,type);
-        if(resource) {
-            if(resource->bytes.size()>268435456u-*bytes)
-                throw neomdl::model::ModelError("Chunk resource input budget (256 MiB) exceeded");
-            *bytes+=resource->bytes.size();
-        }
-        return resource;
-    };
     std::vector<std::pair<std::string,std::string>> pending(names.begin(),names.end());
     for(std::size_t cursor=0;cursor<pending.size();++cursor) {
         const auto name=pending[cursor];
-        resourceLoadJob().update(attempts, pending.size(), "Loading particle model: " + name.second);
-        if(attempts++>=16) {messages_.push_back("Chunk model lookup limit (16) reached");break;}
+        resourceLoadJob().update(cursor, pending.size(), "Loading particle model: " + name.second);
         try {
-            auto resource=bounded(name.second,kMdlResourceType);
+            auto resource=resolver ? resolver(name.second,kMdlResourceType) : std::nullopt;
             if(!resource) {messages_.push_back("Chunk model not found: "+name.second);continue;}
             if(resource->fileName.empty()) resource->fileName=name.second+".mdl";
             resource->type=kMdlResourceType;
             auto chunk=std::make_shared<ModelDocument>();chunk->allowChunkModels_=false;
-            chunk->openResource(std::move(*resource),bounded,resourceLoadJob(),model_.game,asciiResources_);
-            chunk->resolver_=traceResources(resolver,chunk->trace_,chunk->identity_);
-            std::size_t work=0;
-            const auto inspect=[&](const neomdl::model::Model& model) {
-                work+=model.nodes.size();for(const auto& mesh:model.meshes) work+=mesh.vertices.size();
-            };
-            inspect(chunk->model());for(const auto& reference:chunk->references()) inspect(reference.model);
-            if(work>2097152u-vertices) {messages_.push_back("Chunk model geometry budget (2M vertices/nodes) exceeded: "+name.second);continue;}
-            std::size_t decodedPixels=0;
-            for(const auto& image:chunk->textures_) for(const auto& layer:image.second.layers)
-                decodedPixels+=layer.rgba.size();
-            if(decodedPixels>134217728u-pixels) {messages_.push_back("Chunk decoded texture budget (128 MiB) exceeded: "+name.second);continue;}
-            pixels+=decodedPixels;vertices+=work;
+            chunk->openResource(std::move(*resource),resolver,resourceLoadJob(),model_.game,asciiResources_);
             const auto queue=[&](const neomdl::model::Model& model) {
                 for(const auto& node:model.nodes) if(node.emitter) {
                     const auto child=hierarchyResref(node.emitter->chunkName);
@@ -1294,10 +1008,6 @@ bool ModelDocument::appendLoadedSupermodels(const neomdl::model::Model& model,
     if (!retained) return false;
     for (const auto& inherited : *retained) {
         resourceLoadJob().check();
-        if (destination.size() >= 64u) {
-            messages_.push_back(prefix + "chain exceeded the 64-model safety limit at: " + inherited.name);
-            break;
-        }
         destination.push_back(inherited);
         appendParserWarnings(destination.back(), prefix + inherited.name + ": ");
     }
@@ -1358,11 +1068,6 @@ std::vector<std::string> ModelDocument::referencedTextures() const {
     return result;
 }
 
-void ModelDocument::loadTexturesFromDirectory(const std::filesystem::path& directory,
-                                               const std::vector<std::string>& names) {
-    loadTexturesFromResolver(directoryResourceResolver(directory),names);
-}
-
 void ModelDocument::loadTexturesFromResolver(const ResourceResolver& resolver,
                                               const std::vector<std::string>& names) {
     if (!resolver) {
@@ -1382,6 +1087,7 @@ void ModelDocument::loadTexturesFromResolver(const ResourceResolver& resolver,
         if(textures_.count(lower(resourceStem(name)))) continue;
         bool resolved = false;
         bool loaded = false;
+        bool failed = false;
         for (const auto& candidate : candidates) {
             try {
                 auto resource = resolver(name, candidate.type);
@@ -1412,10 +1118,11 @@ void ModelDocument::loadTexturesFromResolver(const ResourceResolver& resolver,
                 throw;
             } catch (const std::exception& error) {
                 messages_.push_back("Unable to decode texture " + name + ": " + error.what());
+                failed = true;
                 break;
             }
         }
-        if (!loaded && !resolved) {
+        if (!loaded && !resolved && !failed) {
             try {
                 if(auto resource=resolver(name,kTxiResourceType)) {
                     resolved=true;
@@ -1432,9 +1139,10 @@ void ModelDocument::loadTexturesFromResolver(const ResourceResolver& resolver,
                 throw;
             } catch (const std::exception& error) {
                 messages_.push_back("Unable to construct procedural texture "+name+": "+error.what());
+                failed = true;
             }
         }
-        if (!loaded && !resolved && textures_.find(lower(resourceStem(name))) == textures_.end())
+        if (!loaded && !resolved && !failed && textures_.find(lower(resourceStem(name))) == textures_.end())
             messages_.push_back("Texture resource was not found in the game session: " + name);
     }
 }

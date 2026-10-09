@@ -163,21 +163,6 @@ struct ParticleBlast {
 // Compatibility record retained for hosts using the particle API directly.
 // The calculation now follows the exact K2 WindManager point-source path.
 Vec3 particleBlastDisplacement(const ParticleBlast& blast, Vec3 point) noexcept;
-struct ParticleTriangle { Vec3 a{},b{},c{}; };
-// Bounded, point-segment collision proxy. This does not claim equivalence to
-// the game's area/walkmesh collision categories or swept-volume queries.
-class ParticleCollisionMesh {
-public:
-    bool build(std::vector<ParticleTriangle> triangles);
-    std::optional<ParticleContact> trace(Vec3 from,Vec3 to) const noexcept;
-    std::size_t triangleCount() const noexcept { return triangles_.size(); }
-private:
-    struct Branch {Vec3 minimum{},maximum{};std::size_t start{},count{},left{},right{};};
-    std::size_t buildBranch(std::size_t start,std::size_t count);
-    std::vector<ParticleTriangle> triangles_;
-    std::vector<Branch> branches_;
-};
-std::optional<ParticleContact> traceParticleGround(Vec3 from,Vec3 to,float height) noexcept;
 struct EmitterParticle {
     Vec3 position{}, velocity{}; // scene space; no attachment transform on draw
     Quaternion orientation; // engine Particle quaternion, distinct from movement direction
@@ -210,7 +195,7 @@ struct EmitterSimulation {
     std::vector<EmitterParticle> particles;
     double accumulator{}; // accumulated simulated time, not a hidden substep timer
     float birthRemainder{}; // engine time-emission accumulator, reset on emission
-    std::uint64_t seed{}, nextSerial{}, droppedBirths{}, invalidEnvironmentSamples{}, detonations{};
+    std::uint64_t seed{}, nextSerial{}, detonations{};
     ParticleRandom random;
     Mat4 world=identityMatrix(), previousWorld=identityMatrix();
     EngineFrame frame, previousFrame;

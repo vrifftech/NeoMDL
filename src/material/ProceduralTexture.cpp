@@ -10,7 +10,6 @@
 
 namespace neomdl::material {
 namespace {
-constexpr std::size_t maximumPixels=4u*1024u*1024u;
 constexpr float pi=3.1415927410125732421875f, twoPi=6.283185482025146484375f;
 std::string lower(std::string s) {
     for(auto& c:s) if(c>='A' && c<='Z') c=char(c-'A'+'a');
@@ -34,11 +33,16 @@ std::optional<ProcedureType> type(const std::string& s,EngineMaterialGame game) 
     return {};
 }
 bool isDirty(ProcedureType t) {return t==ProcedureType::Dirty||t==ProcedureType::Dirty2||t==ProcedureType::Dirty3;}
-std::size_t checkedPixels(int w,int h,int d=1) {
-    if(w<=0||h<=0||d<=0||w>4096||h>4096||d>4096 ||
-       std::uint64_t(w)*std::uint64_t(h)*std::uint64_t(d)>maximumPixels)
-        throw std::invalid_argument("Procedural texture dimensions exceed the bounded engine-image domain");
-    return std::size_t(w)*std::size_t(h)*std::size_t(d);
+std::size_t checkedProduct(std::size_t a,std::size_t b) {
+    if(b&&a>std::numeric_limits<std::size_t>::max()/b)
+        throw std::length_error("Procedural image storage size overflows");
+    return a*b;
+}
+std::size_t checkedPixels(std::int64_t w,std::int64_t h,std::int64_t d=1) {
+    if(w<=0||h<=0||d<=0||w>std::numeric_limits<int>::max()||
+       h>std::numeric_limits<int>::max()||d>std::numeric_limits<int>::max())
+        throw std::invalid_argument("Procedural dimensions must be positive engine integers");
+    return checkedProduct(checkedProduct(std::size_t(w),std::size_t(h)),std::size_t(d));
 }
 // cvttss2si's indefinite result is defined by the inspected x86 instruction.
 // Avoid C++ undefined float-to-integer conversions without saturating pixels.
@@ -91,13 +95,12 @@ void validateDefinition(const ProcedureDefinition& d) {
         if(!std::isfinite(f))throw std::invalid_argument("Nonfinite engine procedural parameter");
     for(const auto* a:{&d.channelScale,&d.channelTranslate})
         for(float f:*a)if(!std::isfinite(f))throw std::invalid_argument("Nonfinite channel parameter");
-    if(d.numX<=0||d.numY<=0||std::uint64_t(d.numX)*unsigned(d.numY)>4096u)
-        throw std::invalid_argument("Invalid or excessive engine texture tile count");
+    if(d.numX<=0||d.numY<=0||std::uint64_t(d.numX)*unsigned(d.numY)>std::numeric_limits<unsigned>::max())
+        throw std::invalid_argument("Engine texture tile count cannot be represented");
 }
 }
 
 ProcedureDefinition procedureDefinition(const TxiMetadata& metadata,EngineMaterialGame game) {
-    if(metadata.sourceText.size()>kMaxMaterialTxiBytes)throw std::length_error("Procedural TXI exceeds material limit");
     // Only a live controller consumes Parse<float>'s packed payload. With no
     // controller the engine outer reader would interpret those bytes as text.
     std::optional<ProcedureType> active;
@@ -109,11 +112,7 @@ ProcedureDefinition procedureDefinition(const TxiMetadata& metadata,EngineMateri
     }
     std::vector<std::string> lines;
     std::istringstream input(neoshared::texture::txiTextView(metadata.sourceText).text);std::string line;
-    while(std::getline(input,line)) {
-        if(line.size()>kMaxMaterialTxiLineBytes||lines.size()>=kMaxMaterialTxiLines)
-            throw std::length_error("Procedural TXI exceeds line limits");
-        lines.push_back(line);
-    }
+    while(std::getline(input,line))lines.push_back(line);
     ProcedureDefinition d;d.game=game;
     for(std::size_t i=0;i<lines.size();++i) {
         std::istringstream row(lines[i]);std::string key,value;row>>key;std::getline(row,value);key=lower(key);
@@ -154,23 +153,23 @@ ProcedureDefinition procedureDefinition(const TxiMetadata& metadata,EngineMateri
             auto& a=key=="channelscale"?d.channelScale:d.channelTranslate;
             int n{};char packed{};const int fields=std::sscanf(value.c_str(),"%d %c",&n,&packed);
             if(fields==2)throw std::invalid_argument("Packed channel-array TXI requires the engine packed stream, not inline text values");
-            if(fields==1 && (n<0||n>4096))throw std::invalid_argument("Invalid engine channel-array count");
+            if(fields==1&&n<0)throw std::invalid_argument("Invalid engine channel-array count");
             // Parse<float> allocates the new positive count, then copies the
             // OLD count before loading values. Shrinking therefore overruns.
             if(fields==1&&n>0&&std::size_t(n)<a.size())
                 throw std::invalid_argument("Engine channel-list shrink copies beyond the replacement allocation");
+            if(fields==1&&std::size_t(n)>lines.size()-i-1)
+                throw std::invalid_argument("Truncated engine channel array");
             std::size_t index=0;
             if(fields==1)a.resize(std::size_t(n));
             const auto add=[&](const std::string& text){float f{};if(!scan(text,f)||!std::isfinite(f))throw std::invalid_argument("Invalid channel-array element");
                 if(index<a.size())a[index]=f;else a.push_back(f);++index;};
             if(fields==1) {
-                if(std::size_t(n)>lines.size()-i-1)throw std::invalid_argument("Truncated engine channel array");
                 for(int j=0;j<n;++j)add(lines[++i]);
             } else {
                 bool ended=false;
                 while(++i<lines.size()) {
                     if(firstWord(lines[i]).rfind("endlist",0)==0){ended=true;break;}
-                    if(index>=4096)throw std::length_error("Engine channel array exceeds host bound");
                     add(lines[i]);
                 }
                 if(!ended)throw std::invalid_argument("Unterminated engine channel array");
@@ -209,8 +208,8 @@ bool ProceduralTexture::initialize(const ProcedureDefinition& d,const ProcedureI
         validateDefinition(d);
         if(d.volumeTexture && !isDirty(*d.type))
             throw std::invalid_argument("A prior Dirty directive leaves the engine 3D flag set; replacement by a 2D controller is unsupported");
-        const auto count=checkedPixels(int(source.width),int(source.height),int(source.depth));
-        if(source.bytesPerPixel<1||source.bytesPerPixel>4||source.bytes.size()!=count*source.bytesPerPixel)
+        const auto count=checkedPixels(source.width,source.height,source.depth);
+        if(source.bytesPerPixel<1||source.bytesPerPixel>4||source.bytes.size()!=checkedProduct(count,source.bytesPerPixel))
             throw std::invalid_argument("Engine procedural source has inconsistent byte storage");
         if(source.depth!=1)throw std::invalid_argument("Controller input must be a engine 2D image before Dirty initialization");
         if(*d.type==ProcedureType::Perlin && source.width!=source.height)
@@ -240,7 +239,7 @@ bool ProceduralTexture::initialize(const ProcedureDefinition& d,const ProcedureI
             current_.assign(std::size_t(d.waterWidth)*std::size_t(d.waterHeight),127.0f);
             previous_.assign(current_.size(),0);scratch_.resize(current_.size());target_.resize(count);break;
         case ProcedureType::Life:
-            life_.resize(count*4);
+            life_.resize(checkedProduct(count,4));
             for(std::size_t p=0;p<count;++p) {
                 life_[4*p]=context.nextRandom()%100u>=61u?255:0;
                 life_[4*p+1]=life_[4*p+2]=0;life_[4*p+3]=255;
@@ -318,18 +317,18 @@ void ProceduralTexture::distortImage() {
 void ProceduralTexture::buildPerlin(std::vector<std::uint8_t>& destination,ProcedureContext& context,int maximum) {
     const int width=int(image_.width);std::vector<std::vector<std::uint8_t>> octaves;float weight=1;
     for(int n=4;;n*=2,weight*=0.5f) {
-        auto& a=octaves.emplace_back(std::size_t(n)*std::size_t(n));
+        auto& a=octaves.emplace_back(checkedProduct(std::size_t(n),std::size_t(n)));
         for(auto& v:a) {
             if(maximum<0)v=byteValue(float(int(context.nextRandom()%128u)-64)*weight+127.0f);
             else v=maximum?byteValue(float(context.nextRandom()%unsigned(maximum))*weight):0;
         }
         if(n>width/2)break;
     }
-    destination.resize(std::size_t(width)*std::size_t(width));
+    destination.resize(checkedProduct(std::size_t(width),std::size_t(width)));
     for(int y=0;y<width;++y)for(int x=0;x<width;++x) {
-        int sum=127,n=4;
+        int sum=127;unsigned n=4;
         for(const auto& a:octaves) {
-            sum+=int(interpolate(a,n,float(y)/float(width)*float(n),float(x)/float(width)*float(n)))-127;n*=2;
+            sum+=int(interpolate(a,int(n),float(y)/float(width)*float(n),float(x)/float(width)*float(n)))-127;n*=2;
         }
         destination[std::size_t(y)*std::size_t(width)+std::size_t(x)]=std::uint8_t(sum);
     }
@@ -496,14 +495,14 @@ void ProceduralTexture::ring(ProcedureContext& context) {
 }
 void ProceduralTexture::dirty(ProcedureContext& context) {
     const auto kind=*definition_.type;const auto index=kind==ProcedureType::Dirty?0u:kind==ProcedureType::Dirty2?1u:2u;
-    auto inputs=context.dirty[index];if(inputs.size==0)inputs=DirtyTextureInputs{};
+    auto inputs=context.dirty[index];
     // Init stores its formula at +0x40 as a signed byte. Preserve the pinned
     // controller value; later area changes do not rewrite a live controller.
     const auto low=static_cast<std::uint32_t>(inputs.parameter)&255u;
     inputs.parameter=low<128u?static_cast<int>(low):static_cast<int>(low)-256;
     dirtyInputs_=inputs;
     const auto pixels=checkedPixels(inputs.size,inputs.size,inputs.size);
-    image_.width=image_.height=image_.depth=unsigned(inputs.size);image_.bytes.resize(pixels*4);
+    image_.width=image_.height=image_.depth=unsigned(inputs.size);image_.bytes.resize(checkedProduct(pixels,4));
     const std::array<int,4> color{{int((inputs.color>>16)&255u),int((inputs.color>>8)&255u),int(inputs.color&255u),
         (inputs.color&0x80000000u)?int(inputs.color>>24)-256:int(inputs.color>>24)}};
     std::array<std::vector<std::uint8_t>,3> planes;
@@ -575,8 +574,8 @@ ProcedureChange ProceduralTexture::control(ProcedureContext& context,std::string
 std::vector<ProcedureImage> procedureNormalLevels(const ProcedureImage& image,float scale,bool authoredNormal) {
 
 
-    checkedPixels(int(image.width),int(image.height));
-    if(image.depth!=1 || !std::isfinite(scale) || image.bytes.size()<std::size_t(image.width)*image.height)
+    const auto count=checkedPixels(image.width,image.height);
+    if(image.depth!=1 || !std::isfinite(scale) || image.bytes.size()<count)
         throw std::invalid_argument("Invalid engine normal-map upload image/scale");
     const auto extent=[](unsigned n) {
         if((n&(n-1u))==0)return n;
@@ -587,7 +586,7 @@ std::vector<ProcedureImage> procedureNormalLevels(const ProcedureImage& image,fl
     // downSampleNormalMap exchanges width/height in its wrap divisors. Its
     // nonsquare branch can address beyond its input; do not repair its math.
     if(w!=h)throw std::invalid_argument("Nonsquare engine normal mip chains have an unsafe wrap domain");
-    ProcedureImage first;first.width=w;first.height=h;first.bytes.resize(std::size_t(w)*h*4u);
+    ProcedureImage first;first.width=w;first.height=h;first.bytes.resize(checkedProduct(checkedPixels(w,h),4));
     if(authoredNormal) {
         if(image.bytes.size()<first.bytes.size())throw std::invalid_argument("Authored normal upload has fewer than four bytes per output pixel");
         std::copy_n(image.bytes.begin(),first.bytes.size(),first.bytes.begin());
@@ -651,7 +650,7 @@ neoshared::texture::TextureData constructProcedureSource(const std::string& txi,
     result.sourceEncoding=game==EngineMaterialGame::Kotor1?"K1 procedural RGBA":"K2 procedural RGBA";
     result.txi=txi;result.hasAlpha=true;
     result.txiStorage=neoshared::texture::TxiStorage::Sidecar;
-    neoshared::texture::TextureLayer image;image.width=result.canvasWidth;image.height=result.canvasHeight;image.rgba.assign(count*4,127);
+    neoshared::texture::TextureLayer image;image.width=result.canvasWidth;image.height=result.canvasHeight;image.rgba.assign(checkedProduct(count,4),127);
     result.layers.push_back(std::move(image));return result;
 }
 } // namespace neomdl::material

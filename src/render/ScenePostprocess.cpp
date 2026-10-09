@@ -34,7 +34,7 @@ bool extension(const char* text,const char* token) {
 }
 std::string objectLog(g::Api& a,g::UInt id,bool program) {
     g::Int n=0;if(program)a.GetProgramiv(id,g::InfoLogLength,&n);else a.GetShaderiv(id,g::InfoLogLength,&n);
-    std::vector<char> bytes(static_cast<std::size_t>(std::clamp(n,1,1048576)),0);g::Size used=0;
+    std::vector<char> bytes(static_cast<std::size_t>(std::max(n,1)),0);g::Size used=0;
     if(program)a.GetProgramInfoLog(id,static_cast<g::Size>(bytes.size()),&used,bytes.data());
     else a.GetShaderInfoLog(id,static_cast<g::Size>(bytes.size()),&used,bytes.data());
     return std::string(bytes.data(),static_cast<std::size_t>(std::clamp(used,0,static_cast<int>(bytes.size()))));
@@ -203,9 +203,9 @@ struct ScenePostprocess::Impl {
         a.GetIntegerv(DrawBuffer,&f.drawBuffer);a.GetIntegerv(ReadBuffer,&f.readBuffer);
         if(f.draw) {
             g::Int count=0;a.GetIntegerv(0x8824 /* GL_MAX_DRAW_BUFFERS */,&count);
-            if(count<1||count>256)throw std::runtime_error("Invalid host draw-buffer limit");
+            if(count<1)throw std::runtime_error("Invalid host draw-buffer limit");
             f.drawBuffers.resize(static_cast<std::size_t>(count));
-            for(int n=0;n<count;++n){g::Int v=0;a.GetIntegerv(0x8825+n,&v);f.drawBuffers[static_cast<std::size_t>(n)]=static_cast<g::Enum>(v);}
+            for(int n=0;n<count;++n){g::Int v=0;a.GetIntegerv(0x8825u+unsigned(n),&v);f.drawBuffers[static_cast<std::size_t>(n)]=static_cast<g::Enum>(v);}
         }
         f.drawFboReadBuffer=f.readBuffer;
         if(separate&&f.draw!=f.read) {

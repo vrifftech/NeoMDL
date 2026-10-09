@@ -76,10 +76,8 @@ struct SkinEffectSpace {
 };
 
 SkinEffectSpace skinEffectSpace(
-    const neomdl::model::Mat4& modelView) noexcept {
-    std::array<float,9> inverseTranspose{};
-    if (!neomdl::model::makeNormalMatrix(modelView, inverseTranspose))
-        return {};
+    const neomdl::model::Mat4& modelView) {
+    const auto inverseTranspose=neomdl::model::makeNormalMatrix(modelView);
     const auto inverseVector=[&](neomdl::model::Vec3 value) {
         // makeNormalMatrix returns A^-T. Its stored columns are therefore the
         // rows needed for A^-1 * value.
@@ -746,7 +744,6 @@ DirtyAreaState ModelCanvas::dirtyAreaState() const {
     return explicitDirtyArea_?*explicitDirtyArea_:areaScene_.visualSettings().dirty;
 }
 void ModelCanvas::loadDirtyArea(const std::filesystem::path& path) {
-    if(std::filesystem::file_size(path)>64u*1024u*1024u)throw std::runtime_error("ARE exceeds 64 MiB host limit");
     neogff::GffFile gff;gff.LoadFile(path);
     if(!gff.root()||gff.filetype()!="ARE "||gff.version()!="V3.2")throw std::runtime_error("Expected ARE V3.2");
     auto tuple=readDirtyArea(*gff.root());
@@ -1949,7 +1946,6 @@ void ModelCanvas::setDocument(const ModelDocument* document) {
     replayAnimationTime_ = 0.0f;
     replayAnimationLoop_ = false;
     compatibilityRunId_.reset();
-    dynamicTime_ = 0.0f;
     materialTime_ = 0.0;
     pose_.reset();
     danglyState_ = {};
@@ -2079,15 +2075,12 @@ std::string ModelCanvas::engineExecutionReport() const {
             std::to_string(step.renderFuncCompleted)+" draw="+
             std::to_string(step.drawCallbackCompleted)+"\n";
     if(!particleError_.empty())text+="Emitter scheduler error: "+particleError_+"\n";
-    constexpr std::size_t reportLimit=16u*1024u*1024u;
     for(const auto& b:areaScene_.grass().bins())if(b.built) {
-        if(text.size()>reportLimit) {text+="Grass report limit reached; remaining bins omitted.\n";break;}
         text+="Bin "+std::to_string(b.identity)+" room "+std::to_string(b.room)+"\n";
         for(const auto& group:b.groups)text+="group: first vertex="+std::to_string(group.firstVertex)+" blades="+
             std::to_string(group.bladeCount)+" Part="+std::to_string(group.part)+" original lightmap Part="+
             std::to_string(group.lightmapPart)+" texture="+group.lightmap+"\n";
         for(const auto& face:b.faceBuilds) {
-            if(text.size()>reportLimit){text+="Face/RNG report limit reached; remaining records omitted.\n";break;}
             text+="face: Part="+std::to_string(face.part)+" index="+std::to_string(face.face)+" first blade="+
                 std::to_string(face.firstBlade)+" count="+std::to_string(face.bladeCount)+" seed="+std::to_string(face.seed)+
                 " final RNG="+std::to_string(face.randomStateAfter)+"\n";
@@ -2750,7 +2743,6 @@ void ModelCanvas::resetDynamics() {
     pendingEmitterSceneAnimating_=false;emitterPrewarmTrace_={};emitterFrameTrace_={};
     particleScene_.resetSimulation();
     referenceScene_.reset();
-    dynamicTime_ = 0.0f;
     materialTime_ = animationRuntime_.empty()
         ? 0.0 : animationRuntime_.primaryTime();
     rebuildPose(true);
@@ -3014,8 +3006,7 @@ void ModelCanvas::advance(float elapsedSeconds, bool advanceParticles,
     advanceDialogue();
     if(dialogueRuntime_.running()&&dialogueRuntime_.dialogue().conversationType.value_or(0)!=1)
         dialogueDrawElapsed_+=elapsedSeconds;
-    // Scene texture controllers consume the frame clock, not animation seek
-    // time or the spring/particle integrator's separate step cap.
+    // Scene texture controllers consume the frame clock, not animation seek time.
     pendingProcedureElapsed_ += elapsedSeconds;
     pendingDoorElapsed_ += elapsedSeconds;
     if(options_.engineLensFlares)pendingFlareElapsed_+=elapsedSeconds;
@@ -3024,12 +3015,10 @@ void ModelCanvas::advance(float elapsedSeconds, bool advanceParticles,
     // emitter bucket applies its own engine 0.1-second update clamp.
     pendingSceneElapsed_+=elapsedSeconds;
     const float sceneAnimationSeconds=elapsedSeconds;
-    elapsedSeconds = std::min(elapsedSeconds, 0.25f);
     pendingEmitterSceneAnimating_=pendingEmitterSceneAnimating_ ||
         (options_.previewEmitters && advanceParticles && elapsedSeconds>0.0f);
-    dynamicTime_ = std::fmod(dynamicTime_ + elapsedSeconds, 3600.0f);
     if (options_.previewLights)
-        pendingLightElapsed_ = std::min(0.25f, pendingLightElapsed_ + elapsedSeconds);
+        pendingLightElapsed_ += elapsedSeconds;
     inspectionAnimationsAdvancing_=advanceAnimations;
     mainAnimationAdvanced_=false;
     AreaFrameSettings areaFrame;

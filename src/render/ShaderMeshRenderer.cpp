@@ -157,7 +157,7 @@ std::string shaderLog(g::Api& api,g::UInt object,bool program) {
     g::Int length=0;
     if(program) api.GetProgramiv(object,g::InfoLogLength,&length);
     else api.GetShaderiv(object,g::InfoLogLength,&length);
-    std::vector<char> data(static_cast<std::size_t>(std::clamp(length,1,1048576)), '\0');
+    std::vector<char> data(static_cast<std::size_t>(std::max(length,1)), '\0');
     g::Size written=0;
     if(program) api.GetProgramInfoLog(object,static_cast<g::Size>(data.size()),&written,data.data());
     else api.GetShaderInfoLog(object,static_cast<g::Size>(data.size()),&written,data.data());
@@ -785,8 +785,7 @@ bool ShaderMeshRenderer::draw(const neomdl::model::Mesh& mesh,
         } catch(const std::exception& e) {error=e.what();return false;}
         if(!i.skinMaterials.prepare(a,p,engineProgram,error))return false;
     }
-    const bool posed=deformed && deformed->valid && deformed->positions.size()==mesh.vertices.size() &&
-                     deformed->normals.size()==mesh.vertices.size();
+    const bool posed=deformed!=nullptr;
     try {
         auto& cache=i.meshes[&mesh];
         const bool newGeometry=!cache.vbo || cache.vertices!=mesh.vertices.data() ||
@@ -824,8 +823,7 @@ bool ShaderMeshRenderer::draw(const neomdl::model::Mesh& mesh,
             applyUv(geometry.vertices,&RenderVertex::texcoord0);
             if(engineK1Draw)geometry.indices=drawIndices;
             if(p.primitive!=PrimitiveTopology::Triangles) {
-                // prepareRenderGeometry validates and triangulates ordinary
-                // model topology. A lightsaber stream is already the exact
+                // A lightsaber stream is already the exact
                 // GL_QUAD_STRIP index order from PartLightsaber::Draw,
                 // including repeated transition vertices and an odd endpoint.
                 geometry.indices.clear();
@@ -998,8 +996,7 @@ bool ShaderMeshRenderer::draw(const neomdl::model::Mesh& mesh,
             if(!applyDesktopFixedFragmentCommand(forcePlan.command,p,nextMaterialState,error))return false;
         }
         a.UseProgram(desktopFixedFragment?i.fixedProgram:i.program);
-        std::array<float,9> normal{};
-        neomdl::model::makeNormalMatrix(p.modelView,normal);
+        const auto normal=neomdl::model::makeNormalMatrix(p.modelView);
         const float handedness=neomdl::model::transformHandedness(p.modelView);
         a.UniformMatrix4fv(u.modelView,1,0,p.modelView.values.data());
         a.UniformMatrix4fv(u.projection,1,0,p.projection.values.data());

@@ -75,8 +75,7 @@ std::vector<Vertex> sourceVertices(const Mesh& mesh,const Node& node,Writer& out
             out.job().check();
             auto& vertex=result[i];
             const auto row=source.mdxDataOffset+i*mesh.mdxRowSize;
-            // Use enabled compiled channels directly. The inspection decoder may
-            // have repaired an invalid UV coordinate.
+            // Use enabled compiled channels directly.
             if(mesh.mdxBitmap&1u) vertex.position=vector(bytes,row+source.mdxVertexOffset);
             else if(mesh.cpuPositions) vertex.position=mesh.cpuPositions->at(i);
             else throw ModelError("Cannot export mesh "+node.name+": no compiled vertex-position pool");
@@ -171,9 +170,7 @@ void materialFields(Writer& out,const Model& model,const Node& node,const Mesh& 
         if(texture1.size()>16u)
             out.warning("Mesh "+node.name+": engine ASCII load truncates texture1 to 16 bytes");
     }
-    // Compiled colors, like compiled vertex channels above, retain their
-    // authored IEEE values. The inspection decoder's finite substitutes
-    // must not become new material data when exporting a packed model.
+    // Export the authored IEEE color words from compiled records.
     const auto diffuse=mesh.enginePrelightInput?vector(mesh.rawMeshHeader,60u):mesh.diffuse;
     const auto ambient=mesh.enginePrelightInput?vector(mesh.rawMeshHeader,72u):mesh.ambient;
     out.line("diffuse "+out.vector(diffuse));

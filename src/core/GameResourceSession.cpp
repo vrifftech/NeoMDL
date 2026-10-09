@@ -10,6 +10,7 @@
 #include <neoshared/PathUtf8.hpp>
 #include <algorithm>
 #include <map>
+#include <limits>
 #include <set>
 #include <stdexcept>
 
@@ -39,20 +40,20 @@ struct Mount {
         std::set<std::string> unique;
         for(const auto& requestedPath:requested) {
             job.check();
-            const auto p=requestedPath.is_absolute()?requestedPath:(root/requestedPath).lexically_normal();
-            if(!std::filesystem::is_regular_file(p)) throw std::runtime_error("Missing mounted archive: "+neoshared::pathToUtf8(p));
-            if(!unique.insert(pathIdentity(p)).second) throw std::runtime_error("Archive mounted twice: "+neoshared::pathToUtf8(p));
-            paths.push_back(std::filesystem::weakly_canonical(p));
+            const auto p=std::filesystem::weakly_canonical(requestedPath.is_absolute()?requestedPath:root/requestedPath);
+            if(!unique.insert(neoshared::genericPathToUtf8(p)).second) throw std::runtime_error("Archive mounted twice: "+neoshared::pathToUtf8(p));
+            paths.push_back(p);
         }
         if(!catalog.openFiles(root,paths,job,neoshared::bif::GameProfile::KotOR))
             throw std::runtime_error(catalog.lastError());
+        std::map<std::string,const neoshared::bif::LooseArchiveInfo*> archives;
+        for(const auto& archive:catalog.archives()) archives.emplace(pathIdentity(archive.resolvedPath),&archive);
         for(const auto& path:paths) {
             job.update(indices.size(),paths.size(),"Indexing mounted resources: "+neoshared::pathToUtf8(path));
-            const auto a=std::find_if(catalog.archives().begin(),catalog.archives().end(),
-                [&](const auto& x){return pathIdentity(x.resolvedPath)==pathIdentity(path);});
-            if(a==catalog.archives().end()||!a->valid)
+            const auto a=archives.find(neoshared::genericPathToUtf8(path));
+            if(a==archives.end()||!a->second->valid)
                 throw std::runtime_error("Invalid mounted archive: "+neoshared::pathToUtf8(path));
-            indexArchive(*a,job);
+            indexArchive(*a->second,job);
         }
     }
     void openOverrides(const Path& root,const std::vector<neoshared::override_aliases::OverrideRoot>& roots,
@@ -130,9 +131,8 @@ bool GameResourceSession::open(const neoshared::game::GameInstall& supplied,std:
             b.keyIndex[{lower(r.resref),r.type}].push_back(r.index);
         }
         job.update(0,0,"Discovering module and texture archives");
-        auto paths=neoshared::bif::LooseArchiveCatalog::scanForArchiveFiles(b.root,8193,job);
-        if(paths.size()>8192) throw std::runtime_error("Archive discovery exceeds 8192 files; narrow the installation root");
-        std::sort(paths.begin(),paths.end(),[&](const auto& a,const auto& z){job.check();return pathIdentity(a)<pathIdentity(z);});
+        const auto paths=neoshared::bif::LooseArchiveCatalog::scanForArchiveFiles(
+            b.root,std::numeric_limits<std::size_t>::max(),job);
         std::map<std::string,Path> globalFiles;
         std::map<std::string,std::map<std::string,Path>> grouped;
         for(const auto& p:paths) {
@@ -252,7 +252,7 @@ bool GameResourceSession::openModule(const GameResourceSession& source,const Mod
         job.update(0,0,"Opening module "+scope.name);
         if(!source.isOpen()) throw std::runtime_error("Open an installation before mounting a module");
         resourceKey(scope.name);
-        if(scope.archives.empty()||scope.archives.size()>64) throw std::runtime_error("A module scope requires 1..64 explicit archives");
+        if(scope.archives.empty()) throw std::runtime_error("A module scope requires an archive");
         auto next=std::make_shared<State>();next->base=source.state_->base;next->module=scope;
         next->mount.open(next->base->root,scope.archives,job);
         next->module->archives=next->mount.paths;

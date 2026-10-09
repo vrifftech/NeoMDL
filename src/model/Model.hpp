@@ -91,8 +91,7 @@ struct Bounds {
 };
 
 // On disk: bitangent, tangent, normal; three float3 vectors (36 bytes).
-// The source vectors are retained verbatim when finite. valid additionally
-// requires a non-degenerate basis; repair/generation belongs to the consumer.
+// Source vectors are retained verbatim. valid marks a finite, non-degenerate basis.
 struct TangentBasis {
     Vec3 bitangent{};
     Vec3 tangent{};
@@ -774,26 +773,6 @@ struct Pose {
     Bounds bounds{};
 };
 
-struct ParseLimits {
-    std::size_t maximumMdlBytes{512u * 1024u * 1024u};
-    std::size_t maximumMdxBytes{1024u * 1024u * 1024u};
-    std::size_t maximumNodes{200000u};
-    std::size_t maximumMeshes{200000u};
-    std::size_t maximumVertices{10000000u};
-    std::size_t maximumFaces{10000000u};
-    std::size_t maximumAabbNodes{20000000u};
-    std::size_t maximumAnimations{10000u};
-    std::size_t maximumAnimationNodes{1000000u};
-    // Aggregate count across base and animation-node position/UV pools.
-    std::size_t maximumAnimMeshSamples{10000000u};
-    std::size_t maximumAnimMeshIndices{20000000u};
-    std::size_t maximumAnimationEvents{100000u};
-    std::size_t maximumControllers{1000000u};
-    std::size_t maximumControllerValues{10000000u};
-    std::size_t maximumNameLength{1024u};
-    std::size_t maximumRecursionDepth{512u};
-};
-
 class ModelError : public std::runtime_error {
 public:
     using std::runtime_error::runtime_error;
@@ -814,14 +793,12 @@ using AsciiResourceResolver = std::function<std::optional<std::vector<std::uint8
 Model decodeModelBytes(const std::vector<std::uint8_t>& mdlBytes,
                        const std::vector<std::uint8_t>& mdxBytes = {},
                        const std::string& sourceLabel = {},
-                       const ParseLimits& limits = {},
                        const neoshared::bif::JobControl& job = {},
                        std::optional<GameVersion> asciiGame = std::nullopt,
                        const AsciiResourceResolver& asciiResources = {});
 
 Model readModelFile(const std::filesystem::path& mdlPath,
                     const std::optional<std::filesystem::path>& mdxPath = std::nullopt,
-                    const ParseLimits& limits = {},
                     const neoshared::bif::JobControl& job = {},
                     std::optional<GameVersion> asciiGame = std::nullopt,
                     const AsciiResourceResolver& asciiResources = {});

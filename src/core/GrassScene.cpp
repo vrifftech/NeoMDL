@@ -58,7 +58,6 @@ void validateGrassSettings(const GrassSettings& s) {
     require(std::isfinite(s.binSize)&&s.binSize>0,"invalid bin size");
     require(std::isfinite(s.nearSquared)&&std::isfinite(s.farSquared)&&s.nearSquared>=0&&s.farSquared>s.nearSquared,"invalid squared draw radii");
     require(std::isfinite(s.stiffness)&&s.stiffness>=0&&std::isfinite(s.alphaCutoff)&&s.alphaCutoff>=0&&s.alphaCutoff<=1,"invalid wind/alpha input");
-    require(s.maximumBlades>0&&s.maximumBlades<=10000000&&s.maximumBins>0&&s.maximumBins<=10000000,"invalid host allocation budget");
     require(!s.areaWind||*s.areaWind<=2,"unsupported ARE WindPower");
     for(const auto& m:s.surfaces)if(m) {
         require(!m->texture.empty()&&m->texture.size()<=32&&m->texture.find_first_of("/\\:")==std::string::npos,"invalid grass texture ResRef");
@@ -120,9 +119,13 @@ void GrassScene::rebuild(const std::vector<GrassRoomSource>& rooms,const GrassSe
         require(room.document&&room.document->isOpen()&&room.pose&&room.bounds.valid,"invalid static room source");
         const auto& asset=room.document->model();require(asset.game==settings.game,"grass room and area game differ");
         const auto frames=engineCollapsedHitPose(asset,*room.pose,room.world);
-        const auto dim=[&](float min,float max){const float n=std::ceil((max-min)/settings.binSize);require(n>=0&&n<=double(settings.maximumBins),"room grid exceeds host budget");return std::size_t(n);};
+        const auto dim=[&](float min,float max) {
+            const float n=std::ceil((max-min)/settings.binSize);
+            require(std::isfinite(n)&&n>=0&&double(n)<std::ldexp(1.0,std::numeric_limits<std::size_t>::digits),
+                    "room grid dimension exceeds index storage");
+            return std::size_t(n);
+        };
         const auto nx=dim(room.bounds.minimum.x,room.bounds.maximum.x),ny=dim(room.bounds.minimum.y,room.bounds.maximum.y);
-        require(!ny||nx<=settings.maximumBins/ny,"room grid exceeds host bin budget");
         const auto firstBin=next.bins_.size();
         std::map<std::pair<std::size_t,std::size_t>,std::size_t> index;
         std::vector<GrassSourceFace> faceOrder;
@@ -166,11 +169,16 @@ void GrassScene::rebuild(const std::vector<GrassRoomSource>& rooms,const GrassSe
                 }
                 centroid=add(engineRotate(frame.orientation,mul(centroid,1.f/3.f)),frame.position);require(finite(centroid),"invalid MDX face centroid");
                 centroid={roundEngine(centroid.x),roundEngine(centroid.y),roundEngine(centroid.z)};
-                const auto coordinate=[&](float value,float min,std::size_t n){const float at=std::floor((value-min)/settings.binSize);require(std::isfinite(at)&&n,"engine grass face indexes an empty room grid");return std::size_t(std::max(0.f,std::min(at,float(n-1))));};
+                const auto coordinate=[&](float value,float min,std::size_t n) {
+                    const float at=std::floor((value-min)/settings.binSize);
+                    require(std::isfinite(at)&&n,"engine grass face indexes an empty room grid");
+                    if(at<=0)return std::size_t{};
+                    if(double(at)>=double(n))return n-1;
+                    return std::size_t(at);
+                };
                 const auto xy=std::make_pair(coordinate(centroid.x,room.bounds.minimum.x,nx),coordinate(centroid.y,room.bounds.minimum.y,ny));
                 auto found=index.find(xy);
                 if(found==index.end()) {
-                    require(next.bins_.size()<settings.maximumBins,"host bin allocation budget exhausted");
                     GrassBin b;b.room=room.room;b.identity=next.bins_.size()+1;b.document=room.document;
                     b.x=xy.first;b.y=xy.second;b.surface=face.surfaceMaterial;
                     found=index.emplace(xy,next.bins_.size()).first;next.bins_.push_back(std::move(b));
@@ -178,8 +186,11 @@ void GrassScene::rebuild(const std::vector<GrassRoomSource>& rooms,const GrassSe
                 auto& bin=next.bins_[found->second];
                 const float area=.5f*length(cross(sub(tri.positions[1],tri.positions[0]),sub(tri.positions[2],tri.positions[1])));
                 const float count=area*settings.surfaces[face.surfaceMaterial]->density; // engine mulss then cvttss2si
-                require(std::isfinite(count)&&count>=0&&count<=double(settings.maximumBlades-totalBlades),"grass density exceeds host blade budget");
+                require(std::isfinite(count)&&count>=0&&double(count)<=std::numeric_limits<std::int32_t>::max(),
+                        "face blade count exceeds engine signed storage");
                 tri.bladeCount=std::size_t(count);if(!tri.bladeCount)continue; // first material still wins
+                require(tri.bladeCount<=std::numeric_limits<std::size_t>::max()-totalBlades,
+                        "grass blade count exceeds count storage");
                 totalBlades+=tri.bladeCount;bin.bladeCount+=tri.bladeCount;
                 for(auto p:tri.positions)extend(bin.bounds,p);
                 bin.lightmapped=bin.lightmapped||tri.lightmapped;bin.colored=bin.colored||tri.colored;
@@ -203,7 +214,10 @@ void GrassScene::rebuild(const std::vector<GrassRoomSource>& rooms,const GrassSe
 void GrassScene::build(GrassBin& b,model::ParticleRandom& random) {
     if(b.built||!b.bladeCount)return;
     const auto& m=*settings_.surfaces[b.surface];
-    std::vector<float> pool(b.bladeCount*4u*(3u+b.tailFloats));
+    std::vector<float> pool;
+    const auto floatsPerBlade=4u*(3u+b.tailFloats);
+    require(b.bladeCount<=pool.max_size()/floatsPerBlade,"grass pool exceeds storage capacity");
+    pool.resize(b.bladeCount*floatsPerBlade);
     auto groups=engineGrassGroups(b);
     std::vector<GrassFaceBuild> builds;builds.reserve(b.triangles.size());
     const auto before=random.state;std::size_t blade=0;
@@ -311,8 +325,13 @@ std::vector<std::size_t> GrassScene::drawOrder() const {
     return out;
 }
 model::Mesh GrassScene::drawMesh(const GrassBin& b,const GrassGroup& g,bool lightmapped) {
+    require(b.bladeCount<=std::numeric_limits<std::size_t>::max()/4u,"grass vertex count exceeds index storage");
     require(b.built&&g.firstVertex<=b.bladeCount*4u&&g.bladeCount<=b.bladeCount-g.firstVertex/4u,"invalid grass draw group");
-    model::Mesh mesh;mesh.vertices.resize(g.bladeCount*4u);mesh.lightmapped=lightmapped;mesh.mdxNormalOffset=0;mesh.mdxTexcoordOffsets[0]=0;if(lightmapped)mesh.mdxTexcoordOffsets[1]=0;
+    model::Mesh mesh;
+    require(g.bladeCount<=(std::uint64_t(std::numeric_limits<std::uint32_t>::max())+1u)/4u&&
+            g.bladeCount<=mesh.vertices.max_size()/4u&&g.bladeCount<=mesh.indices.max_size()/6u,
+            "grass draw exceeds vertex/index storage");
+    mesh.vertices.resize(g.bladeCount*4u);mesh.lightmapped=lightmapped;mesh.mdxNormalOffset=0;mesh.mdxTexcoordOffsets[0]=0;if(lightmapped)mesh.mdxTexcoordOffsets[1]=0;
     for(std::size_t n=0;n<mesh.vertices.size();++n) {
         const auto source=g.firstVertex+n;auto& v=mesh.vertices[n];v.position=read3(b.pool,source*3u);
         const auto tail=g.bladeCount*12u+source*b.tailFloats; // engine per-draw count, deliberately not b.bladeCount

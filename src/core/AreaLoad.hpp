@@ -18,7 +18,6 @@ struct AreaLoadOptions {
     // remain explicit diagnostics in both modes. Neither makes placeholders.
     bool allowPartialVisuals{};
     bool loadGrass{true};
-    std::size_t maximumObjects{8192};
     model::GameVersion game{model::GameVersion::Kotor2};
 };
 struct AreaVisualSettings {

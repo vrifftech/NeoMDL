@@ -137,7 +137,7 @@ const CreatureAppearanceAttachment* head(const CreatureAppearance& appearance) {
 CreatureEquipmentItem readCreatureEquipment(const std::string& name,std::uint32_t slot,const ResourceResolver& resolver,
     const neoshared::bif::JobControl& job,model::GameVersion game) {
     ResourceLoadScope work(job);job.check();
-    Tables tables{resolver,{},false};return loadItem(name,slot,tables,game);
+    Tables tables{resolver,{}};return loadItem(name,slot,tables,game);
 }
 void setCreatureEquipment(CreatureAppearanceState& state,std::vector<CreatureEquipmentItem> equipment) {
     // K1 EquipItem 0x1bc274 applies properties to every admitted slot;
@@ -181,7 +181,7 @@ CreatureAppearanceState readCreatureAppearance(const GffStruct& data,bool useEqu
 
 
     state.race=byte(data,"Race",6u);
-    Tables raceTables{resolver,{},false};
+    Tables raceTables{resolver,{}};
     const auto raceCount=static_cast<std::uint8_t>(raceTables.table("racialtypes").rowCount());
     require(state.race<raceCount,"Race is outside engine racialtypes entries");
     // LoadCreature 0x625699/0x6256c1: Appearance_Type is already the current
@@ -194,7 +194,7 @@ CreatureAppearanceState readCreatureAppearance(const GffStruct& data,bool useEqu
         // ReadItemsFromGff 0x624710 selects UTI vs inline strictly from its
         // caller flag. A failed template item is deleted and the loop continues.
         try {
-            Tables tables{resolver,{},false};
+            Tables tables{resolver,{}};
             equipment.push_back(useEquipmentTemplates?loadItem(resref(entry,"EquippedRes"),entry.typeid_,tables,game)
                 :readItem(entry,entry.typeid_,tables,game));
         } catch(const neoshared::bif::JobCancelled&) {throw;

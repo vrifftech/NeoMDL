@@ -14,7 +14,7 @@ namespace neomdl {
 class SceneQueries;
 class ParticleScene;
 // Restore a decoded frame grid without mutating NeoTPC's shared texture object.
-// Returns null with a diagnostic for mismatched grids, cubes or excessive size.
+// Returns null with a diagnostic for mismatched grids, cubes or invalid storage.
 std::shared_ptr<const neoshared::texture::TextureData> assembleParticleAtlas(
     const neoshared::texture::TextureData& texture, std::uint32_t columns,
     std::uint32_t rows, std::string& diagnostic);
@@ -32,8 +32,7 @@ struct ParticleSceneSettings {
     float windInterpolationPeriod{2.0f};
     neomdl::model::Vec3 objectTint{1,1,1};
     float objectAlpha{1}, tileAlpha{1};
-    bool groundCollision{}, meshCollision{}, blastWind{true};
-    float groundHeight{};
+    bool blastWind{true};
     neomdl::model::ParticleBounceMode bounceMode{neomdl::model::ParticleBounceMode::Legacy};
     bool operator==(const ParticleSceneSettings& other) const noexcept;
 };
@@ -153,16 +152,9 @@ struct ParticleReplayContext {
 };
 struct ParticleSceneStatistics {
     std::size_t emitters{}, unsupported{}, particles{};
-    std::uint64_t droppedBirths{}, invalidSceneSamples{}, droppedBlasts{};
-    std::size_t collisionTriangles{}, activeBlasts{}, missingTargets{}, chunkInstances{}, registeredWindyEmitters{};
+    std::size_t activeBlasts{}, missingTargets{}, chunkInstances{}, registeredWindyEmitters{};
     std::size_t visibleEmitters{}, roomRegistrations{};
     bool prewarmed{};
-};
-// Viewer safety budget shared across every emitter in one engine scene bucket.
-// It is intentionally separate from the game's caller order and can therefore
-// be carried across NeoMDL's per-owner ParticleScene components.
-struct ParticleChunkBudget {
-    std::size_t population{}, poseWork{};
 };
 struct ParticlePrewarmStep {
     std::size_t emitterIndex{};
@@ -228,7 +220,6 @@ public:
     const ParticleSceneSettings& settings() const noexcept {return settings_;}
     bool setObjectVisualInputs(const ParticleObjectVisualInputs&,std::string& error);
     const ParticleObjectVisualInputs& objectVisualInputs() const noexcept {return objectVisualInputs_;}
-    const std::string& sceneDiagnostic() const noexcept {return sceneDiagnostic_;}
     const std::vector<neomdl::model::PointSourceWind>& pointSourceWinds() const noexcept {
         return windManager().pointSources();
     }
@@ -282,31 +273,22 @@ public:
     bool prewarmPending() const noexcept {
         return !prewarmed_ && !deterministicReplay_ && !prewarmDeferred_;
     }
-    const std::string& prewarmFailure() const noexcept { return prewarmFailure_; }
-    void prewarmPrepared(std::size_t& totalParticles,
-                         ParticleChunkBudget& chunkBudget,
-                         std::vector<ParticlePrewarmStep>* trace=nullptr);
-    void prewarmRegisteredEmitter(std::size_t,std::size_t&,ParticleChunkBudget&,ParticlePrewarmStep&);
+    void prewarmPrepared(std::vector<ParticlePrewarmStep>* trace=nullptr);
+    void prewarmRegisteredEmitter(std::size_t,ParticlePrewarmStep&);
     void finishPrewarm() noexcept;
     std::size_t particleCount() const noexcept;
     bool preparedOwnerAnimating(std::size_t emitterIndex) const noexcept;
-    bool animatePreparedEmitter(std::size_t emitterIndex, double elapsedSeconds,
-                                std::size_t& totalParticles,
-                                ParticleChunkBudget& chunkBudget);
+    bool animatePreparedEmitter(std::size_t emitterIndex, double elapsedSeconds);
     void renderPreparedEmitter(std::size_t emitterIndex,
                                const neomdl::model::Mat4& view,const model::EngineFrame& camera);
     void finishBucketFrame() noexcept;
     // Scene hosts merge admissions, not already sorted local buckets.
     const std::vector<std::size_t>& emitterAdmissions() const noexcept {return emitterAdmissions_;}
     const std::vector<std::size_t>& emitterBucket() const noexcept { return emitterBucket_; }
-    // Query the most recently built posed proxy in scene coordinates.
-    std::optional<neomdl::model::ParticleContact> traceCollisionProxy(
-        neomdl::model::Vec3 from,neomdl::model::Vec3 to) const noexcept;
     // Per-object event: no reference means only this model's emitters.
     void dispatchEvent(const std::string& name, std::optional<std::size_t> reference={});
     void detonateAll(bool includeReferences=true);
-    // Replays at a declared 60 Hz reference cadence, including event and frame
-    // updates. Limits reject a costly seek rather than showing a truncated age.
+    // Replays at a declared 60 Hz cadence, including event and frame updates.
     bool replay(std::optional<std::size_t> clip, double seconds, bool loop,
                 bool includeReferences,const ParticleReplayContext&);
     const std::string& replayDiagnostic() const noexcept {return replayDiagnostic_;}
@@ -328,8 +310,7 @@ private:
         bool pendingAnimating{};
         std::vector<std::size_t> cachedRooms;
     };
-    void updateEmitterChunks(ParticleEmitterInstance&,float elapsedSeconds,
-                             ParticleChunkBudget&);
+    void updateEmitterChunks(ParticleEmitterInstance&,float elapsedSeconds);
     void buildEmitterMeshes(ParticleEmitterInstance&,
                             const neomdl::model::Mat4& view,const model::EngineFrame& camera);
     void clearEmitterMeshes(ParticleEmitterInstance&) noexcept;
@@ -341,19 +322,11 @@ private:
         const std::optional<neomdl::model::Mat4>& target);
     void rebuildEmitterBucket();
     void refreshEngineEmitterFrame(ParticleEmitterInstance&,model::ParticleEnvironment&);
-    void prewarmEmitter(ParticleEmitterInstance&,
-                        std::size_t& totalParticles,
-                        ParticleChunkBudget&);
+    void prewarmEmitter(ParticleEmitterInstance&);
     OwnerSpatialState& ownerState(std::uint64_t identity);
-    void buildCollision(const neomdl::model::Pose& pose,
-        const std::vector<std::optional<neomdl::model::Mat4>>& bases,
-        bool includeReferences);
     ParticleSceneSettings settings_;
     ParticleObjectVisualInputs objectVisualInputs_;
     bool danglyEnabled_{true};
-    neomdl::model::ParticleCollisionMesh collision_;
-    std::string sceneDiagnostic_;
-    std::uint64_t droppedBlasts_{};
     std::size_t missingTargets_{};
     std::optional<neomdl::model::Vec3> cameraPosition_;
     std::vector<neomdl::model::EmitterScenePlane> scenePlanes_;
@@ -365,14 +338,9 @@ private:
     bool visibilityInitialized_{};
     bool prewarmed_{};
     bool prewarmDeferred_{};
-    // UpdateEmitters is a one-shot construction path. A host-side safety
-    // failure can leave earlier emitters advanced, so retrying would consume
-    // their RNG and births a second time. Latch the failure until reset.
-    std::string prewarmFailure_;
     bool deterministicReplay_{};
     using AtlasKey=std::tuple<const neoshared::texture::TextureData*,std::uint32_t,std::uint32_t>;
     std::map<AtlasKey,std::shared_ptr<const neoshared::texture::TextureData>> atlases_;
-    std::size_t atlasBytes_{};
     const ModelDocument* document_{};
     std::shared_ptr<SceneAnimation> sceneAnimation_=std::make_shared<SceneAnimation>();
     const ReferenceScene* references_{};

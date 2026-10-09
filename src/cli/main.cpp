@@ -48,10 +48,6 @@ int main(int argc, char** argv) {
         return 2;
     }
     try {
-        if(asciiOutput&&packedOutput) {
-            auto companion=*packedOutput;companion.replace_extension(".mdx");
-            neoshared::checkResourceOutput(*asciiOutput,{*packedOutput,companion});
-        }
         std::optional<std::filesystem::path> mdx;
         if (paths.size() == 2u) mdx = paths[1];
         neomdl::ModelDocument document;
@@ -61,35 +57,39 @@ int main(int argc, char** argv) {
             // bump materials change the authored MDX channel layout.
             document.openFile(paths[0],{},{},game);
             model=document.sourceModel();
-        } else model=neomdl::model::readModelFile(paths[0], mdx, {}, {}, game);
+        } else model=neomdl::model::readModelFile(paths[0], mdx, {}, game);
         std::cout << neomdl::model::modelSummary(model) << '\n';
         for (const auto& warning : model.warnings) std::cout << "warning: " << warning << '\n';
+        auto protectedPaths=packedOutput?document.openPaths():paths;
+        if(asciiOutput&&!packedOutput&&!mdx) {
+            auto companion=paths[0];companion.replace_extension(".mdx");
+            companion=neoshared::game::findExistingPathCaseInsensitive(companion);
+            if(!companion.empty()) protectedPaths.push_back(std::move(companion));
+        }
         if(asciiOutput) {
-            auto protectedInputs=paths;
-            if(!mdx) {
-                auto companion=paths[0];companion.replace_extension(".mdx");
-                companion=neoshared::game::findExistingPathCaseInsensitive(companion);
-                if(!companion.empty()) protectedInputs.push_back(std::move(companion));
-            }
-            neoshared::checkResourceOutput(*asciiOutput,protectedInputs);
+            neoshared::checkResourceOutput(*asciiOutput,protectedPaths);
+            protectedPaths.push_back(*asciiOutput);
+        }
+        std::filesystem::path packedCompanion;
+        if(packedOutput) {
+            neoshared::checkResourceOutput(*packedOutput,protectedPaths);
+            protectedPaths.push_back(*packedOutput);
+            packedCompanion=*packedOutput;packedCompanion.replace_extension(".mdx");
+            neoshared::checkResourceOutput(packedCompanion,protectedPaths);
+        }
+        if(asciiOutput) {
             const auto exported=neomdl::model::exportAsciiModel(model);
             const std::vector<std::uint8_t> bytes(exported.text.begin(),exported.text.end());
-            neoshared::checkResourceOutput(*asciiOutput,protectedInputs);
             neoshared::texture::writeFileBytes(*asciiOutput,bytes);
             for(const auto& warning:exported.warnings) std::cout<<"export warning: "<<warning<<'\n';
             std::cout<<"ASCII model exported to "<<neoshared::texture::pathToUtf8(*asciiOutput)<<'\n';
         }
         if(packedOutput) {
-            auto companion=*packedOutput;companion.replace_extension(".mdx");
-            const auto protectedInputs=document.openPaths();
-            neoshared::checkResourceOutput(*packedOutput,protectedInputs);
-            neoshared::checkResourceOutput(companion,protectedInputs);
-            neoshared::checkResourceOutput(companion,{*packedOutput});
             const auto exported=neomdl::model::exportPackedModel(model);
-            neoshared::texture::writeFileBytes(companion,exported.mdx);
+            neoshared::texture::writeFileBytes(packedCompanion,exported.mdx);
             neoshared::texture::writeFileBytes(*packedOutput,exported.mdl);
             std::cout<<"Packed model exported to "<<neoshared::texture::pathToUtf8(*packedOutput)
-                     <<" and "<<neoshared::texture::pathToUtf8(companion)<<'\n';
+                     <<" and "<<neoshared::texture::pathToUtf8(packedCompanion)<<'\n';
         }
         return 0;
     } catch (const std::exception& error) {

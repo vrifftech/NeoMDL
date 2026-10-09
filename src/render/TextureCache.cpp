@@ -151,7 +151,6 @@ GpuTexture TextureCache::uploadProcessed(const neoshared::texture::TextureData& 
                    "Processed texture frame is outside retained source surfaces";
         return {};
     }
-    if(size()>=4096u){error="GPU texture/frame cache limit (4096) reached";return {};}
     if(payload.compression!=neoshared::texture::ProcessedCompressionCodec::None&&!compressedTexImage2D_) {
         error="Engine processed block upload requires glCompressedTexImage2DARB";return {};
     }
@@ -253,7 +252,6 @@ GpuTexture TextureCache::upload(const neoshared::texture::TextureData& texture,
             if(const auto cached=found->second.find(layer);cached!=found->second.end())return cached->second;
         }
         if(layer>=texture.layers.size()){error="Texture frame is outside decoded layers";return {};}
-        if(size()>=4096u){error="GPU texture/frame cache limit (4096) reached";return {};}
         if(api_.GetError()!=g::NoError){error="Pending OpenGL error before texture upload";return {};}
         g::Int maximum{},gluMaximum{};
         api_.GetIntegerv(cube?0x851cu:0x0d33u,&maximum);
@@ -339,7 +337,6 @@ GpuTexture TextureCache::upload(const neoshared::texture::TextureData& texture,
         const auto cached=found->second.find(layer);if(cached!=found->second.end()) return cached->second;
     }
     if(layer>=texture.layers.size()) {error="Texture frame is outside decoded layers";return {};}
-    if(size()>=4096u) {error="GPU texture/frame cache limit (4096) reached";return {};}
     auto& a=api_;
     if(a.GetError()!=g::NoError) {error="Pending OpenGL error before texture upload";return {};}
     g::Int maximum=0;a.GetIntegerv(texture.cubeMap ? 0x851Cu : 0x0D33u,&maximum);
@@ -520,7 +517,7 @@ GpuTexture TextureCache::get(const neoshared::texture::TextureData& texture,
         else {
             initial.width=first.width;initial.height=first.height;
             const auto count=std::uint64_t(first.width)*first.height;
-            if(!first.width||!first.height||count>4u*1024u*1024u||first.rgba.size()!=count*4u)
+            if(!first.width||!first.height||count>first.rgba.max_size()/4u||first.rgba.size()!=count*4u)
                 throw std::invalid_argument("Invalid block-compressed cycle source dimensions/storage");
             initial.bytes.resize(std::size_t(count)*4);
             for(unsigned y=0;y<first.height;++y)std::copy_n(first.rgba.data()+std::size_t(first.height-1-y)*first.width*4,
@@ -540,7 +537,6 @@ GpuTexture TextureCache::get(const neoshared::texture::TextureData& texture,
             // All crop, normal and explicit mip domains are validated BEFORE
             // controller initialization can consume the shared scene RNG.
             const auto tids=material::procedureTidImages(initial,nx,ny,cube,r.cubeLayout);
-            if(size()+tids.size()>4096u)throw std::invalid_argument("GPU texture/frame cache limit (4096) reached");
             for(const auto& faces:tids)for(const auto& face:faces) {
                 if(r.normalUpload)(void)material::procedureNormalLevels(face,r.metadata.txi.properties.bumpMapScaling.value_or(1.0f),
                     r.metadata.txi.properties.bumpMapKind==material::BumpMapKind::AuthoredNormal);
@@ -640,7 +636,6 @@ bool TextureCache::uploadProcedure(ProcedureRecord& r,std::string& error) {
     if(volume&&!texImage3D_){error="Dirty volume requires glTexImage3D";return false;}
     auto found=entries_[r.source].find(0);bool created=found==entries_[r.source].end();
     if(!created&&r.uploadedRevision==r.controller.revision())return true;
-    if(created && size()>=4096u){error="GPU texture/frame cache limit (4096) reached";return false;}
     GpuTexture target;
     if(!created)target=found->second;
     else {target.width=image.width;target.height=image.height;target.volume=volume;target.order=orderFor(*r.source);}
@@ -752,7 +747,6 @@ bool TextureCache::uploadPixelTids(ProcedureRecord& r,std::string& error) {
     if(!r.registrationIds.empty()&&r.registrationIds.size()!=plans.size()) {
         error="Procedural registration-handle shape changed without a resource reset";return false;
     }
-    if(!oldSize&&size()+plans.size()>4096u) {error="GPU texture/frame cache limit (4096) reached";return false;}
     std::vector<GpuTexture> oldTargets;
     if(oldSize)for(std::size_t tid=0;tid<oldSize;++tid)oldTargets.push_back(existing->second.at(tid));
     std::vector<GpuTexture> targets(plans.size());

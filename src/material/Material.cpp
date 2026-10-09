@@ -22,23 +22,6 @@ std::string lower(std::string value) {
     return value;
 }
 
-void checkTextLimits(const std::string& text) {
-    if (text.size() > kMaxMaterialTxiBytes)
-        throw std::length_error("Material TXI exceeds the 1 MiB metadata limit");
-    const auto view=neoshared::texture::txiTextView(text);
-    std::size_t lines = 0u;
-    std::size_t lineBytes = 0u;
-    for (const auto ch : view.text) {
-        if (lineBytes == 0u && ++lines > kMaxMaterialTxiLines)
-            throw std::length_error("Material TXI exceeds the line-count limit");
-        if (ch == '\n') {
-            lineBytes = 0u;
-        } else if (++lineBytes > kMaxMaterialTxiLineBytes) {
-            throw std::length_error("Material TXI exceeds the line-length limit");
-        }
-    }
-}
-
 template <typename T>
 std::optional<T> parseNumber(const std::string& value) {
     // classic locale makes authored decimal points independent of the UI locale.
@@ -249,7 +232,6 @@ TextureBinding bind(const std::string& resref, const TextureMetadataLookup& look
 } // namespace
 
 static TxiMetadata parseMaterialTxiImpl(const std::string& text, bool crOrLf) {
-    checkTextLimits(text);
     TxiMetadata result;
     result.sourceText = text;
     // A parsed engine texture starts at zero, even when an editor-normalized

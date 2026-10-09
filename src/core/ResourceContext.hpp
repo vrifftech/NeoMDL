@@ -66,12 +66,11 @@ ResourceResolver traceResources(ResourceResolver resolver,
 ResourceResolver directoryResources(const std::filesystem::path& directory,
                                     ResourceResolver fallback = {});
 std::optional<std::filesystem::path> uniqueResourceFile(
-    const std::filesystem::path& directory, const std::string& filename,
-    bool skipUnreadableEntries = false);
+    const std::filesystem::path& directory, const std::string& filename);
 std::optional<std::filesystem::path> uniqueResourceDirectory(
     const std::filesystem::path& directory, const std::string& name);
-std::string resourceFileIdentity(const std::filesystem::path& path,
-                                 bool useAbsoluteOnError = false);
+std::string resourceFileIdentity(const std::filesystem::path& path);
+std::vector<std::uint8_t> readResourceFile(const std::filesystem::path& path);
 std::string resourceKey(const std::string& name);
 std::string resourceExtension(std::uint16_t type);
 

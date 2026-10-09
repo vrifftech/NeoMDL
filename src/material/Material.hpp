@@ -89,11 +89,6 @@ struct TxiMetadata {
     std::optional<EngineMaterialTextureNames> engineTextureNames;
 };
 
-// Limits are checked before calling the shared TXI tokenizer/validator. The
-// functions below throw std::length_error rather than silently truncate input.
-inline constexpr std::size_t kMaxMaterialTxiBytes = 1024u * 1024u;
-inline constexpr std::size_t kMaxMaterialTxiLines = 16384u;
-inline constexpr std::size_t kMaxMaterialTxiLineBytes = 4096u;
 TxiMetadata parseMaterialTxi(const std::string& text);
 
 

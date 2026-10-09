@@ -578,10 +578,6 @@ struct AsciiLoadSession {
                 model.warnings.push_back("Loaded supermodel pointer cycle stopped at: "+current->name);
                 break;
             }
-            if(chain->size()>=64u) {
-                model.warnings.push_back("Loaded supermodel chain exceeded the 64-model safety limit at: "+current->name);
-                break;
-            }
             visited.push_back(current);
             chain->push_back(*current);
             // The outer chain supplies ownership without retaining registry
@@ -611,7 +607,7 @@ struct AsciiLoadSession {
             return decodeAsciiModelInContext(*bytes,game,name+".mdl",job,resources,*this);
         const auto mdx=resources(name,".mdx");
         auto model=std::make_shared<Model>(decodeModelBytes(*bytes,
-            mdx ? *mdx : std::vector<std::uint8_t>{},name+".mdl",{},job,
+            mdx ? *mdx : std::vector<std::uint8_t>{},name+".mdl",job,
             game,resources));
         // Packed Reset resolves and references its superclass before its own
         // registration (K1 Desktop 0x322343/0x322356 before 0x3224dc).

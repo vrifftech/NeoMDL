@@ -142,7 +142,6 @@ bool resolveObjectAnimation(ObjectAnimationCommand& command,const ResourceResolv
     if(!resolver) {diagnostic="Object animation resolution requires the retained scoped resource resolver";return false;}
     const auto resource=resolver("animations",0x7e1u);
     if(!resource) {diagnostic="Scoped animations.2da is unavailable; numeric object state was retained";return false;}
-    if(resource->bytes.size()>16u*1024u*1024u) {diagnostic="animations.2da exceeds the 16 MiB host limit";return false;}
     neo2da::TwoDAFile table;
     try {table.loadBytes(resource->bytes);} catch(const std::exception& e) {
         diagnostic="Cannot decode scoped animations.2da: "+std::string(e.what());return false;

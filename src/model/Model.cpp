@@ -81,6 +81,16 @@ public:
         return offset <= size_ && length <= size_ - offset;
     }
 
+    bool containsArray(std::size_t offset, std::size_t count, std::size_t stride) const noexcept {
+        return stride != 0u && offset <= size_ && count <= (size_ - offset) / stride;
+    }
+
+    void requireArray(std::size_t offset, std::size_t count, std::size_t stride, const char* what) const {
+        if (!containsArray(offset, count, stride))
+            throw ModelError(sourcePrefix(label_) + what + " is outside the bounded input");
+        require(offset, count * stride, what);
+    }
+
     void require(std::size_t offset, std::size_t length, const char* what) const {
         if ((reads_++ & 1023u) == 0u) job_.check();
         if (!contains(offset, length)) {
@@ -149,13 +159,13 @@ public:
         return std::string(reinterpret_cast<const char*>(data_ + offset), count);
     }
 
-    std::string cString(std::size_t offset, std::size_t maximum, const char* what) const {
+    std::string cString(std::size_t offset, const char* what) const {
         require(offset, 1u, what);
-        const auto available = std::min(maximum, size_ - offset);
+        const auto available = size_ - offset;
         std::size_t count = 0u;
         while (count < available && data_[offset + count] != 0u) ++count;
         if (count == available) {
-            throw ModelError(sourcePrefix(label_) + std::string(what) + " is not null-terminated within its limit");
+            throw ModelError(sourcePrefix(label_) + std::string(what) + " is not null-terminated within the input");
         }
         return std::string(reinterpret_cast<const char*>(data_ + offset), count);
     }
@@ -177,15 +187,6 @@ float wordAsFloat(std::uint32_t word) noexcept {
     return result;
 }
 
-Vec3 safeVec3(Vec3 value, std::vector<std::string>& warnings, const std::string& description) {
-    if (finite(value.x) && finite(value.y) && finite(value.z)) return value;
-    warnings.push_back(description + " contains a non-finite value; zero was substituted.");
-    if (!finite(value.x)) value.x = 0.0f;
-    if (!finite(value.y)) value.y = 0.0f;
-    if (!finite(value.z)) value.z = 0.0f;
-    return value;
-}
-
 Vec3 subtract(const Vec3& left, const Vec3& right) noexcept {
     return {left.x - right.x, left.y - right.y, left.z - right.z};
 }
@@ -203,7 +204,6 @@ Vec3 cross(const Vec3& left, const Vec3& right) noexcept {
 Vec3 normalize(const Vec3& value) noexcept {
     const double lengthSquared = static_cast<double>(value.x) * value.x +
         static_cast<double>(value.y) * value.y + static_cast<double>(value.z) * value.z;
-    if (lengthSquared < 1.0e-24 || !std::isfinite(lengthSquared)) return {0.0f, 0.0f, 1.0f};
     const auto reciprocal = static_cast<float>(1.0 / std::sqrt(lengthSquared));
     return {value.x * reciprocal, value.y * reciprocal, value.z * reciprocal};
 }
@@ -221,28 +221,26 @@ std::string normalizedResourceName(std::string value) {
     return value;
 }
 
-std::vector<std::uint8_t> readBoundedFile(const std::filesystem::path& path, std::size_t maximum,
+std::vector<std::uint8_t> readModelFileBytes(const std::filesystem::path& path,
                                        const neoshared::bif::JobControl& job) {
     job.check();
-    std::error_code error;
-    const auto size = std::filesystem::file_size(path, error);
-    if (error) throw ModelError("Unable to inspect " + neoshared::pathToUtf8(path) + ": " + error.message());
-    if (size > maximum) {
-        throw ModelError("Refusing to read a model file larger than the configured limit: " +
-                         neoshared::pathToUtf8(path));
-    }
-    if (size > static_cast<std::uintmax_t>(std::numeric_limits<std::size_t>::max()) ||
-        size > static_cast<std::uintmax_t>(std::numeric_limits<std::streamsize>::max())) {
-        throw ModelError("Model file is too large for this process: " + neoshared::pathToUtf8(path));
-    }
-    std::ifstream input(path, std::ios::binary);
+    std::ifstream input(path, std::ios::binary | std::ios::ate);
     if (!input) throw ModelError("Unable to open model file: " + neoshared::pathToUtf8(path));
-    std::vector<std::uint8_t> bytes(static_cast<std::size_t>(size));
+    const auto end = input.tellg();
+    if (end < std::streampos{0})
+        throw ModelError("Unable to determine model file size: " + neoshared::pathToUtf8(path));
+    const auto size = static_cast<std::uintmax_t>(static_cast<std::streamoff>(end));
+    std::vector<std::uint8_t> bytes;
+    if (size > bytes.max_size())
+        throw ModelError("Model file is too large for this process: " + neoshared::pathToUtf8(path));
+    input.seekg(0, std::ios::beg);
+    if (!input) throw ModelError("Unable to seek model file: " + neoshared::pathToUtf8(path));
+    bytes.resize(static_cast<std::size_t>(size));
     for (std::size_t offset = 0; offset < bytes.size();) {
         job.update(offset, bytes.size(), "Reading " + neoshared::pathToUtf8(path.filename()));
         const auto count = std::min<std::size_t>(1024u * 1024u, bytes.size() - offset);
         input.read(reinterpret_cast<char*>(bytes.data() + offset), static_cast<std::streamsize>(count));
-        if (static_cast<std::size_t>(input.gcount()) != count) {
+        if (!input || static_cast<std::size_t>(input.gcount()) != count) {
             throw ModelError("Model file changed or could not be read completely: " + neoshared::pathToUtf8(path));
         }
         offset += count;
@@ -265,23 +263,29 @@ std::optional<std::filesystem::path> caseInsensitiveSibling(
     auto exact = source;
     exact.replace_extension(extension);
     std::error_code error;
-    if (std::filesystem::is_regular_file(exact, error) && !error) return exact;
-    error.clear();
     const auto directory = source.parent_path().empty() ? std::filesystem::path{"."} : source.parent_path();
-    const auto desired = lowercase(neoshared::pathToUtf8(source.stem()) + extension);
+    const auto exactName = neoshared::pathToUtf8(exact.filename());
+    const auto desired = lowercase(exactName);
     std::optional<std::filesystem::path> match;
-    for (std::filesystem::directory_iterator iterator(directory, error), end; !error && iterator != end;
-         iterator.increment(error)) {
+    bool ambiguous = false;
+    std::filesystem::directory_iterator iterator(directory, error), end;
+    if (error == std::errc::no_such_file_or_directory) return std::nullopt;
+    if (error) throw ModelError("Unable to read model directory: " + error.message());
+    for (; iterator != end; iterator.increment(error)) {
+        if (error) throw ModelError("Unable to read model directory: " + error.message());
         job.check();
-        if (!iterator->is_regular_file(error) || error) {
-            error.clear();
-            continue;
-        }
-        if (lowercase(neoshared::pathToUtf8(iterator->path().filename())) != desired) continue;
-        if (match) return std::nullopt; // Ambiguous on a case-sensitive host.
+        const auto name = neoshared::pathToUtf8(iterator->path().filename());
+        if (lowercase(name) != desired) continue;
+        const bool regular = iterator->is_regular_file(error);
+        if (error == std::errc::no_such_file_or_directory) { error.clear(); continue; }
+        if (error) throw ModelError("Unable to inspect model companion: " + error.message());
+        if (!regular) continue;
+        if (name == exactName) return iterator->path();
+        if (match) ambiguous = true;
         match = iterator->path();
     }
-    return match;
+    if (error) throw ModelError("Unable to read model directory: " + error.message());
+    return ambiguous ? std::nullopt : match;
 }
 
 class Parser final {
@@ -289,18 +293,12 @@ public:
     Parser(const std::vector<std::uint8_t>& mdlBytes,
            const std::vector<std::uint8_t>& mdxBytes,
            std::string sourceLabel,
-           const ParseLimits& limits, const neoshared::bif::JobControl& job)
-        : mdlBytes_(mdlBytes), mdxBytes_(mdxBytes), label_(std::move(sourceLabel)), limits_(limits),
+           const neoshared::bif::JobControl& job)
+        : mdlBytes_(mdlBytes), mdxBytes_(mdxBytes), label_(std::move(sourceLabel)),
           job_(job), whole_(mdlBytes_.data(), mdlBytes_.size(), label_, job_) {}
 
     Model parse() {
         job_.update(0u, 5u, "Reading model header: " + label_);
-        if (mdlBytes_.size() > limits_.maximumMdlBytes) {
-            throw ModelError(sourcePrefix(label_) + "MDL exceeds the configured input limit");
-        }
-        if (mdxBytes_.size() > limits_.maximumMdxBytes) {
-            throw ModelError(sourcePrefix(label_) + "MDX exceeds the configured input limit");
-        }
         if (mdlBytes_.size() < 4u) throw ModelError(sourcePrefix(label_) + "MDL is truncated");
 
         std::size_t payloadOffset = 0u;
@@ -332,7 +330,7 @@ public:
             throw ModelError(sourcePrefix(label_) + "MDL has no valid root node offset");
         }
         job_.update(1u, 5u, "Decoding model geometry: " + label_);
-        parseNode(rootNodeOffset_, std::nullopt, 0u);
+        parseNode(rootNodeOffset_, std::nullopt);
         // Reset preserves the distinct model animation-root pointer, including
         // null. AnimateHierarchy enables controllers only after visiting that
         // source node; it does not substitute the geometry root during load.
@@ -396,24 +394,18 @@ private:
             ? std::string{} : model_.engineSupermodelName;
         namesOffset_ = payload_->u32(184u, "name-offset table");
         namesCount_ = payload_->u32(188u, "name count");
-        if (declaredNodeCount_ > limits_.maximumNodes || namesCount_ > limits_.maximumNodes) {
-            throw ModelError(sourcePrefix(label_) + "MDL declares more nodes/names than the configured limit");
-        }
-        if (model_.declaredAnimationCount > limits_.maximumAnimations) {
-            throw ModelError(sourcePrefix(label_) + "MDL declares more animations than the configured limit");
-        }
     }
 
     void loadNames() {
         names_.clear();
-        names_.reserve(namesCount_);
         if (namesCount_ == 0u) return;
         if (namesOffset_ == 0u || namesOffset_ == 0xFFFFFFFFu ||
             namesCount_ > (payload_->size() - std::min<std::size_t>(namesOffset_, payload_->size())) / 4u) {
             model_.warnings.push_back("The node-name offset table is unavailable; node IDs will be displayed instead.");
             return;
         }
-        payload_->require(namesOffset_, static_cast<std::size_t>(namesCount_) * 4u, "name-offset table");
+        payload_->requireArray(namesOffset_, namesCount_, 4u, "name-offset table");
+        names_.reserve(namesCount_);
         for (std::uint32_t index = 0u; index < namesCount_; ++index) {
             const auto offset = payload_->u32(namesOffset_ + static_cast<std::size_t>(index) * 4u,
                                               "node-name offset");
@@ -422,7 +414,7 @@ private:
                 continue;
             }
             try {
-                names_.push_back(payload_->cString(offset, limits_.maximumNameLength, "node name"));
+                names_.push_back(payload_->cString(offset, "node name"));
             } catch (const ModelError&) {
                 names_.emplace_back();
                 model_.warnings.push_back("Node-name entry " + std::to_string(index) + " is malformed.");
@@ -467,20 +459,9 @@ private:
         const auto dataOffset = payload_->u32(nodeOffset + 68u, "controller-data offset");
         const auto dataCount = payload_->u32(nodeOffset + 72u, "controller-data count");
 
-        if (controllerCount > limits_.maximumControllers ||
-            totalControllers_ > limits_.maximumControllers - controllerCount) {
-            throw ModelError(sourcePrefix(label_) + "Controller count exceeds the configured limit");
-        }
-        if (dataCount > limits_.maximumControllerValues ||
-            totalControllerValues_ > limits_.maximumControllerValues - dataCount) {
-            throw ModelError(sourcePrefix(label_) + "Controller-data count exceeds the configured limit");
-        }
-        totalControllers_ += controllerCount;
-        totalControllerValues_ += dataCount;
-
         if (dataCount != 0u) {
             if (dataOffset == 0u || dataOffset == 0xffffffffu ||
-                !payload_->contains(dataOffset, static_cast<std::size_t>(dataCount) * 4u)) {
+                !payload_->containsArray(dataOffset, dataCount, 4u)) {
                 model_.warnings.push_back(description +
                     " declares controller data outside the MDL payload; its controllers were ignored.");
                 return;
@@ -495,8 +476,7 @@ private:
 
         if (controllerCount == 0u) return;
         if (controllerOffset == 0u || controllerOffset == 0xffffffffu ||
-            !payload_->contains(controllerOffset,
-                                static_cast<std::size_t>(controllerCount) * kControllerSize)) {
+            !payload_->containsArray(controllerOffset, controllerCount, kControllerSize)) {
             model_.warnings.push_back(description +
                 " declares a controller array outside the MDL payload; its controllers were ignored.");
             return;
@@ -557,7 +537,7 @@ private:
     }
 
     std::optional<std::pair<std::size_t, std::size_t>> readArrayDefinition(
-        std::size_t definition, std::size_t stride, std::size_t maximumCount,
+        std::size_t definition, std::size_t stride,
         const std::string& description) {
         if (!payload_->contains(definition, kArrayDefinitionSize)) {
             model_.warnings.push_back(description + " has no complete array definition.");
@@ -566,10 +546,6 @@ private:
         const auto dataOffset = payload_->u32(definition, "array data offset");
         const auto count = payload_->u32(definition + 4u, "array count");
         const auto capacity = payload_->u32(definition + 8u, "array capacity");
-        if (count > maximumCount) {
-            throw ModelError(sourcePrefix(label_) + description +
-                             " count exceeds the configured limit");
-        }
         if (capacity != 0u && count > capacity) {
             model_.warnings.push_back(description +
                 " has a count larger than its capacity; the array was ignored.");
@@ -578,7 +554,7 @@ private:
         if (count == 0u) return std::pair<std::size_t, std::size_t>{0u, 0u};
         if (dataOffset == 0u || dataOffset == 0xffffffffu ||
             stride > std::numeric_limits<std::size_t>::max() / count ||
-            !payload_->contains(dataOffset, static_cast<std::size_t>(count) * stride)) {
+            !payload_->containsArray(dataOffset, count, stride)) {
             model_.warnings.push_back(description +
                 " points outside the bounded MDL payload; the array was ignored.");
             return std::nullopt;
@@ -629,7 +605,7 @@ private:
         // routines relocate the list and each four-byte element: K1
         // 0x321eb4..0x321ee1, K2 0xf4615..0xf465a.
         const auto textures = readArrayDefinition(
-            extension + 52u, 4u, limits_.maximumVertices,
+            extension + 52u, 4u,
             "Light node " + model_.nodes[nodeIndex].name + " texture-name array");
         if (textures) {
             data.textureNames.reserve(textures->second);
@@ -640,11 +616,11 @@ private:
                 // lookup. Keep NULL/NONE spellings for engine ASCII export;
                 // resource binding owns any interpretation of those names.
                 data.textureNames.push_back(payload_->cString(
-                    nameOffset, limits_.maximumNameLength, "light flare texture name"));
+                    nameOffset, "light flare texture name"));
             }
         }
         const auto sizes = readArrayDefinition(
-            extension + 16u, 4u, limits_.maximumVertices,
+            extension + 16u, 4u,
             "Light node " + model_.nodes[nodeIndex].name + " flare-size array");
         if (sizes) {
             data.flareSizes.reserve(sizes->second);
@@ -654,7 +630,7 @@ private:
             }
         }
         const auto positions = readArrayDefinition(
-            extension + 28u, 4u, limits_.maximumVertices,
+            extension + 28u, 4u,
             "Light node " + model_.nodes[nodeIndex].name + " flare-position array");
         if (positions) {
             data.flarePositions.reserve(positions->second);
@@ -665,7 +641,7 @@ private:
             }
         }
         const auto shifts = readArrayDefinition(
-            extension + 40u, 12u, limits_.maximumVertices,
+            extension + 40u, 12u,
             "Light node " + model_.nodes[nodeIndex].name + " flare-color array");
         if (shifts) {
             data.flareColorShifts.reserve(shifts->second);
@@ -756,15 +732,12 @@ private:
             throw ModelError(sourcePrefix(label_) + "Invalid animmesh signed pool dimensions");
         const auto pool=[&](std::int32_t frames, std::size_t field, std::size_t stride) {
             const auto count=static_cast<std::uint64_t>(data.vertexCount)*static_cast<std::uint32_t>(frames);
-            if (count>std::numeric_limits<std::size_t>::max()/stride ||
-                count>limits_.maximumAnimMeshSamples ||
-                totalAnimMeshSamples_>limits_.maximumAnimMeshSamples-static_cast<std::size_t>(count))
-                throw ModelError(sourcePrefix(label_) + "Animmesh samples exceed the configured aggregate limit");
+            if (count>std::numeric_limits<std::size_t>::max()/stride)
+                throw ModelError(sourcePrefix(label_) + "Animmesh sample pool size overflows this process");
             const auto pointer=payload_->u32(extension+field,"animmesh final sample pointer");
             if (count && (pointer==0u || pointer==0xffffffffu))
                 throw ModelError(sourcePrefix(label_) + "Missing animmesh final sample pool");
             if (count) payload_->require(pointer,static_cast<std::size_t>(count)*stride,"animmesh final sample pool");
-            totalAnimMeshSamples_+=static_cast<std::size_t>(count);
             return std::pair<std::size_t,std::size_t>{pointer,static_cast<std::size_t>(count)};
         };
         const auto positions=pool(data.positionSampleCount,40u,12u);
@@ -801,180 +774,135 @@ private:
             model_.nodes[nodeIndex].lightsaber = LightsaberNodeData{};
     }
 
-    std::size_t parseNode(std::uint32_t offset, std::optional<std::size_t> parent, std::size_t depth) {
-        if (depth > limits_.maximumRecursionDepth) {
-            throw ModelError(sourcePrefix(label_) + "Node hierarchy exceeds the configured depth limit");
-        }
-        const auto existing = nodeByOffset_.find(offset);
-        if (existing != nodeByOffset_.end()) {
-            // The first traversal establishes the canonical parent. Re-parenting a
-            // previously parsed node can introduce self/cyclic world transforms.
-            model_.warnings.push_back("The node hierarchy reuses or cycles through offset " +
-                                      std::to_string(offset) + "; it was parsed once.");
-            return existing->second;
-        }
-        if (model_.nodes.size() >= limits_.maximumNodes) {
-            throw ModelError(sourcePrefix(label_) + "Node count exceeds the configured limit");
-        }
-        payload_->require(offset, kNodeHeaderSize, "node header");
-
-        Node node;
-        node.flags = payload_->u16(offset, "node flags");
-        // The synchronized short ID and the DWORD name-table index are
-        // separate fields. ParseNode writes +2/+4 independently; engine
-        // SynchronizeNodes compares +2 while TranslateNodeName indexes +4.
-        node.id = payload_->u16(offset + 2u, "node ID");
-        const auto nameIndex = payload_->u32(offset + 4u, "node name index");
-        node.engineNameIndex=nameIndex;
-        node.parent = parent;
-        node.name = nameIndex < names_.size() ? names_[nameIndex] : std::string{};
-        if (node.name.empty()) node.name = "node_" + std::to_string(node.id);
-        // Engine packed reset/conversion copies the three stored words.
-        // Keep NaN payloads, infinities and signed zero just like orientation;
-        // this header is also the source for static-position ASCII export.
-        node.position = payload_->vec3(offset + 16u, "node position");
-
-
-        node.orientation =
-            {payload_->f32(offset + 32u, "node quaternion x"),
-             payload_->f32(offset + 36u, "node quaternion y"),
-             payload_->f32(offset + 40u, "node quaternion z"),
-             payload_->f32(offset + 28u, "node quaternion w")};
-        parseControllers(offset, node, "Node " + node.name);
-        parseAnimMesh(offset, node);
-        const auto childOffset = payload_->u32(offset + 44u, "child-offset array");
-        const auto childCount = payload_->u32(offset + 48u, "child count");
-        if (childCount > limits_.maximumNodes) {
-            throw ModelError(sourcePrefix(label_) + "Node child count exceeds the configured limit");
-        }
-
-        const auto nodeIndex = model_.nodes.size();
-        model_.nodes.push_back(std::move(node));
-        nodeByOffset_.emplace(offset, nodeIndex);
-
-        parseSpecializedNode(offset, nodeIndex);
-        if ((model_.nodes[nodeIndex].flags & kNodeMesh) != 0u)
-            parseMesh(offset + kNodeHeaderSize, nodeIndex);
-
-        if (childCount != 0u) {
-            if (childOffset == 0u || childOffset == 0xFFFFFFFFu) {
-                model_.warnings.push_back("Node " + model_.nodes[nodeIndex].name +
-                                          " declares children but has no child-offset array.");
-            } else {
-                payload_->require(childOffset, static_cast<std::size_t>(childCount) * 4u,
-                                  "child-offset array");
-                for (std::uint32_t index = 0u; index < childCount; ++index) {
-                    const auto child = payload_->u32(childOffset + static_cast<std::size_t>(index) * 4u,
-                                                     "child node offset");
-                    if (child == 0u || child == 0xFFFFFFFFu) {
-                        model_.warnings.push_back("Node " + model_.nodes[nodeIndex].name +
-                                                  " contains an empty child offset.");
-                        continue;
-                    }
-                    const auto childIndex = parseNode(child, nodeIndex, depth + 1u);
-                    if (model_.nodes[childIndex].parent != nodeIndex) {
-                        model_.warnings.push_back("Node " + model_.nodes[nodeIndex].name +
-                                                  " references a node owned by another parent; "
-                                                  "the non-canonical link was ignored.");
-                        continue;
-                    }
-                    if (std::find(model_.nodes[nodeIndex].children.begin(),
-                                  model_.nodes[nodeIndex].children.end(), childIndex) ==
-                        model_.nodes[nodeIndex].children.end()) {
-                        model_.nodes[nodeIndex].children.push_back(childIndex);
-                    }
+    template<class ReadNode>
+    std::size_t parseHierarchy(std::uint32_t root, std::optional<std::size_t> parent,
+        std::vector<Node>& nodes, std::unordered_map<std::uint32_t,std::size_t>& byOffset,
+        const std::string& description, const ReadNode& readNode) {
+        struct Frame {
+            std::size_t node, children, count, next{};
+            std::optional<std::size_t> completedChild;
+        };
+        std::vector<Frame> stack;
+        const auto enter=[&](std::uint32_t offset, std::optional<std::size_t> owner) {
+            const auto existing=byOffset.find(offset);
+            if(existing!=byOffset.end()) {
+                model_.warnings.push_back(description+" reuses or cycles through node offset "+
+                    std::to_string(offset)+"; it was parsed once.");
+                return existing->second;
+            }
+            const auto index=readNode(offset,owner);
+            const auto children=payload_->u32(static_cast<std::size_t>(offset)+44u,"child-offset array");
+            const auto count=payload_->u32(static_cast<std::size_t>(offset)+48u,"child count");
+            if(count!=0u) {
+                if(children==0u || children==0xffffffffu)
+                    throw ModelError(description+" "+nodes[index].name+" has no child-offset array");
+                payload_->requireArray(children,count,4u,"child-offset array");
+            }
+            stack.push_back({index,children,count,0u,{}});
+            return index;
+        };
+        const auto rootIndex=enter(root,parent);
+        while(!stack.empty()) {
+            auto& frame=stack.back();
+            if(frame.completedChild) {
+                const auto child=*frame.completedChild;
+                frame.completedChild.reset();
+                if(nodes[child].parent!=frame.node) {
+                    model_.warnings.push_back(description+" "+nodes[frame.node].name+
+                        " references a node owned by another parent; the link was ignored.");
+                } else {
+                    auto& children=nodes[frame.node].children;
+                    if(std::find(children.begin(),children.end(),child)==children.end())
+                        children.push_back(child);
                 }
             }
+            if(frame.next==frame.count) {stack.pop_back();continue;}
+            const auto child=payload_->u32(frame.children+frame.next++*4u,"child node offset");
+            if(child==0u || child==0xffffffffu)
+                throw ModelError(description+" "+nodes[frame.node].name+" contains an empty child offset");
+            const auto owner=frame.node;
+            const auto frameIndex=stack.size()-1u;
+            const auto childIndex=enter(child,owner);
+            stack[frameIndex].completedChild=childIndex;
         }
-        return nodeIndex;
+        return rootIndex;
+    }
+
+    std::size_t parseNode(std::uint32_t offset, std::optional<std::size_t> parent) {
+        const auto readNode=[&](std::size_t offset,std::optional<std::size_t> parent) {
+            payload_->require(offset, kNodeHeaderSize, "node header");
+
+            Node node;
+            node.flags = payload_->u16(offset, "node flags");
+            // The synchronized short ID and the DWORD name-table index are
+            // separate fields. ParseNode writes +2/+4 independently; engine
+            // SynchronizeNodes compares +2 while TranslateNodeName indexes +4.
+            node.id = payload_->u16(offset + 2u, "node ID");
+            const auto nameIndex = payload_->u32(offset + 4u, "node name index");
+            node.engineNameIndex=nameIndex;
+            node.parent = parent;
+            node.name = nameIndex < names_.size() ? names_[nameIndex] : std::string{};
+            if (node.name.empty()) node.name = "node_" + std::to_string(node.id);
+            // Engine packed reset/conversion copies the three stored words.
+            // Keep NaN payloads, infinities and signed zero just like orientation;
+            // this header is also the source for static-position ASCII export.
+            node.position = payload_->vec3(offset + 16u, "node position");
+
+
+            node.orientation =
+                {payload_->f32(offset + 32u, "node quaternion x"),
+                 payload_->f32(offset + 36u, "node quaternion y"),
+                 payload_->f32(offset + 40u, "node quaternion z"),
+                 payload_->f32(offset + 28u, "node quaternion w")};
+            parseControllers(offset, node, "Node " + node.name);
+            parseAnimMesh(offset, node);
+
+            const auto nodeIndex = model_.nodes.size();
+            model_.nodes.push_back(std::move(node));
+            nodeByOffset_.emplace(offset, nodeIndex);
+
+            parseSpecializedNode(offset, nodeIndex);
+            if ((model_.nodes[nodeIndex].flags & kNodeMesh) != 0u)
+                parseMesh(offset + kNodeHeaderSize, nodeIndex);
+            return nodeIndex;
+        };
+        return parseHierarchy(offset,parent,model_.nodes,nodeByOffset_,"Node hierarchy",readNode);
     }
 
     std::size_t parseAnimationNode(std::uint32_t offset, Animation& animation,
-                                   std::unordered_map<std::uint32_t, std::size_t>& nodeByOffset,
-                                   std::optional<std::size_t> parent, std::size_t depth) {
-        if (depth > limits_.maximumRecursionDepth) {
-            throw ModelError(sourcePrefix(label_) +
-                             "Animation node hierarchy exceeds the configured depth limit");
-        }
-        const auto existing = nodeByOffset.find(offset);
-        if (existing != nodeByOffset.end()) {
-            model_.warnings.push_back("Animation " + animation.name +
-                " reuses or cycles through node offset " + std::to_string(offset) +
-                "; it was parsed once.");
-            return existing->second;
-        }
-        if (animation.nodes.size() >= limits_.maximumNodes ||
-            totalAnimationNodes_ >= limits_.maximumAnimationNodes) {
-            throw ModelError(sourcePrefix(label_) +
-                             "Animation node count exceeds the configured limit");
-        }
-        payload_->require(offset, kNodeHeaderSize, "animation node header");
+        std::unordered_map<std::uint32_t, std::size_t>& nodeByOffset,
+        std::optional<std::size_t> parent) {
+        const auto readNode=[&](std::size_t offset,std::optional<std::size_t> parent) {
+            payload_->require(offset, kNodeHeaderSize, "animation node header");
 
-        Node node;
-        node.flags = payload_->u16(offset, "animation node flags");
-        node.id = payload_->u16(offset + 2u, "animation node ID");
-        const auto nameIndex = payload_->u32(offset + 4u, "animation node name index");
-        node.engineNameIndex=nameIndex;
-        node.parent = parent;
-        node.name = nameIndex < names_.size() ? names_[nameIndex] : std::string{};
-        if (node.name.empty()) node.name = "node_" + std::to_string(node.id);
-        node.position = payload_->vec3(offset + 16u, "animation node position");
-        node.orientation =
-            {payload_->f32(offset + 32u, "animation node quaternion x"),
-             payload_->f32(offset + 36u, "animation node quaternion y"),
-             payload_->f32(offset + 40u, "animation node quaternion z"),
-             payload_->f32(offset + 28u, "animation node quaternion w")};
-        parseControllers(offset, node, "Animation " + animation.name + " node " + node.name);
-        parseAnimMesh(offset, node);
+            Node node;
+            node.flags = payload_->u16(offset, "animation node flags");
+            node.id = payload_->u16(offset + 2u, "animation node ID");
+            const auto nameIndex = payload_->u32(offset + 4u, "animation node name index");
+            node.engineNameIndex=nameIndex;
+            node.parent = parent;
+            node.name = nameIndex < names_.size() ? names_[nameIndex] : std::string{};
+            if (node.name.empty()) node.name = "node_" + std::to_string(node.id);
+            node.position = payload_->vec3(offset + 16u, "animation node position");
+            node.orientation =
+                {payload_->f32(offset + 32u, "animation node quaternion x"),
+                 payload_->f32(offset + 36u, "animation node quaternion y"),
+                 payload_->f32(offset + 40u, "animation node quaternion z"),
+                 payload_->f32(offset + 28u, "animation node quaternion w")};
+            parseControllers(offset, node, "Animation " + animation.name + " node " + node.name);
+            parseAnimMesh(offset, node);
 
-        const auto childOffset = payload_->u32(offset + 44u, "animation child-offset array");
-        const auto childCount = payload_->u32(offset + 48u, "animation child count");
-        if (childCount > limits_.maximumNodes) {
-            throw ModelError(sourcePrefix(label_) +
-                             "Animation node child count exceeds the configured limit");
-        }
 
-        const auto nodeIndex = animation.nodes.size();
-        animation.nodes.push_back(std::move(node));
-        ++totalAnimationNodes_;
-        nodeByOffset.emplace(offset, nodeIndex);
-
-        if (childCount != 0u) {
-            if (childOffset == 0u || childOffset == 0xffffffffu ||
-                !payload_->contains(childOffset, static_cast<std::size_t>(childCount) * 4u)) {
-                model_.warnings.push_back("Animation " + animation.name + " node " +
-                    animation.nodes[nodeIndex].name +
-                    " declares children outside the MDL payload.");
-            } else {
-                for (std::uint32_t index = 0u; index < childCount; ++index) {
-                    const auto child = payload_->u32(
-                        static_cast<std::size_t>(childOffset) + static_cast<std::size_t>(index) * 4u,
-                        "animation child node offset");
-                    if (child == 0u || child == 0xffffffffu) {
-                        model_.warnings.push_back("Animation " + animation.name + " node " +
-                            animation.nodes[nodeIndex].name + " contains an empty child offset.");
-                        continue;
-                    }
-                    const auto childIndex = parseAnimationNode(
-                        child, animation, nodeByOffset, nodeIndex, depth + 1u);
-                    if (animation.nodes[childIndex].parent != nodeIndex) {
-                        model_.warnings.push_back("Animation " + animation.name + " node " +
-                            animation.nodes[nodeIndex].name +
-                            " references a node owned by another parent; the link was ignored.");
-                        continue;
-                    }
-                    if (std::find(animation.nodes[nodeIndex].children.begin(),
-                                  animation.nodes[nodeIndex].children.end(), childIndex) ==
-                        animation.nodes[nodeIndex].children.end()) {
-                        animation.nodes[nodeIndex].children.push_back(childIndex);
-                    }
-                }
-            }
-        }
-        return nodeIndex;
+            const auto nodeIndex = animation.nodes.size();
+            animation.nodes.push_back(std::move(node));
+            nodeByOffset.emplace(offset, nodeIndex);
+            return nodeIndex;
+        };
+        return parseHierarchy(offset,parent,animation.nodes,nodeByOffset,
+                              "Animation "+animation.name,readNode);
     }
 
-    void parseAnimation(std::uint32_t offset, std::size_t index) {
+    void parseAnimation(std::size_t offset, std::size_t index) {
         if (offset == 0u || offset == 0xffffffffu ||
             !payload_->contains(offset, kAnimationHeaderSize)) {
             model_.warnings.push_back("Animation entry " + std::to_string(index) +
@@ -988,10 +916,6 @@ private:
         const auto rootOffset = payload_->u32(offset + 40u, "animation root-node offset");
         const auto declaredNodes = payload_->u32(offset + 44u, "animation node count");
         animation.engineNodeCount=declaredNodes;
-        if (declaredNodes > limits_.maximumNodes) {
-            throw ModelError(sourcePrefix(label_) +
-                             "Animation declares more nodes than the configured limit");
-        }
         animation.length = payload_->f32(offset + 80u, "animation length");
         animation.transitionTime = payload_->f32(offset + 84u, "animation transition time");
         // This is an authored node name, not a resource-null token. Engine
@@ -999,16 +923,9 @@ private:
         animation.root = payload_->fixedString(offset + 88u, 32u, "animation root name");
         const auto eventOffset = payload_->u32(offset + 120u, "animation event array");
         const auto eventCount = payload_->u32(offset + 124u, "animation event count");
-        if (eventCount > limits_.maximumAnimationEvents ||
-            totalAnimationEvents_ > limits_.maximumAnimationEvents - eventCount) {
-            throw ModelError(sourcePrefix(label_) +
-                             "Animation event count exceeds the configured limit");
-        }
-        totalAnimationEvents_ += eventCount;
         if (eventCount != 0u) {
             if (eventOffset == 0u || eventOffset == 0xffffffffu ||
-                !payload_->contains(eventOffset,
-                                    static_cast<std::size_t>(eventCount) * kAnimationEventSize)) {
+                !payload_->containsArray(eventOffset, eventCount, kAnimationEventSize)) {
                 model_.warnings.push_back("Animation " + animation.name +
                     " declares events outside the MDL payload; they were ignored.");
             } else {
@@ -1030,7 +947,7 @@ private:
 
         if (rootOffset != 0u && rootOffset != 0xffffffffu) {
             std::unordered_map<std::uint32_t, std::size_t> nodeByOffset;
-            parseAnimationNode(rootOffset, animation, nodeByOffset, std::nullopt, 0u);
+            parseAnimationNode(rootOffset, animation, nodeByOffset, std::nullopt);
         } else if (declaredNodes != 0u) {
             model_.warnings.push_back("Animation " + animation.name +
                                       " declares nodes but has no valid root-node offset.");
@@ -1047,7 +964,7 @@ private:
         const auto count = static_cast<std::size_t>(model_.declaredAnimationCount);
         if (count == 0u) return;
         if (animationsOffset_ == 0u || animationsOffset_ == 0xffffffffu ||
-            !payload_->contains(animationsOffset_, count * 4u)) {
+            !payload_->containsArray(animationsOffset_, count, 4u)) {
             model_.warnings.push_back(
                 "The model declares animations but its animation-offset array is unavailable.");
             return;
@@ -1159,14 +1076,13 @@ private:
             return offset != 0u && offset != 0xffffffffu;
         };
 
-        std::function<std::optional<std::size_t>(std::uint32_t, std::size_t)> parseNode;
-        parseNode = [&](std::uint32_t offset, std::size_t depth)
-            -> std::optional<std::size_t> {
-            if (depth > limits_.maximumRecursionDepth ||
-                data.nodes.size() >= limits_.maximumAabbNodes) {
-                throw ModelError(sourcePrefix(label_) + "AABB tree on " + nodeName +
-                                 " exceeds the configured tree limit");
-            }
+        struct Frame {
+            std::size_t offset, index;
+            std::array<std::uint32_t,2> children;
+            unsigned next{}, count{};
+        };
+        std::vector<Frame> stack;
+        const auto enter = [&](std::size_t offset) -> std::optional<std::size_t> {
             if (active.find(offset) != active.end()) {
                 ++issues.cycles;
                 data.valid = false;
@@ -1207,6 +1123,8 @@ private:
             node.splitMask = payload_->u32(offset + 36u, "AABB split mask");
 
             const auto index = data.nodes.size();
+            if(index>static_cast<std::size_t>(std::numeric_limits<std::int32_t>::max()))
+                throw ModelError("AABB node index exceeds its signed index representation");
             data.nodes.push_back(node);
             byOffset.emplace(offset, index);
             active.emplace(offset);
@@ -1218,25 +1136,32 @@ private:
                     ++issues.missingChildren;
                     data.valid = false;
                 }
-                if (childOffsetValid(firstOffset)) {
-                    if (const auto child = parseNode(firstOffset, depth + 1u))
-                        data.nodes[index].firstChild = static_cast<std::int32_t>(*child);
-                }
-                if (childOffsetValid(secondOffset)) {
-                    if (const auto child = parseNode(secondOffset, depth + 1u))
-                        data.nodes[index].secondChild = static_cast<std::int32_t>(*child);
-                }
             } else if (node.faceIndex < 0 ||
                        static_cast<std::size_t>(node.faceIndex) >= mesh.faces.size()) {
                 ++issues.invalidFaces;
                 data.valid = false;
             }
-
-            active.erase(offset);
+            stack.push_back({offset,index,{firstOffset,secondOffset},0u,node.faceIndex==-1?2u:0u});
             return index;
         };
 
-        data.root = parseNode(rootOffset, 0u);
+        data.root = enter(rootOffset);
+        while(!stack.empty()) {
+            auto& frame=stack.back();
+            if(frame.next==frame.count) {
+                active.erase(frame.offset);
+                stack.pop_back();
+                continue;
+            }
+            const auto ordinal=frame.next++;
+            const auto childOffset=frame.children[ordinal];
+            if(!childOffsetValid(childOffset)) continue;
+            const auto index=frame.index;
+            if(const auto child=enter(childOffset)) {
+                if(ordinal==0u) data.nodes[index].firstChild=static_cast<std::int32_t>(*child);
+                else data.nodes[index].secondChild=static_cast<std::int32_t>(*child);
+            }
+        }
         if (!data.root) data.valid = false;
         model_.nodes[nodeIndex].aabb = std::move(data);
 
@@ -1261,9 +1186,9 @@ private:
         const auto nodeOffset=meshOffset-kNodeHeaderSize;
         const auto primitive=payload_->u32(nodeOffset+0x130u,"animmesh primitive");
         if (primitive>9u) throw ModelError("Animmesh primitive exceeds the engine translation table");
-        const auto counts=readArrayDefinition(nodeOffset+0x100u,4u,limits_.maximumFaces,"animmesh index counts");
-        const auto sources=readArrayDefinition(nodeOffset+0x10cu,4u,limits_.maximumFaces,"animmesh index sources");
-        const auto tokens=readArrayDefinition(nodeOffset+0x118u,4u,limits_.maximumFaces,"animmesh index tokens");
+        const auto counts=readArrayDefinition(nodeOffset+0x100u,4u,"animmesh index counts");
+        const auto sources=readArrayDefinition(nodeOffset+0x10cu,4u,"animmesh index sources");
+        const auto tokens=readArrayDefinition(nodeOffset+0x118u,4u,"animmesh index tokens");
         if (!counts || !sources || !tokens || counts->second!=sources->second || counts->second!=tokens->second)
             throw ModelError("Animmesh engine index array dimensions disagree");
         mesh.indices.clear();
@@ -1276,16 +1201,13 @@ private:
             // K2 0xcc581 trims triangle batches to complete primitives.
             const std::size_t count=type==3u && model_.game==GameVersion::Kotor2
                 ? (allocated/3u)*3u : allocated;
-            if (allocated>limits_.maximumAnimMeshIndices ||
-                totalAnimMeshIndices_>limits_.maximumAnimMeshIndices-allocated ||
-                allocated>std::numeric_limits<std::size_t>::max()/2u)
-                throw ModelError("Animmesh index pools exceed the configured aggregate limit");
+            if (allocated>std::numeric_limits<std::size_t>::max()/2u)
+                throw ModelError("Animmesh index pool size overflows this process");
             if (first>allocated || count>allocated-first)
                 throw ModelError("Animmesh trailing draw overruns its engine allocated index pool");
             if (allocated && (source==0u || source==0xffffffffu))
                 throw ModelError("Animmesh engine index source is missing");
             if (allocated) payload_->require(source,allocated*2u,"animmesh padded index pool");
-            totalAnimMeshIndices_+=allocated;
             mesh.engineDraws.push_back({type,mesh.indices.size(),count});
             for (std::size_t i=0;i<count;++i) {
                 const auto value=payload_->u16(source+(first+i)*2u,"animmesh draw index");
@@ -1314,20 +1236,14 @@ private:
     }
 
     void parseMesh(std::size_t offset, std::size_t nodeIndex) {
-        if (model_.meshes.size() >= limits_.maximumMeshes) {
-            throw ModelError(sourcePrefix(label_) + "Mesh count exceeds the configured limit");
-        }
         const auto headerSize = model_.game == GameVersion::Kotor1 ? kK1MeshHeaderSize : kK2MeshHeaderSize;
         payload_->require(offset, headerSize, "triangle-mesh header");
 
         const auto facesOffset = payload_->u32(offset + 8u, "face array offset");
         auto faceCount = payload_->u32(offset + 12u, "face count");
         const auto headerVertexCount = payload_->u16(offset + 304u, "vertex count");
-        if (faceCount > limits_.maximumFaces) {
-            throw ModelError(sourcePrefix(label_) + "Mesh face count exceeds the configured limit");
-        }
         if (faceCount != 0u) {
-            payload_->require(facesOffset, static_cast<std::size_t>(faceCount) * kFaceSize, "face array");
+            payload_->requireArray(facesOffset, faceCount, kFaceSize, "face array");
         }
 
         Mesh mesh;
@@ -1349,13 +1265,6 @@ private:
         mesh.rawMeshHeader.reserve(headerSize);
         for (std::size_t byte = 0u; byte < headerSize; ++byte)
             mesh.rawMeshHeader.push_back(payload_->u8(offset + byte, "mesh header byte"));
-        const auto materialFloat = [&](std::size_t at, const char* name) {
-            const auto value = payload_->f32(offset + at, name);
-            if (finite(value)) return value;
-            model_.warnings.push_back("Mesh on " + model_.nodes[nodeIndex].name +
-                " has non-finite " + name + "; zero was substituted (raw bytes retained).");
-            return 0.0f;
-        };
         mesh.uvAnimation.enabledRaw = payload_->u32(offset + 232u, "animate UV flag");
 
 
@@ -1375,14 +1284,12 @@ private:
                 payload_->i16(offset + 318u, "dirt worldspace"),
                 payload_->u8(offset + 320u, "hologram do-not-draw flag")};
         }
-        mesh.totalArea = materialFloat(model_.game == GameVersion::Kotor2 ? 324u : 316u,
+        mesh.totalArea = payload_->f32(offset + (model_.game == GameVersion::Kotor2 ? 324u : 316u),
                                         "mesh total area");
         mesh.texture0 = normalizedResourceName(payload_->fixedString(offset + 88u, 32u, "diffuse texture"));
         mesh.texture1 = normalizedResourceName(payload_->fixedString(offset + 120u, 32u, "secondary texture"));
-        mesh.diffuse = safeVec3(payload_->vec3(offset + 60u, "mesh diffuse color"), model_.warnings,
-                                "Mesh on " + model_.nodes[nodeIndex].name + " diffuse color");
-        mesh.ambient = safeVec3(payload_->vec3(offset + 72u, "mesh ambient color"), model_.warnings,
-                                "Mesh on " + model_.nodes[nodeIndex].name + " ambient color");
+        mesh.diffuse = payload_->vec3(offset + 60u, "mesh diffuse color");
+        mesh.ambient = payload_->vec3(offset + 72u, "mesh ambient color");
         mesh.transparencyHint = payload_->u32(offset + 84u, "transparency hint");
         mesh.mdxRowSize = payload_->u32(offset + 252u, "MDX row size");
         mesh.mdxBitmap = payload_->u32(offset + 256u, "MDX channel bitmap");
@@ -1411,7 +1318,7 @@ private:
                                  " has a truncated engine extension.");
             } else {
                 const auto constraints = readArrayDefinition(
-                    offset + headerSize, 4u, limits_.maximumVertices,
+                    offset + headerSize, 4u,
                     "Dangly mesh " + model_.nodes[nodeIndex].name + " constraint array");
                 if (constraints) {
                     dangly.constraints.reserve(constraints->second);
@@ -1435,7 +1342,7 @@ private:
                 const auto restOffset = payload_->u32(
                     offset + headerSize + 24u, "dangly rest-position offset");
                 if (restOffset != 0u && restOffset != 0xffffffffu &&
-                    payload_->contains(restOffset, static_cast<std::size_t>(headerVertexCount)*12u)) {
+                    payload_->containsArray(restOffset, headerVertexCount, 12u)) {
                     dangly.restPositions->reserve(headerVertexCount);
                     for (std::size_t index=0; index<headerVertexCount; ++index) {
                         dangly.restPositions->push_back(payload_->vec3(
@@ -1470,10 +1377,6 @@ private:
                 const auto dataOffset = payload_->u32(definition, description);
                 const auto count = payload_->u32(definition + 4u, description);
                 const auto capacity = payload_->u32(definition + 8u, description);
-                if (count > limits_.maximumNodes) {
-                    throw ModelError(sourcePrefix(label_) + "Skin " + description +
-                                     " count exceeds the configured node limit");
-                }
                 if (capacity != 0u && count > capacity) {
                     model_.warnings.push_back("Skin mesh " + model_.nodes[nodeIndex].name +
                         " has a " + description + " count larger than its capacity; the array was ignored.");
@@ -1481,7 +1384,7 @@ private:
                 }
                 if (count == 0u) return std::pair<std::size_t, std::size_t>{0u, 0u};
                 if (dataOffset == 0u || dataOffset == 0xffffffffu ||
-                    !payload_->contains(dataOffset, static_cast<std::size_t>(count) * stride)) {
+                    !payload_->containsArray(dataOffset, count, stride)) {
                     model_.warnings.push_back("Skin mesh " + model_.nodes[nodeIndex].name +
                         " declares " + description + " data outside the MDL payload; the array was ignored.");
                     return std::nullopt;
@@ -1559,7 +1462,7 @@ private:
             offset + (model_.game == GameVersion::Kotor1 ? 328u : 336u), "MDL vertex offset");
 
         mesh.faces.reserve(faceCount);
-        std::uint32_t requiredVertices = headerVertexCount;
+        const std::uint32_t requiredVertices = headerVertexCount;
         for (std::uint32_t index = 0u; index < faceCount; ++index) {
             const auto faceOffset = static_cast<std::size_t>(facesOffset) + static_cast<std::size_t>(index) * kFaceSize;
             MeshFace face;
@@ -1572,20 +1475,11 @@ private:
             face.indices[0] = payload_->i16(faceOffset + 26u, "face vertex 0");
             face.indices[1] = payload_->i16(faceOffset + 28u, "face vertex 1");
             face.indices[2] = payload_->i16(faceOffset + 30u, "face vertex 2");
-            for (const auto vertexIndex : face.indices) {
-                if (vertexIndex >= 0) {
-                    requiredVertices = std::max(requiredVertices,
-                        static_cast<std::uint32_t>(vertexIndex) + 1u);
-                }
-            }
+            for (const auto vertexIndex : face.indices)
+                if (vertexIndex < 0 || static_cast<std::uint32_t>(vertexIndex) >= requiredVertices)
+                    throw ModelError(sourcePrefix(label_) + "Mesh face index exceeds its vertex pool");
             mesh.faces.push_back(face);
         }
-        if (requiredVertices > limits_.maximumVertices || totalVertices_ > limits_.maximumVertices - requiredVertices) {
-            throw ModelError(sourcePrefix(label_) + "Model vertex count exceeds the configured limit");
-        }
-        totalVertices_ += requiredVertices;
-        if (mesh.animated && requiredVertices != headerVertexCount)
-            throw ModelError(sourcePrefix(label_) + "Animmesh face exceeds the engine sample-pool vertex count");
         mesh.vertices.resize(requiredVertices);
         if (mesh.dangly && mesh.dangly->restPositions &&
             mesh.dangly->restPositions->size() != requiredVertices)
@@ -1598,7 +1492,7 @@ private:
             // authored MDL positions, not the MDX drawing stream below.
             mesh.cpuPositions.emplace();
             if (mdlVerticesOffset != 0u && mdlVerticesOffset != 0xffffffffu &&
-                payload_->contains(mdlVerticesOffset, static_cast<std::size_t>(headerVertexCount)*12u)) {
+                payload_->containsArray(mdlVerticesOffset, headerVertexCount, 12u)) {
                 mesh.cpuPositions->reserve(headerVertexCount);
                 for (std::size_t index=0; index<headerVertexCount; ++index)
                     mesh.cpuPositions->push_back(payload_->vec3(mdlVerticesOffset+index*12u,
@@ -1609,126 +1503,73 @@ private:
             }
         }
 
-        const bool mdxPositions = !mdxBytes_.empty() && mesh.mdxRowSize != 0u &&
-            (mesh.mdxBitmap & kMdxVertex) != 0u && validMdxChannel(mdxVertexOffset, mesh.mdxRowSize, 12u);
-        const bool mdlPositions = mdlVerticesOffset != 0u && mdlVerticesOffset != 0xFFFFFFFFu &&
-            payload_->contains(mdlVerticesOffset, static_cast<std::size_t>(requiredVertices) * 12u);
-        if (!mdxPositions && !mdlPositions && requiredVertices != 0u) {
-            model_.warnings.push_back("Mesh on " + model_.nodes[nodeIndex].name +
-                                      " has no readable vertex-position source.");
-        }
-
-        bool mdxRowsValid = mdxPositions;
-        if (mdxRowsValid && requiredVertices != 0u) {
-            const std::uint64_t finalRow = static_cast<std::uint64_t>(mdxDataOffset) +
-                static_cast<std::uint64_t>(requiredVertices - 1u) * mesh.mdxRowSize;
-            mdxRowsValid = finalRow <= mdxBytes_.size() &&
-                mdxVertexOffset <= mdxBytes_.size() - static_cast<std::size_t>(finalRow) &&
-                12u <= mdxBytes_.size() - static_cast<std::size_t>(finalRow) - mdxVertexOffset;
-            if (!mdxRowsValid && mdlPositions) {
-                model_.warnings.push_back("Mesh on " + model_.nodes[nodeIndex].name +
-                                          " has truncated MDX rows; MDL positions were used.");
-            }
-        }
-        const bool mdxNormalsReadable = !mdxBytes_.empty() && mesh.mdxRowSize != 0u &&
-            (mesh.mdxBitmap & kMdxNormal) != 0u &&
-            validMdxChannel(mdxNormalOffset, mesh.mdxRowSize, 12u) &&
-            (requiredVertices == 0u || [&] {
-                const std::uint64_t finalRow = static_cast<std::uint64_t>(mdxDataOffset) +
-                    static_cast<std::uint64_t>(requiredVertices - 1u) * mesh.mdxRowSize;
-                return finalRow <= mdxBytes_.size() &&
-                    mdxNormalOffset <= mdxBytes_.size() - static_cast<std::size_t>(finalRow) &&
-                    12u <= mdxBytes_.size() - static_cast<std::size_t>(finalRow) - mdxNormalOffset;
-            }());
-        if (mesh.animated && static_cast<std::int32_t>(mdxNormalOffset)>=0 &&
-            !mdxNormalsReadable && requiredVertices != 0u)
-            throw ModelError(sourcePrefix(label_) + "Animmesh has no readable enabled MDX normal channel");
-        if ((mesh.mdxBitmap & kMdxNormal) != 0u && !mdxNormalsReadable && requiredVertices != 0u) {
-            model_.warnings.push_back("Mesh on " + model_.nodes[nodeIndex].name +
-                                      " has an unreadable MDX normal channel; normals were generated.");
-        }
-
-        const bool skinChannelsReadable = mesh.skinned &&
-            !mdxBytes_.empty() && mesh.mdxRowSize != 0u &&
-            validMdxChannel(mesh.mdxWeightOffset, mesh.mdxRowSize, 16u) &&
-            validMdxChannel(mesh.mdxBoneIndexOffset, mesh.mdxRowSize, 8u) &&
-            (requiredVertices == 0u || [&] {
-                const std::uint64_t finalRow = static_cast<std::uint64_t>(mdxDataOffset) +
-                    static_cast<std::uint64_t>(requiredVertices - 1u) * mesh.mdxRowSize;
-                if (finalRow > mdxBytes_.size()) return false;
-                const auto row = static_cast<std::size_t>(finalRow);
-                return mesh.mdxWeightOffset <= mdxBytes_.size() - row &&
-                    16u <= mdxBytes_.size() - row - mesh.mdxWeightOffset &&
-                    mesh.mdxBoneIndexOffset <= mdxBytes_.size() - row &&
-                    8u <= mdxBytes_.size() - row - mesh.mdxBoneIndexOffset;
-            }());
-        if (skinChannelsReadable) {
-            mesh.hasSkinChannels = true;
-            mesh.skinInfluences.resize(requiredVertices);
-        } else if (mesh.skinned && requiredVertices != 0u) {
-            model_.warnings.push_back("Skin mesh " + model_.nodes[nodeIndex].name +
-                " has no complete packed-verified MDX weight/bone-index channels.");
-        }
-
         const auto channelReadable = [&](std::uint32_t channel, std::size_t bytes) {
-            if (mdxBytes_.empty() || mesh.mdxRowSize == 0u || requiredVertices == 0u ||
-                !validMdxChannel(channel, mesh.mdxRowSize, bytes)) return false;
+            if (requiredVertices == 0u) return true;
+            if (mesh.mdxRowSize == 0u || !validMdxChannel(channel, mesh.mdxRowSize, bytes))
+                return false;
             const std::uint64_t last = static_cast<std::uint64_t>(mdxDataOffset) +
                 static_cast<std::uint64_t>(requiredVertices - 1u) * mesh.mdxRowSize;
             return last <= mdxBytes_.size() && channel <= mdxBytes_.size() - last &&
                    bytes <= mdxBytes_.size() - last - channel;
         };
-        const bool tangentsReadable = channelReadable(mesh.mdxTangentOffset, 36u);
-        mesh.hasVertexColors = (mesh.mdxBitmap & 0x40u) != 0u &&
-            channelReadable(mesh.mdxColorOffset, 4u);
-        const bool uv2Readable = (mesh.mdxBitmap & 0x08u) != 0u &&
-            channelReadable(mesh.mdxTexcoordOffsets[2], 8u);
-        const bool uv3Readable = (mesh.mdxBitmap & 0x10u) != 0u &&
-            channelReadable(mesh.mdxTexcoordOffsets[3], 8u);
-        bool invalidTangent = false;
-        bool invalidUv = false;
-        if (!tangentsReadable && mesh.mdxTangentOffset != 0xffffffffu &&
-            (mesh.mdxBitmap & 0x80u) != 0u && requiredVertices != 0u) {
-            model_.warnings.push_back("Mesh on " + model_.nodes[nodeIndex].name +
-                " has an invalid or truncated MDX tangent channel; geometry was retained.");
+        const auto enabledChannel = [&](std::uint32_t mask, std::uint32_t channel,
+                                        std::size_t bytes, const char* description) {
+            if ((mesh.mdxBitmap & mask) == 0u) return false;
+            if (!channelReadable(channel, bytes))
+                throw ModelError(sourcePrefix(label_) + "Mesh on " + model_.nodes[nodeIndex].name +
+                                 " has an unreadable MDX " + description + " channel");
+            return true;
+        };
+        const bool mdxPositions = enabledChannel(kMdxVertex, mdxVertexOffset, 12u, "position");
+        const bool mdlPositions = !mdxPositions && mdlVerticesOffset != 0u &&
+            mdlVerticesOffset != 0xffffffffu &&
+            payload_->containsArray(mdlVerticesOffset, requiredVertices, 12u);
+        if (!mdxPositions && !mdlPositions && requiredVertices != 0u)
+            throw ModelError(sourcePrefix(label_) + "Mesh on " + model_.nodes[nodeIndex].name +
+                             " has no readable vertex-position source");
+        const bool mdxNormalsReadable = enabledChannel(kMdxNormal, mdxNormalOffset, 12u, "normal");
+        if (mesh.animated && static_cast<std::int32_t>(mdxNormalOffset)>=0 &&
+            !mdxNormalsReadable && requiredVertices != 0u)
+            throw ModelError(sourcePrefix(label_) + "Animmesh has no enabled MDX normal channel");
+        const bool uv0Readable = enabledChannel(kMdxTex0, mdxTex0Offset, 8u, "texture coordinate 0");
+        const bool uv1Readable = enabledChannel(kMdxTex1, mdxTex1Offset, 8u, "texture coordinate 1");
+        const bool uv2Readable = enabledChannel(0x08u, mesh.mdxTexcoordOffsets[2], 8u, "texture coordinate 2");
+        const bool uv3Readable = enabledChannel(0x10u, mesh.mdxTexcoordOffsets[3], 8u, "texture coordinate 3");
+        mesh.hasVertexColors = enabledChannel(0x40u, mesh.mdxColorOffset, 4u, "color");
+        const bool tangentsReadable = enabledChannel(0x80u, mesh.mdxTangentOffset, 36u, "tangent");
+        const bool skinChannelsReadable = mesh.skinned &&
+            channelReadable(mesh.mdxWeightOffset, 16u) &&
+            channelReadable(mesh.mdxBoneIndexOffset, 8u);
+        if (mesh.skinned && !skinChannelsReadable)
+            throw ModelError(sourcePrefix(label_) + "Skin mesh " + model_.nodes[nodeIndex].name +
+                             " has unreadable MDX weight/bone-index channels");
+        if (skinChannelsReadable) {
+            mesh.hasSkinChannels = true;
+            mesh.skinInfluences.resize(requiredVertices);
         }
         ByteView mdx(mdxBytes_.data(), mdxBytes_.size(), label_.empty() ? "MDX" : label_ + " MDX", job_);
-        bool warnedNonFiniteSkinWeight = false;
         for (std::uint32_t index = 0u; index < requiredVertices; ++index) {
             auto& vertex = mesh.vertices[index];
             const auto row = static_cast<std::size_t>(mdxDataOffset) +
                              static_cast<std::size_t>(index) * mesh.mdxRowSize;
-            if (mdxRowsValid) {
-                vertex.position = safeVec3(mdx.vec3(row + mdxVertexOffset, "MDX position"), model_.warnings,
-                                           "Mesh vertex position");
+            if (mdxPositions) {
+                vertex.position = mdx.vec3(row + mdxVertexOffset, "MDX position");
             } else if (mdlPositions) {
-                vertex.position = safeVec3(payload_->vec3(static_cast<std::size_t>(mdlVerticesOffset) +
-                    static_cast<std::size_t>(index) * 12u, "MDL position"), model_.warnings,
-                    "Mesh vertex position");
+                vertex.position = payload_->vec3(static_cast<std::size_t>(mdlVerticesOffset) +
+                    static_cast<std::size_t>(index) * 12u, "MDL position");
             }
             if (mdxNormalsReadable) {
                 const auto authored = mdx.vec3(row + mdxNormalOffset, "MDX normal");
                 // All four SetInterleavedBuffer implementations pass the MDX
                 // channel directly to glNormalPointer. K2's rigid ARB/NV
                 // programs also retain its magnitude. Draw-time state and
-                // programs own normalization; inspection geometry separately
-                // constructs unit normals in prepareRenderGeometry.
+                // programs own normalization.
                 vertex.normal = authored;
             }
-            if (!mdxBytes_.empty() && mesh.mdxRowSize != 0u &&
-                (mesh.mdxBitmap & kMdxTex0) != 0u &&
-                validMdxChannel(mdxTex0Offset, mesh.mdxRowSize, 8u) &&
-                row <= mdxBytes_.size() && mdxTex0Offset <= mdxBytes_.size() - row &&
-                8u <= mdxBytes_.size() - row - mdxTex0Offset) {
+            if (uv0Readable)
                 vertex.texcoord0 = mdx.vec2(row + mdxTex0Offset, "MDX texture coordinate 0");
-            }
-            if (!mdxBytes_.empty() && mesh.mdxRowSize != 0u &&
-                (mesh.mdxBitmap & kMdxTex1) != 0u &&
-                validMdxChannel(mdxTex1Offset, mesh.mdxRowSize, 8u) &&
-                row <= mdxBytes_.size() && mdxTex1Offset <= mdxBytes_.size() - row &&
-                8u <= mdxBytes_.size() - row - mdxTex1Offset) {
+            if (uv1Readable)
                 vertex.texcoord1 = mdx.vec2(row + mdxTex1Offset, "MDX texture coordinate 1");
-            }
             if (mesh.hasVertexColors) {
                 for (std::size_t c = 0u; c < vertex.color.size(); ++c)
                     vertex.color[c] = mdx.u8(row + mesh.mdxColorOffset + c, "MDX color");
@@ -1737,12 +1578,6 @@ private:
                 row + mesh.mdxTexcoordOffsets[2], "MDX texture coordinate 2");
             if (uv3Readable) vertex.texcoord3 = mdx.vec2(
                 row + mesh.mdxTexcoordOffsets[3], "MDX texture coordinate 3");
-            for (auto* uv : {&vertex.texcoord0, &vertex.texcoord1,
-                             &vertex.texcoord2, &vertex.texcoord3}) {
-                if (!finite(uv->x) || !finite(uv->y)) {
-                    *uv = {}; invalidUv = true;
-                }
-            }
             if (tangentsReadable) {
                 const auto at = row + mesh.mdxTangentOffset;
                 auto& basis = vertex.tangentBasis;
@@ -1753,7 +1588,7 @@ private:
                     const double length2 = static_cast<double>(v.x) * v.x +
                         static_cast<double>(v.y) * v.y + static_cast<double>(v.z) * v.z;
                     return finite(v.x) && finite(v.y) && finite(v.z) &&
-                           std::isfinite(length2) && length2 > 1.0e-20;
+                           std::isfinite(length2) && length2 != 0.0;
                 };
                 const auto good = goodVector(basis.bitangent) && goodVector(basis.tangent) &&
                                   goodVector(basis.normal);
@@ -1763,74 +1598,26 @@ private:
                     const auto n = normalize(basis.normal);
                     const auto c = cross(t, b);
                     const float determinant = c.x * n.x + c.y * n.y + c.z * n.z;
-                    basis.valid = finite(determinant) && std::abs(determinant) > 1.0e-5f;
+                    basis.valid = finite(determinant) && determinant != 0.0f;
                 }
                 if (basis.valid) ++mesh.validTangentVertices;
-                else {
-                    invalidTangent = true;
-                    // Non-finite input must never reach a GPU upload.
-                    for (auto* v : {&basis.bitangent, &basis.tangent, &basis.normal})
-                        if (!finite(v->x) || !finite(v->y) || !finite(v->z)) *v = {};
-                }
             }
             if (skinChannelsReadable) {
                 auto& influence = mesh.skinInfluences[index];
                 for (std::size_t component = 0u; component < influence.weights.size(); ++component) {
-                    auto value = mdx.f32(row + mesh.mdxWeightOffset + component * 4u,
-                                         "MDX skin weight");
-                    if (!finite(value)) {
-                        value = 0.0f;
-                        warnedNonFiniteSkinWeight = true;
-                    }
-                    influence.weights[component] = value;
+                    influence.weights[component] = mdx.f32(
+                        row + mesh.mdxWeightOffset + component * 4u, "MDX skin weight");
                     influence.boneIndices[component] = mdx.u16(
                         row + mesh.mdxBoneIndexOffset + component * 2u,
                         "MDX skin bone index");
                 }
             }
         }
-        if (invalidTangent) model_.warnings.push_back("Mesh on " + model_.nodes[nodeIndex].name +
-            " contains invalid tangent bases; affected vertices need generated tangents.");
-        if (invalidUv) model_.warnings.push_back("Mesh on " + model_.nodes[nodeIndex].name +
-            " contains non-finite texture coordinates; zero was substituted.");
-        if (warnedNonFiniteSkinWeight) {
-            model_.warnings.push_back("Skin mesh " + model_.nodes[nodeIndex].name +
-                                      " contains non-finite weights; zero was substituted.");
-        }
-
-        std::vector<Vec3> generatedNormals(requiredVertices);
         mesh.indices.reserve(mesh.faces.size() * 3u);
-        std::size_t skippedFaces = 0u;
         for (const auto& face : mesh.faces) {
             job_.check();
-            if (face.indices[0] < 0 || face.indices[1] < 0 || face.indices[2] < 0 ||
-                static_cast<std::uint32_t>(face.indices[0]) >= requiredVertices ||
-                static_cast<std::uint32_t>(face.indices[1]) >= requiredVertices ||
-                static_cast<std::uint32_t>(face.indices[2]) >= requiredVertices) {
-                ++skippedFaces;
-                continue;
-            }
             for (const auto index : face.indices)
                 mesh.indices.push_back(static_cast<std::uint32_t>(index));
-            const auto& a = mesh.vertices[static_cast<std::size_t>(face.indices[0])].position;
-            const auto& b = mesh.vertices[static_cast<std::size_t>(face.indices[1])].position;
-            const auto& c = mesh.vertices[static_cast<std::size_t>(face.indices[2])].position;
-            const auto normal = cross(subtract(b, a), subtract(c, a));
-            generatedNormals[static_cast<std::size_t>(face.indices[0])] = add(
-                generatedNormals[static_cast<std::size_t>(face.indices[0])], normal);
-            generatedNormals[static_cast<std::size_t>(face.indices[1])] = add(
-                generatedNormals[static_cast<std::size_t>(face.indices[1])], normal);
-            generatedNormals[static_cast<std::size_t>(face.indices[2])] = add(
-                generatedNormals[static_cast<std::size_t>(face.indices[2])], normal);
-        }
-        if (skippedFaces != 0u) {
-            model_.warnings.push_back("Mesh on " + model_.nodes[nodeIndex].name + " skipped " +
-                                      std::to_string(skippedFaces) + " face(s) with invalid indices.");
-        }
-        if (!mdxNormalsReadable) {
-            for (std::size_t index = 0u; index < mesh.vertices.size(); ++index) {
-                mesh.vertices[index].normal = normalize(generatedNormals[index]);
-            }
         }
         if (mesh.animated) parseAnimMeshDraws(offset,mesh);
         {
@@ -1866,10 +1653,6 @@ private:
             model_.warnings.push_back("Skin mesh " + model_.nodes[nodeIndex].name +
                 " does not contain every packed-verified K2 skinning input; its stored geometry will be used as a fallback.");
         }
-        if (requiredVertices != headerVertexCount) {
-            model_.warnings.push_back("Mesh on " + model_.nodes[nodeIndex].name +
-                                      " required more vertices than its header declared; face indices were authoritative.");
-        }
 
         parseAabbTree(offset, nodeIndex, mesh);
         parseLightsaber(offset, nodeIndex, mesh);
@@ -1886,7 +1669,6 @@ private:
     const std::vector<std::uint8_t>& mdlBytes_;
     const std::vector<std::uint8_t>& mdxBytes_;
     std::string label_;
-    const ParseLimits& limits_;
     const neoshared::bif::JobControl& job_;
     ByteView whole_;
     std::unique_ptr<ByteView> payload_;
@@ -1900,13 +1682,6 @@ private:
     std::uint32_t namesCount_{};
     std::vector<std::string> names_;
     std::unordered_map<std::uint32_t, std::size_t> nodeByOffset_;
-    std::size_t totalVertices_{};
-    std::size_t totalAnimationNodes_{};
-    std::size_t totalAnimMeshSamples_{};
-    std::size_t totalAnimMeshIndices_{};
-    std::size_t totalAnimationEvents_{};
-    std::size_t totalControllers_{};
-    std::size_t totalControllerValues_{};
 };
 
 Quaternion normalizedQuaternion(Quaternion value) noexcept {
@@ -3046,7 +2821,9 @@ EngineCpuSkinSource decodeEngineCpuSkinSource(const Mesh& mesh) {
     // Execute reads only referenced vertices, first all strip pools and then
     // the trailing triangle pool. Do not demand inactive/unreferenced rows.
     const auto sourceVertex=[&](std::uint32_t vertex,bool strip) {
-        const auto row=input.mdxDataOffset+vertex*mesh.mdxRowSize;
+        if(vertex>=count) throw ModelError("CPU skin topology index exceeds its vertex pool");
+        const auto row=static_cast<std::size_t>(input.mdxDataOffset)+
+            static_cast<std::size_t>(vertex)*mesh.mdxRowSize;
         out.positions[vertex]=mdx.vec3(row+input.mdxVertexOffset,"skin CPU position");
         out.normals[vertex]=mdx.vec3(row+mesh.mdxNormalOffset,"skin CPU normal");
         for(unsigned k=0;k<4;++k) {
@@ -3103,7 +2880,6 @@ bool isAsciiModelInput(const std::vector<std::uint8_t>& mdlBytes) noexcept {
 Model decodeModelBytes(const std::vector<std::uint8_t>& mdlBytes,
                        const std::vector<std::uint8_t>& mdxBytes,
                        const std::string& sourceLabel,
-                       const ParseLimits& limits,
                        const neoshared::bif::JobControl& job,
                        std::optional<GameVersion> asciiGame,
                        const AsciiResourceResolver& asciiResources) {
@@ -3111,32 +2887,31 @@ Model decodeModelBytes(const std::vector<std::uint8_t>& mdlBytes,
         if(!asciiGame)throw AsciiModelGameRequired();
         return decodeAsciiModelBytes(mdlBytes,*asciiGame,sourceLabel,job,asciiResources);
     }
-    auto model=Parser(mdlBytes, mdxBytes, sourceLabel, limits, job).parse();
+    auto model=Parser(mdlBytes, mdxBytes, sourceLabel, job).parse();
     initializeProceduralUvPools(model);
     return model;
 }
 
 Model readModelFile(const std::filesystem::path& mdlPath,
                     const std::optional<std::filesystem::path>& mdxPath,
-                    const ParseLimits& limits,
                     const neoshared::bif::JobControl& job,
                     std::optional<GameVersion> asciiGame,
                     const AsciiResourceResolver& asciiResources) {
-    const auto mdl = readBoundedFile(mdlPath, limits.maximumMdlBytes, job);
+    const auto mdl = readModelFileBytes(mdlPath, job);
     std::vector<std::uint8_t> mdx;
     if (!isAsciiModelInput(mdl)) {
         std::optional<std::filesystem::path> companion = mdxPath;
         if (!companion) companion = caseInsensitiveSibling(mdlPath, ".mdx", job);
-        if (companion) mdx = readBoundedFile(*companion, limits.maximumMdxBytes, job);
+        if (companion) mdx = readModelFileBytes(*companion, job);
     }
     const AsciiResourceResolver looseResources=[&](const std::string& name,const std::string& extension)
         ->std::optional<std::vector<std::uint8_t>> {
         const auto source=mdlPath.parent_path()/std::filesystem::u8path(name+extension);
         const auto file=caseInsensitiveSibling(source,extension,job);
         if(!file)return {};
-        return readBoundedFile(*file,limits.maximumMdlBytes,job);
+        return readModelFileBytes(*file,job);
     };
-    return decodeModelBytes(mdl, mdx, neoshared::pathToUtf8(mdlPath), limits, job,
+    return decodeModelBytes(mdl, mdx, neoshared::pathToUtf8(mdlPath), job,
                             asciiGame,asciiResources?asciiResources:looseResources);
 }
 

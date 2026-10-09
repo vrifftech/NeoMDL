@@ -93,7 +93,6 @@ std::optional<model::Vec3> color(const GffStruct& s,const char* n) {
 }
 void loadGff(GffFile& out,const neoshared::ResourceDocument& r,const char* type) {
     const auto& job=resourceLoadJob();job.update(0,0,"Decoding "+r.fileName);
-    require(r.bytes.size()<=64u*1024u*1024u,"GFF exceeds 64 MiB host limit");
     out.LoadBytes(r.bytes);job.check();require(out.root()&&out.filetype()==type&&out.version()=="V3.2","expected "+std::string(type)+" V3.2");
 }
 using Tables=detail::AreaLoadTables;
@@ -133,7 +132,6 @@ AreaLoadPlan readAreaLoad(const std::string& area,const std::string& scope,
     ResourceResolver supplied,const AreaLoadOptions& options,const neoshared::bif::JobControl& job) {
     ResourceLoadScope work(job);job.update(0,0,"Reading module area "+area);
     require(!scope.empty()&&bool(supplied),"an explicit scope identity and resolver are required");
-    require(options.maximumObjects>0&&options.maximumObjects<=65536,"invalid object budget");
     AreaLoadPlan plan;plan.game=options.game;plan.area=resourceKey(area);plan.scopeIdentity=scope;
     plan.trace=std::make_shared<ResourceTrace>();plan.resolver=traceResources(std::move(supplied),plan.trace,scope+"/"+plan.area);
     const auto required=[&](const std::string& name,std::uint16_t type) {
@@ -239,7 +237,6 @@ AreaLoadPlan readAreaLoad(const std::string& area,const std::string& scope,
     const Family families[]={{"Creature List",AreaObjectKind::Creature,4,0x7eb,"UTC "},
         {"Door List",AreaObjectKind::Door,8,0x7fa,"UTD "},{"Placeable List",AreaObjectKind::Placeable,9,0x7fc,"UTP "}};
     for(const auto& family:families) if(const auto* list=typed<GffList>(gr,family.list)) {
-        require(list->count()<=options.maximumObjects-plan.placements.size(),"object allocation budget exceeded");
         for(std::size_t n=0;n<list->count();++n) {
             job.update(n,list->count(),"Reading "+std::string(family.list));
             const auto& placement=*list->GetStruct(n);
@@ -361,7 +358,6 @@ AreaLoadPlan readAreaLoad(const std::string& area,const std::string& scope,
     // to TriggerScene later; gameplay scripts and transitions are retained only
     // as inspection metadata.
     if(const auto* list=typed<GffList>(gr,"TriggerList")) {
-        require(list->count()<=options.maximumObjects,"trigger allocation budget exceeded");
         for(std::size_t n=0;n<list->count();++n) {
             job.update(n,list->count(),"Reading area triggers");
             AreaTriggerRecord record;record.sourceIndex=n;
@@ -429,7 +425,6 @@ AreaLoadPlan readAreaLoad(const std::string& area,const std::string& scope,
                     geometryPosition={number(*data,"XPosition"),number(*data,"YPosition"),number(*data,"ZPosition")};
                 }
                 require(geometry,"TriggerList["+std::to_string(n)+"] has no Geometry footprint");
-                require(geometry->count()<=4096u,"TriggerList geometry exceeds host point limit");
                 record.localFootprint.reserve(geometry->count());record.worldFootprint.reserve(geometry->count());
                 for(std::size_t pointIndex=0;pointIndex<geometry->count();++pointIndex) {
                     job.check();

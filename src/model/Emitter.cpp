@@ -439,12 +439,10 @@ static bool moveEmitterParticleImpl(EmitterParticle& p,const NodeEmitterState& s
             }
             const auto n=hit->engineNormal?hit->normal:unit(hit->normal);
             const auto reflected=sub(p.velocity,mul(n,2*dot(p.velocity,n)));
-            // Engine contacts keep the authored coefficient and raw hit
-            // normal. The explicit inspection proxy retains its old limits.
+            // Keep the authored coefficient and the engine's raw hit normal.
             if(!engine && hit->engineNormal&&!std::isfinite(s.bounceCoefficient))
                 throw ModelError("Non-finite engine particle bounce coefficient");
-            const float coefficient=hit->engineNormal?s.bounceCoefficient:
-                bound(s.bounceCoefficient,-1000,1000);
+            const float coefficient=s.bounceCoefficient;
             bool settle=false;
             if(targeted || environment->bounceMode==ParticleBounceMode::Reflection) {
                 p.velocity=mul(reflected,coefficient);
@@ -502,87 +500,6 @@ Vec3 particleBlastDisplacement(const ParticleBlast& blast,Vec3 point) noexcept {
     return pointSourceWindVector(
         {blast.center,blast.radius,blast.remaining,blast.strength},point);
 }
-std::optional<ParticleContact> traceParticleGround(Vec3 from,Vec3 to,float height) noexcept {
-    if(!finite(from)||!finite(to)||!std::isfinite(height)||to.z>=from.z || from.z<height || to.z>height) return {};
-    return ParticleContact{{0,0,1},std::clamp((from.z-height)/(from.z-to.z),0.0f,1.0f),{},false};
-}
-namespace {
-float component(Vec3 p,unsigned a) {return a==0?p.x:a==1?p.y:p.z;}
-Vec3 minimum(Vec3 a,Vec3 b) {return {std::min(a.x,b.x),std::min(a.y,b.y),std::min(a.z,b.z)};}
-Vec3 maximum(Vec3 a,Vec3 b) {return {std::max(a.x,b.x),std::max(a.y,b.y),std::max(a.z,b.z)};}
-bool segmentBounds(Vec3 from,Vec3 delta,Vec3 lo,Vec3 hi,float maxFraction) {
-    float enter=0,leave=maxFraction;
-    for(unsigned a=0;a<3;++a) {
-        const float d=component(delta,a),f=component(from,a),l=component(lo,a),h=component(hi,a);
-        if(std::fabs(d)<1.0e-12f) {if(f<l || f>h) return false;}
-        else {
-            float p=(l-f)/d,q=(h-f)/d;if(p>q) std::swap(p,q);
-            enter=std::max(enter,p);leave=std::min(leave,q);if(enter>leave) return false;
-        }
-    }
-    return true;
-}
-}
-bool ParticleCollisionMesh::build(std::vector<ParticleTriangle> triangles) {
-    triangles_.clear();branches_.clear();
-    if(triangles.size()>32768) return false;
-    for(const auto& t:triangles) for(const auto p:{t.a,t.b,t.c})
-        if(!finite(p)||std::max({std::fabs(p.x),std::fabs(p.y),std::fabs(p.z)})>1.0e6f) return false;
-    triangles.erase(std::remove_if(triangles.begin(),triangles.end(),[](const ParticleTriangle& t) {
-        return dot(cross(sub(t.b,t.a),sub(t.c,t.a)),cross(sub(t.b,t.a),sub(t.c,t.a)))<1.0e-16f;
-    }),triangles.end());
-    triangles_=std::move(triangles);branches_.reserve(triangles_.size()*2);
-    if(!triangles_.empty()) buildBranch(0,triangles_.size());
-    return true;
-}
-std::size_t ParticleCollisionMesh::buildBranch(std::size_t start,std::size_t count) {
-    Branch branch;branch.start=start;branch.count=count;
-    branch.minimum=branch.maximum=triangles_[start].a;
-    for(std::size_t i=start;i<start+count;++i) for(const auto p:{triangles_[i].a,triangles_[i].b,triangles_[i].c}) {
-        branch.minimum=minimum(branch.minimum,p);branch.maximum=maximum(branch.maximum,p);
-    }
-    const auto index=branches_.size();branches_.push_back(branch);
-    if(count>8) {
-        const auto extent=sub(branch.maximum,branch.minimum);unsigned a=extent.y>extent.x?1u:0u;
-        if(extent.z>component(extent,a)) a=2;
-        const auto middle=start+count/2;
-        std::nth_element(triangles_.begin()+static_cast<std::ptrdiff_t>(start),
-            triangles_.begin()+static_cast<std::ptrdiff_t>(middle),
-            triangles_.begin()+static_cast<std::ptrdiff_t>(start+count),[a](const ParticleTriangle& x,const ParticleTriangle& y) {
-                return component(add(add(x.a,x.b),x.c),a)<component(add(add(y.a,y.b),y.c),a);
-            });
-        const auto left=buildBranch(start,count/2),right=buildBranch(middle,count-count/2);
-        branches_[index].left=left;branches_[index].right=right;branches_[index].count=0;
-    }
-    return index;
-}
-std::optional<ParticleContact> ParticleCollisionMesh::trace(Vec3 from,Vec3 to) const noexcept {
-    if(!finite(from)||!finite(to)||branches_.empty()) return {};
-    const auto delta=sub(to,from);if(dot(delta,delta)<1.0e-16f) return {};
-    std::array<std::size_t,64> stack{};std::size_t size=1;float best=1;
-    std::optional<ParticleContact> result;
-    while(size) {
-        const auto& branch=branches_[stack[--size]];
-        if(!segmentBounds(from,delta,branch.minimum,branch.maximum,best)) continue;
-        if(branch.count==0) {
-            // Balanced median splits over <=32768 triangles fit this stack.
-            if(size+2>stack.size()) return {};
-            stack[size++]=branch.left;stack[size++]=branch.right;continue;
-        }
-        for(std::size_t i=branch.start;i<branch.start+branch.count;++i) {
-            const auto& t=triangles_[i];const auto e1=sub(t.b,t.a),e2=sub(t.c,t.a);
-            const auto h=cross(delta,e2);const float det=dot(e1,h);
-            if(std::fabs(det)<1.0e-10f) continue;
-            const auto s=sub(from,t.a);const float u=dot(s,h)/det;if(u<0||u>1) continue;
-            const auto q=cross(s,e1);const float v=dot(delta,q)/det;if(v<0||u+v>1) continue;
-            const float f=dot(e2,q)/det;if(f<0||f>best) continue;
-            auto n=unit(cross(e1,e2));if(dot(n,delta)>0) n=mul(n,-1);
-            best=f;result=ParticleContact{n,f,{},false};
-        }
-    }
-    return result;
-}
-
 std::uint32_t ParticleRandom::next() {
     if(source) return source();
     state=state*214013u+2531011u;return (state>>16u)&32767u;
@@ -651,7 +568,7 @@ std::vector<std::string> emitterPreviewWarnings(const EmitterNodeData& data,cons
 }
 void EmitterSimulation::reset(std::uint64_t newSeed) noexcept {
     particles.clear();accumulator=0;birthRemainder=0;seed=newSeed;random.state=static_cast<std::uint32_t>(newSeed);
-    nextSerial=0;droppedBirths=0;invalidEnvironmentSamples=0;detonations=0;freeParticles=0;pendingBursts=0;
+    nextSerial=0;detonations=0;freeParticles=0;pendingBursts=0;
     world=previousWorld=identityMatrix();frame=previousFrame=inheritanceFrame={};distanceRemainder={};initialized=false;previousDetonate=false;game=GameVersion::Kotor2;
     ribbonStarts.clear();lightningControl={};lightningOffsets.clear();
     lightningPreviousSource=lightningPreviousDelta={};lightningBranches.clear();
@@ -1110,12 +1027,7 @@ static void advanceEmitterWithBirthScale(const EmitterNodeData& data,NodeEmitter
                 engineMoverCompleted=moveEmitterParticleImpl(p,state,sim.previousWorld,world,flags,dt,
                     activeEnvironment,true,!data.chunkName.empty(),&previousSourceFrame,&sim.frame,&sim.inheritanceFrame);
         } else {
-            const auto before=p;
-            try {
-                moveEmitterParticle(p,state,sim.previousWorld,world,flags,dt,activeEnvironment);
-            } catch (const std::exception&) {
-                p=before;++sim.invalidEnvironmentSamples;
-            }
+            moveEmitterParticle(p,state,sim.previousWorld,world,flags,dt,activeEnvironment);
         }
     }
     if(engineScale && engineMoverCalled && engineMoverCompleted) {
@@ -1226,11 +1138,7 @@ void advanceEmitter(const EmitterNodeData& data,NodeEmitterState& state,
 void advanceLegacyEmitter(const EmitterNodeData& data,NodeEmitterState& state,
     const Mat4& world,double elapsed,EmitterSimulation& sim,
     ParticleRandom* shared,const ParticleEnvironment* environment) {
-    float sourceScale=bound(length(transformDirection(world,{1,0,0})),0,1000,1);
-    // Matrix round-off must not turn an exact integer object scale into a
-    // different integer rectangle divisor (e.g. 1000 becomes 999).
-    const float rounded=std::round(sourceScale);
-    if(std::fabs(sourceScale-rounded)<=1.0e-6f*std::max(1.0f,sourceScale)) sourceScale=rounded;
+    const float sourceScale=length(transformDirection(world,{1,0,0}));
     advanceEmitterWithBirthScale(data,state,world,elapsed,sim,shared,environment,sourceScale,false);
 }
 namespace {

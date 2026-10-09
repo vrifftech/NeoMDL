@@ -1,9 +1,9 @@
 #include "core/ResourceContext.hpp"
 #include <neoshared/PathUtf8.hpp>
 #include <neoshared/bif/KeyBifArchive.hpp>
-#include <neoshared/texture/FileUtil.hpp>
 #include <algorithm>
 #include <cctype>
+#include <fstream>
 #include <stdexcept>
 
 namespace neomdl {
@@ -32,23 +32,20 @@ ResourceLoadScope::ResourceLoadScope(const neoshared::bif::JobControl& job)
 }
 ResourceLoadScope::~ResourceLoadScope() {activeLoadJob=previous_;}
 std::string resourceKey(const std::string& name) {
-    if (name.empty() || name.size()>64 || name.find_first_of("/\\:\r\n")!=std::string::npos ||
+    if (name.empty() || name.find_first_of("/\\:\r\n")!=std::string::npos ||
         name=="." || name==".." || name.find('\0')!=std::string::npos)
         throw std::runtime_error("Invalid resource ResRef: "+name);
     return lowerResourceName(name);
 }
 std::optional<std::filesystem::path> uniqueResourceFile(
-    const std::filesystem::path& directory,const std::string& filename,bool skipUnreadableEntries) {
+    const std::filesystem::path& directory,const std::string& filename) {
     const auto wanted=lowerResourceName(filename);
     std::optional<std::filesystem::path> selected;
     std::error_code error;
     for(std::filesystem::directory_iterator it(directory,error),end;!error&&it!=end;it.increment(error)) {
         resourceLoadJob().check();
-        if(skipUnreadableEntries) {
-            std::error_code entryError;
-            if(!it->is_regular_file(entryError)||entryError) continue;
-        } else if(!it->is_regular_file()) continue;
         if(lowerResourceName(neoshared::pathToUtf8(it->path().filename()))!=wanted) continue;
+        if(!it->is_regular_file()) continue;
         if(selected) throw std::runtime_error("Ambiguous resource in "+neoshared::pathToUtf8(directory)+": "+wanted);
         selected=it->path();
     }
@@ -61,19 +58,35 @@ std::optional<std::filesystem::path> uniqueResourceDirectory(
     std::optional<std::filesystem::path> selected;
     for(const auto& entry:std::filesystem::directory_iterator(directory)) {
         resourceLoadJob().check();
-        if(!entry.is_directory() || lowerResourceName(neoshared::pathToUtf8(entry.path().filename()))!=wanted) continue;
+        if(lowerResourceName(neoshared::pathToUtf8(entry.path().filename()))!=wanted || !entry.is_directory()) continue;
         if(selected) throw std::runtime_error("Ambiguous resource directory in "+neoshared::pathToUtf8(directory)+": "+wanted);
         selected=entry.path();
     }
     return selected;
 }
-std::string resourceFileIdentity(const std::filesystem::path& path,bool useAbsoluteOnError) {
-    if(!useAbsoluteOnError)
-        return "neomdl:file:"+neoshared::genericPathToUtf8(std::filesystem::weakly_canonical(path));
-    std::error_code error;
-    auto canonical=std::filesystem::weakly_canonical(path,error);
-    if(error) canonical=std::filesystem::absolute(path,error).lexically_normal();
-    return "neomdl:file:"+neoshared::genericPathToUtf8(canonical);
+std::string resourceFileIdentity(const std::filesystem::path& path) {
+    return "neomdl:file:"+neoshared::genericPathToUtf8(std::filesystem::weakly_canonical(path));
+}
+std::vector<std::uint8_t> readResourceFile(const std::filesystem::path& path) {
+    std::ifstream in(path,std::ios::binary|std::ios::ate);
+    if(!in) throw std::runtime_error("Unable to open file: "+neoshared::pathToUtf8(path));
+    const auto end=in.tellg();
+    if(end<0) throw std::runtime_error("Unable to size file: "+neoshared::pathToUtf8(path));
+    std::vector<std::uint8_t> bytes;
+    if(static_cast<std::uintmax_t>(end)>bytes.max_size())
+        throw std::runtime_error("File is too large for this process: "+neoshared::pathToUtf8(path));
+    bytes.resize(static_cast<std::size_t>(end));
+    in.seekg(0);
+    if(!in) throw std::runtime_error("Unable to seek file: "+neoshared::pathToUtf8(path));
+    for(std::size_t offset=0;offset<bytes.size();) {
+        resourceLoadJob().check();
+        const auto count=std::min<std::size_t>(1024u*1024u,bytes.size()-offset);
+        in.read(reinterpret_cast<char*>(bytes.data()+offset),static_cast<std::streamsize>(count));
+        if(static_cast<std::size_t>(in.gcount())!=count)
+            throw std::runtime_error("Unable to read complete file: "+neoshared::pathToUtf8(path));
+        offset+=count;
+    }
+    return bytes;
 }
 std::string resourceExtension(std::uint16_t t) {
     switch(t) {
@@ -94,7 +107,6 @@ void ResourceTrace::record(const std::string& requester,const std::string& name,
     std::lock_guard<std::mutex> lock(mutex_);
     const auto key=std::make_tuple(d.requester,d.resref,d.type,d.status,d.identity,d.error);
     if(keys_.count(key))return;
-    if(entries_.size()>=131072) throw std::runtime_error("Resource provenance exceeds 131072 distinct dependencies");
     entries_.push_back(std::move(d));
     try {keys_.insert(key);}catch(...) {entries_.pop_back();throw;}
 }
@@ -134,7 +146,7 @@ ResourceResolver directoryResources(const std::filesystem::path& directory,Resou
                 r.identity=resourceFileIdentity(*selected);
                 r.sourceDescription=neoshared::genericPathToUtf8(*selected);r.protectedInputs={*selected};
                 resourceLoadJob().update(0,0,"Reading "+r.fileName);
-                r.bytes=neoshared::texture::readFileBytes(*selected,type==0xbc0?1073741824u:536870912u);
+                r.bytes=readResourceFile(*selected);
                 resourceLoadJob().check();return r;
             }
         }

@@ -7,19 +7,34 @@
 
 namespace neomdl::material {
 namespace {
-constexpr std::uint64_t maxPixels=4u*1024u*1024u;
 constexpr std::array<unsigned,6> targets{{1,0,2,3,4,5}},turns{{3,1,0,2,2,0}};
+std::size_t checkedProduct(std::size_t a,std::size_t b) {
+    if(b&&a>std::numeric_limits<std::size_t>::max()/b)
+        throw std::length_error("Procedural image storage size overflows");
+    return a*b;
+}
+std::size_t imageBytes(unsigned width,unsigned height,unsigned bpp) {
+    return checkedProduct(checkedProduct(width,height),bpp);
+}
+unsigned extentProduct(unsigned a,unsigned b) {
+    if(b&&a>std::numeric_limits<unsigned>::max()/b)
+        throw std::length_error("Procedural image dimensions overflow");
+    return a*b;
+}
+unsigned tileCount(unsigned nx,unsigned ny) {
+    if(!nx||!ny)throw std::invalid_argument("Invalid engine TID grid");
+    return extentProduct(nx,ny);
+}
 void validate(const ProcedureImage& p) {
     if(!p.width||!p.height||p.depth!=1||p.bytesPerPixel<1||p.bytesPerPixel>4||
-       std::uint64_t(p.width)*p.height>maxPixels||
-       std::uint64_t(p.width)*p.height*p.bytesPerPixel!=p.bytes.size())
-        throw std::invalid_argument("Invalid/bounded engine procedural source storage");
+       imageBytes(p.width,p.height,p.bytesPerPixel)!=p.bytes.size())
+        throw std::invalid_argument("Invalid engine procedural source storage");
 }
 ProcedureImage crop(const ProcedureImage& p,unsigned x,unsigned y,unsigned w,unsigned h) {
     if(!w||!h||x>p.width||y>p.height||w>p.width-x||h>p.height-y)
         throw std::invalid_argument("Engine procedural crop is outside its source image");
     ProcedureImage out;out.width=w;out.height=h;out.bytesPerPixel=p.bytesPerPixel;
-    const auto row=std::size_t(w)*out.bytesPerPixel;out.bytes.resize(row*h);
+    const auto row=checkedProduct(w,out.bytesPerPixel);out.bytes.resize(checkedProduct(row,h));
     for(unsigned j=0;j<h;++j)std::copy_n(p.bytes.data()+((std::size_t(y+j)*p.width+x)*p.bytesPerPixel),
         row,out.bytes.data()+std::size_t(j)*row);
     return out;
@@ -73,11 +88,10 @@ ProcedureSourceEncoding sourceEncoding(const neoshared::texture::TextureData& t,
     return ProcedureSourceEncoding::Rgba8;
 }
 ProcedureImage layerImage(const neoshared::texture::TextureLayer& l,unsigned bpp) {
-    if(!l.width||!l.height||std::uint64_t(l.width)*l.height>maxPixels||
-       std::uint64_t(l.width)*l.height*4!=l.rgba.size())
+    if(!l.width||!l.height||imageBytes(l.width,l.height,4)!=l.rgba.size())
         throw std::invalid_argument("Invalid decoded procedural layer storage");
     ProcedureImage p;p.width=l.width;p.height=l.height;p.bytesPerPixel=bpp;
-    p.bytes.resize(std::size_t(l.width)*l.height*bpp);
+    p.bytes.resize(imageBytes(l.width,l.height,bpp));
     for(unsigned y=0;y<l.height;++y)for(unsigned x=0;x<l.width;++x) {
         const auto s=(std::size_t(l.height-1-y)*l.width+x)*4;
         const auto d=(std::size_t(y)*l.width+x)*bpp;
@@ -88,9 +102,8 @@ ProcedureImage layerImage(const neoshared::texture::TextureLayer& l,unsigned bpp
 }
 ProcedureImage processedImage(const neoshared::texture::ProcessedTextureLevel& level,unsigned bpp) {
     ProcedureImage result;result.width=level.width;result.height=level.height;result.bytesPerPixel=bpp;
-    const auto bytes=std::uint64_t(level.width)*level.height*bpp;
-    if(!level.width||!level.height||std::uint64_t(level.width)*level.height>maxPixels||
-       bytes!=level.bytes.size())
+    if(!level.width||!level.height||bpp<1||bpp>4||
+       imageBytes(level.width,level.height,bpp)!=level.bytes.size())
         throw std::invalid_argument("Uncompressed processed level has an inconsistent engine byte span");
     result.bytes=level.bytes;return result;
 }
@@ -100,8 +113,10 @@ ProcedureImage aurImageScale(const ProcedureImage& source,unsigned width,unsigne
     validate(source);
     ProcedureImage destination;destination.width=width;destination.height=height;
     destination.bytesPerPixel=source.bytesPerPixel;
-    destination.bytes.resize(std::size_t(width)*height*source.bytesPerPixel);
+    destination.bytes.resize(imageBytes(width,height,source.bytesPerPixel));
     const std::uint64_t denominator=std::uint64_t(source.width)*source.height;
+    if(denominator>std::numeric_limits<std::uint64_t>::max()/256u)
+        throw std::length_error("Procedural scaling accumulator overflows");
     for(unsigned dy=0;dy<height;++dy) {
         const std::uint64_t y0=std::uint64_t(dy)*source.height;
         const std::uint64_t y1=std::uint64_t(dy+1u)*source.height;
@@ -134,7 +149,8 @@ ProcedureImage aurImageScale(const ProcedureImage& source,unsigned width,unsigne
 ProcedureStorageDescriptor procedureStorageDescriptor(
         const neoshared::texture::TextureData& texture,const ProcedureDefinition& definition,bool cube) {
     ProcedureStorageDescriptor result;
-    result.textureIdCount=unsigned(definition.numX)*unsigned(definition.numY);
+    if(definition.numX<=0||definition.numY<=0)throw std::invalid_argument("Invalid engine procedural tile count");
+    result.textureIdCount=tileCount(unsigned(definition.numX),unsigned(definition.numY));
     result.faceCount=cube?6u:1u;
     result.target=definition.volumeTexture?ProcedureTextureTarget::Volume3D:
                   cube?ProcedureTextureTarget::CubeMap:ProcedureTextureTarget::Texture2D;
@@ -165,9 +181,9 @@ ProcedureStorageDescriptor procedureStorageDescriptor(
 }
 ProcedureImage procedureSourceImage(const neoshared::texture::TextureData& t,
                                    const ProcedureDefinition& d,bool cube) {
-    if(d.numX<=0||d.numY<=0||std::uint64_t(d.numX)*unsigned(d.numY)>4096)
+    if(d.numX<=0||d.numY<=0)
         throw std::invalid_argument("Invalid engine procedural tile count");
-    const auto nx=unsigned(d.numX),ny=unsigned(d.numY),n=nx*ny;
+    const auto nx=unsigned(d.numX),ny=unsigned(d.numY),n=tileCount(nx,ny);
     ProcedureImage result;
     if(t.processedPayload) {
         const auto& payload=*t.processedPayload;
@@ -181,7 +197,8 @@ ProcedureImage procedureSourceImage(const neoshared::texture::TextureData& t,
                 throw std::invalid_argument("Processed cubemap face has no base level");
             auto first=processedImage(payload.surfaces[0].levels.at(0),bpp);
             if(first.width!=first.height)throw std::invalid_argument("Processed cubemap faces must be square");
-            result=first;result.height*=6u;result.bytes.resize(first.bytes.size()*6u);
+            result=first;result.height=extentProduct(first.height,6u);
+            result.bytes.resize(imageBytes(result.width,result.height,bpp));
             for(unsigned face=0;face<6u;++face) {
                 if(payload.surfaces[face].levels.empty())
                     throw std::invalid_argument("Processed cubemap face has no base level");
@@ -200,10 +217,8 @@ ProcedureImage procedureSourceImage(const neoshared::texture::TextureData& t,
             if(payload.surfaces.front().levels.empty())
                 throw std::invalid_argument("Processed cycle frame has no base level");
             auto first=processedImage(payload.surfaces.front().levels.front(),bpp);
-            result=first;result.width*=nx;result.height*=ny;
-            if(std::uint64_t(result.width)*result.height>maxPixels)
-                throw std::invalid_argument("Processed procedural atlas exceeds pixel bound");
-            result.bytes.resize(std::size_t(result.width)*result.height*bpp);
+            result=first;result.width=extentProduct(first.width,nx);result.height=extentProduct(first.height,ny);
+            result.bytes.resize(imageBytes(result.width,result.height,bpp));
             for(unsigned frame=0;frame<n;++frame) {
                 if(payload.surfaces[frame].levels.empty())
                     throw std::invalid_argument("Processed cycle frame has no base level");
@@ -225,9 +240,8 @@ ProcedureImage procedureSourceImage(const neoshared::texture::TextureData& t,
     if(cube&&t.cubeMap) {
         if(t.layers.size()!=6||t.cubeFaces.size()!=6||first.width!=first.height)
             throw std::invalid_argument("Procedural cubemap requires six complete square named faces");
-        result=first;result.height*=6;
-        if(std::uint64_t(result.width)*result.height>maxPixels)throw std::invalid_argument("Procedural cube strip exceeds pixel bound");
-        result.bytes.resize(first.bytes.size()*6);
+        result=first;result.height=extentProduct(first.height,6u);
+        result.bytes.resize(imageBytes(result.width,result.height,bpp));
         std::array<bool,6> seen{};
         for(std::size_t j=0;j<6;++j) {
             const auto target=unsigned(t.cubeFaces[j]);
@@ -239,9 +253,8 @@ ProcedureImage procedureSourceImage(const neoshared::texture::TextureData& t,
         }
     } else if(t.layers.size()==1)result=std::move(first);
     else if(!cube&&d.type==ProcedureType::Cycle&&t.layers.size()==n) {
-        result=first;result.width*=nx;result.height*=ny;
-        if(std::uint64_t(result.width)*result.height>maxPixels)throw std::invalid_argument("Procedural atlas exceeds pixel bound");
-        result.bytes.resize(std::size_t(result.width)*result.height*bpp);
+        result=first;result.width=extentProduct(first.width,nx);result.height=extentProduct(first.height,ny);
+        result.bytes.resize(imageBytes(result.width,result.height,bpp));
         const bool strip=t.kind==neoshared::texture::TextureFileKind::Tga||t.kind==neoshared::texture::TextureFileKind::Dds;
         for(unsigned i=0;i<n;++i) {
             auto tile=layerImage(t.layers[strip?(ny-1-i/nx)*nx+i%nx:i],bpp);
@@ -267,15 +280,15 @@ ProcedureImage procedureSourceImage(const neoshared::texture::TextureData& t,
 std::vector<std::vector<ProcedureImage>> procedureTidImages(
         const ProcedureImage& p,unsigned nx,unsigned ny,bool cube,ProcedureCubeLayout layout) {
     validate(p);
-    if(!nx||!ny||std::uint64_t(nx)*ny>4096)throw std::invalid_argument("Invalid engine TID grid");
+    const auto count=tileCount(nx,ny);
     if(cube&&p.height%6u)throw std::invalid_argument("Engine cube strip height is not six complete faces");
     const auto h=cube?p.height/6u:p.height;
     if(p.width%nx||h%ny||p.width<nx||h<ny)
         throw std::invalid_argument("Engine TID grid leaves a remainder or empty image; no implicit padding");
     const auto w=p.width/nx,th=h/ny;
     if(cube&&w!=th)throw std::invalid_argument("Engine cubemap TID faces must be square after tiling");
-    std::vector<std::vector<ProcedureImage>> out(nx*ny);
-    for(unsigned tid=0;tid<nx*ny;++tid) {
+    std::vector<std::vector<ProcedureImage>> out(count);
+    for(unsigned tid=0;tid<count;++tid) {
         out[tid].resize(cube?6u:1u);
         if(cube)for(unsigned face=0;face<6;++face) {
             auto image=crop(p,(tid%nx)*w,face*h+(tid/nx)*th,w,th);

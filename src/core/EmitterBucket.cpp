@@ -109,7 +109,6 @@ void prewarmSceneEmitterBucket(const std::vector<ParticleScene*>& scenes,
     SceneEmitterPrewarmTrace trace;
     trace.particlesBefore=retainedParticleCount(scenes);
     trace.randomBefore=services.random?services.random->state:0u;
-    std::size_t total=trace.particlesBefore;ParticleChunkBudget chunks;
     try {
         // ListSpecialPartsR appends immediately at ChunkyParticle birth.
         // UpdateEmitters compares the live list length after each hundred-step
@@ -133,9 +132,8 @@ void prewarmSceneEmitterBucket(const std::vector<ParticleScene*>& scenes,
             });
             if(cursor>=registered.size())break;
             const auto current=registered[cursor];ParticlePrewarmStep step;
-            total=retainedParticleCount(scenes);
             try {
-                current.scene->prewarmRegisteredEmitter(current.emitterIndex,total,chunks,step);
+                current.scene->prewarmRegisteredEmitter(current.emitterIndex,step);
             } catch(...) {
                 trace.order.push_back({current.sceneIndex,step.emitterIndex,step.particlesBefore,
                     step.particlesAfter,step.randomBefore,step.randomAfter,step.completed});
@@ -167,11 +165,8 @@ std::vector<SceneEmitterDraw> executeSceneEmitterBucket(const std::vector<Partic
         auto draw=sortedDraws(scenes,view,planes,settingsFrame.cameraFrame);
         std::size_t activeCount=draw.size();
         BucketRemovalScope removals(scenes,draw,activeCount);
-        std::size_t total=retainedParticleCount(scenes);
-        ParticleChunkBudget chunks;
         for(std::size_t cursor=0;cursor<activeCount;++cursor) {
             auto item=draw[cursor];
-            total=retainedParticleCount(scenes);
             item.scene->prepareChunkFrame();
             SceneEmitterFrameStep step;step.sceneIndex=item.sceneIndex;step.emitterIndex=item.emitterIndex;
             step.sceneGuard=settingsFrame.sceneAnimating;
@@ -185,7 +180,7 @@ std::vector<SceneEmitterDraw> executeSceneEmitterBucket(const std::vector<Partic
             try {
                 if(step.animateCalled)
                     step.animateCompleted=item.scene->animatePreparedEmitter(
-                        item.emitterIndex,settingsFrame.elapsedSeconds,total,chunks);
+                        item.emitterIndex,settingsFrame.elapsedSeconds);
                 step.randomAfterAnimate=item.scene->runtimeRandom().state;
                 // The engine caller reloads its live bucket index after
                 // AnimateParticles, whose Single update may destroy children.

@@ -85,7 +85,7 @@ void main() {
 std::string log(g::Api& a,g::UInt object,bool program) {
     g::Int size=0;
     if (program) a.GetProgramiv(object,g::InfoLogLength,&size); else a.GetShaderiv(object,g::InfoLogLength,&size);
-    std::vector<char> text(static_cast<std::size_t>(std::clamp(size,1,1048576)),0);
+    std::vector<char> text(static_cast<std::size_t>(std::max(size,1)),0);
     g::Size count=0;
     if (program) a.GetProgramInfoLog(object,static_cast<g::Size>(text.size()),&count,text.data());
     else a.GetShaderInfoLog(object,static_cast<g::Size>(text.size()),&count,text.data());

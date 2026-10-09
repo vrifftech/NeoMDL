@@ -12,7 +12,6 @@
 #include <cctype>
 #include <cmath>
 #include <cstring>
-#include <fstream>
 #include <limits>
 #include <map>
 #include <sstream>
@@ -50,8 +49,6 @@ struct RandomTransaction {
     explicit RandomTransaction(model::ParticleRandom* p):random(p),state(p?p->state:0){}
     ~RandomTransaction(){if(random&&!committed)random->state=state;}
 };
-constexpr std::size_t maximumLayoutBytes = 8u * 1024u * 1024u;
-constexpr std::size_t maximumRooms = 4096u; // host input limit, not an engine constant
 constexpr std::size_t roomInstanceBase = 0x80000000ull;
 
 std::string key(std::string value) {
@@ -75,7 +72,7 @@ std::optional<std::filesystem::path> localResource(const std::filesystem::path& 
     for (std::filesystem::directory_iterator it(directory, error), end; !error && it != end; it.increment(error)) {
         if (key(neoshared::pathToUtf8(it->path().filename())) != key(name)) continue;
         require(!result, "ambiguous case-insensitive local resource: " + name);
-        if (it->is_regular_file()) result = it->path();
+        result = it->path();
     }
     if (error) throw std::runtime_error("Area directory: " + error.message());
     return result;
@@ -281,7 +278,6 @@ void AreaScene::loadResource(neoshared::ResourceDocument layout, const ResourceR
                              AreaRuntimeServices services,const neoshared::bif::JobControl& job) {
     ResourceLoadScope work(job);job.update(0,0,"Preparing area "+layout.fileName);
     require(layout.type==0xbb8,"expected a LYT resource");
-    require(layout.bytes.size()<=maximumLayoutBytes,"layout exceeds the host size limit");
     const std::string text(layout.bytes.begin(),layout.bytes.end());
     require(text.find('\0')==std::string::npos,"embedded NUL in layout");
     auto trace=std::make_shared<ResourceTrace>();
@@ -350,8 +346,9 @@ void AreaScene::loadResource(neoshared::ResourceDocument layout, const ResourceR
         tag=key(tag); // SpawnRooms compares firstword with __stricmp.
         if (tag != "roomcount" && tag != "trackcount") continue;
         long long count = -1;
-        require(static_cast<bool>(header >> count) && count >= 0 &&
-                static_cast<unsigned long long>(count) <= maximumRooms, "invalid " + tag);
+        require(static_cast<bool>(header >> count) && count >= 0, "invalid " + tag);
+        require(static_cast<unsigned long long>(count)<=input.size()-line-1u,
+                "truncated "+tag+" block");
         if(tag=="roomcount") { require(!sawRooms,"duplicate roomcount block"); sawRooms=true; }
         else { require(!sawTracks,"duplicate trackcount block"); sawTracks=true; }
         for (long long index = 0; index < count; ++index) {
@@ -418,7 +415,6 @@ void AreaScene::loadResource(neoshared::ResourceDocument layout, const ResourceR
     std::string visibility;
     if (resolver) {
         if (const auto resource = resolver(visibilityName,0x0bb9u)) {
-            require(resource->bytes.size() <= maximumLayoutBytes, "visibility resource exceeds the host size limit");
             visibility.assign(resource->bytes.begin(),resource->bytes.end());
             require(visibility.find('\0') == std::string::npos, "embedded NUL in visibility resource");
         }
@@ -429,8 +425,9 @@ void AreaScene::loadResource(neoshared::ResourceDocument layout, const ResourceR
         std::istringstream header(visLines[line]);
         std::string source;
         long long count = -1;
-        require(static_cast<bool>(header >> source >> count) && count >= 0 &&
-                static_cast<unsigned long long>(count) <= maximumRooms, "invalid visibility header");
+        require(static_cast<bool>(header >> source >> count) && count >= 0, "invalid visibility header");
+        require(static_cast<unsigned long long>(count)<=visLines.size()-line-1u,
+                "truncated visibility block");
         const auto first = byName.find(key(source));
         require(first != byName.end(), "visibility names unknown room: " + source);
         for (long long index = 0; index < count; ++index) {
@@ -1654,27 +1651,13 @@ void AreaScene::configureGrass(const GrassSettings& settings,bool applyWind,
 void AreaScene::loadGrassArea(const std::filesystem::path& are,const neoshared::bif::JobControl& job) {
     ResourceLoadScope work(job);job.update(0,0,"Reading area grass settings");
     require(!empty(),"load an area before its grass settings");
-    const auto read=[&](const std::filesystem::path& path) {
-        const auto size=std::filesystem::file_size(path);
-        require(size<=64u*1024u*1024u,"ARE/2DA exceeds host input budget");
-        std::vector<std::uint8_t> bytes(static_cast<std::size_t>(size));
-        std::ifstream file(path,std::ios::binary);
-        constexpr std::size_t block=1024u*1024u;
-        for(std::size_t offset=0;offset<bytes.size();offset+=block) {
-            job.update(offset,bytes.size(),"Reading "+neoshared::pathToUtf8(path.filename()));
-            file.read(reinterpret_cast<char*>(bytes.data()+offset),
-                static_cast<std::streamsize>(std::min(block,bytes.size()-offset)));
-        }
-        job.check();
-        require(bool(file),"cannot read ARE/2DA resource");return bytes;
-    };
     std::vector<std::uint8_t> surface;
     const auto directory=are.parent_path().empty()?std::filesystem::path("."):are.parent_path();
-    if(auto local=localResource(directory,"surfacemat.2da"))surface=read(*local);
-    else if(!path_.empty()) {if(auto local=localResource(path_.parent_path().empty()?std::filesystem::path("."):path_.parent_path(),"surfacemat.2da"))surface=read(*local);}
+    if(auto local=localResource(directory,"surfacemat.2da"))surface=readResourceFile(*local);
+    else if(!path_.empty()) {if(auto local=localResource(path_.parent_path().empty()?std::filesystem::path("."):path_.parent_path(),"surfacemat.2da"))surface=readResourceFile(*local);}
     if(surface.empty()&&resolver_) {if(auto resource=resolver_("surfacemat",0x07e1u))surface=std::move(resource->bytes);}
     require(!surface.empty(),"surfacemat.2da is required; supply it locally or through the area resource resolver");
-    configureGrass(grassSettingsFromArea(read(are),surface,job,game_));
+    configureGrass(grassSettingsFromArea(readResourceFile(are),surface,job,game_));
 }
 void AreaScene::collectGrass(model::Vec3 camera,const std::vector<model::TriggerPlane>& planes) {
     if(empty())return;

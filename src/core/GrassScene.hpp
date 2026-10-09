@@ -19,8 +19,6 @@ struct GrassSettings {
     float binSize{2.6f}, nearSquared{225}, farSquared{900}, stiffness{1}, alphaCutoff{.4f};
     std::array<std::optional<GrassMaterial>,32> surfaces;
     std::optional<std::uint8_t> areaWind;
-    // Host allocation limits, NOT engine grass density limits.
-    std::size_t maximumBlades{1000000}, maximumBins{1000000};
     model::GameVersion game{model::GameVersion::Kotor2};
 };
 void validateGrassSettings(const GrassSettings&);

@@ -18,9 +18,8 @@ namespace {
 std::atomic<std::uint64_t> nextChunkIdentity{0xa0000000u};
 std::atomic<std::uint64_t> nextEmitterRegistration{1};
 constexpr float kDegreesToRadians=0.01745329238474369f;
-bool finiteVector(m::Vec3 v,float limit=1.0e6f) {
-    return std::isfinite(v.x)&&std::isfinite(v.y)&&std::isfinite(v.z)&&
-        std::max({std::fabs(v.x),std::fabs(v.y),std::fabs(v.z)})<=limit;
+bool finiteVector(m::Vec3 v) {
+    return std::isfinite(v.x)&&std::isfinite(v.y)&&std::isfinite(v.z);
 }
 std::string lowerName(std::string s) {
     for(auto& c:s) if(c>='A'&&c<='Z') c=static_cast<char>(c-'A'+'a');
@@ -96,38 +95,33 @@ bool ParticleSceneSettings::operator==(const ParticleSceneSettings& b) const noe
         windVelocity.x,windVelocity.y,windVelocity.z,windMaximumDeviationZDegrees,
         windMaximumDeviationXDegrees,windInterpolationPeriod,
         objectTint.x,objectTint.y,objectTint.z,objectAlpha,tileAlpha,
-        groundCollision,meshCollision,blastWind,groundHeight,bounceMode)==
+        blastWind,bounceMode)==
         std::tie(b.targetEnabled,b.targetNode,b.targetPosition.x,b.targetPosition.y,b.targetPosition.z,
         b.targetOrientation.x,b.targetOrientation.y,b.targetOrientation.z,b.targetOrientation.w,
         b.windVelocity.x,b.windVelocity.y,b.windVelocity.z,b.windMaximumDeviationZDegrees,
         b.windMaximumDeviationXDegrees,b.windInterpolationPeriod,
         b.objectTint.x,b.objectTint.y,b.objectTint.z,b.objectAlpha,b.tileAlpha,
-        b.groundCollision,b.meshCollision,b.blastWind,b.groundHeight,b.bounceMode);
+        b.blastWind,b.bounceMode);
 }
 bool validParticleSceneSettings(const ParticleSceneSettings& s) noexcept {
     const auto q=s.targetOrientation;
     const float norm=q.x*q.x+q.y*q.y+q.z*q.z+q.w*q.w;
-    const auto unit=[](float value) {return std::isfinite(value)&&value>=0&&value<=1;};
-    return finiteVector(s.targetPosition)&&finiteVector(s.windVelocity,10000)&&finiteVector(s.objectTint,1)&&
-        std::isfinite(s.windMaximumDeviationZDegrees)&&std::fabs(s.windMaximumDeviationZDegrees)<=3600.0f&&
-        std::isfinite(s.windMaximumDeviationXDegrees)&&std::fabs(s.windMaximumDeviationXDegrees)<=3600.0f&&
+    return finiteVector(s.targetPosition)&&finiteVector(s.windVelocity)&&finiteVector(s.objectTint)&&
+        std::isfinite(s.windMaximumDeviationZDegrees)&&
+        std::isfinite(s.windMaximumDeviationXDegrees)&&
         std::isfinite(s.windInterpolationPeriod)&&s.windInterpolationPeriod>0.0f&&
-        s.windInterpolationPeriod<=3600.0f&&
-        unit(s.objectTint.x)&&unit(s.objectTint.y)&&unit(s.objectTint.z)&&unit(s.objectAlpha)&&unit(s.tileAlpha)&&
-        std::isfinite(norm)&&norm>1.0e-12f&&s.targetNode.size()<=64&&
-        std::isfinite(s.groundHeight)&&std::fabs(s.groundHeight)<=1.0e6f&&
+        std::isfinite(s.objectAlpha)&&std::isfinite(s.tileAlpha)&&
+        std::isfinite(norm)&&norm>0.0f&&
         (s.bounceMode==m::ParticleBounceMode::Legacy||s.bounceMode==m::ParticleBounceMode::Reflection);
 }
 bool validParticleObjectVisualInputs(const ParticleObjectVisualInputs& inputs,std::string& error) noexcept {
     error.clear();
-    const auto unit=[](float value){return std::isfinite(value)&&value>=0.0f&&value<=1.0f;};
-    if(!finiteVector(inputs.objectTint,1.0f)||!unit(inputs.objectTint.x)||!unit(inputs.objectTint.y)||
-       !unit(inputs.objectTint.z)||!unit(inputs.objectAlpha)||!unit(inputs.tileAlpha)) {
-        error="Particle owner tint and alpha must be finite values within [0,1]";return false;
+    if(!finiteVector(inputs.objectTint)||!std::isfinite(inputs.objectAlpha)||!std::isfinite(inputs.tileAlpha)) {
+        error="Particle owner tint and alpha must be finite";return false;
     }
     std::vector<std::tuple<std::string,bool,std::optional<std::size_t>>> selectors;
     for(const auto& route:inputs.targets) {
-        if(route.emitterName.size()>64u||!finiteMatrix(route.target)) {
+        if(!finiteMatrix(route.target)) {
             error="Particle target route is invalid";return false;
         }
         if(route.allSourceOwners&&route.sourceReference) {
@@ -271,68 +265,22 @@ m::Vec3 ParticleScene::windDisplacement(m::Vec3 position, float seconds) const n
                                : windManager().getGlobalWindNoPoint(position,seconds);
 }
 
-void ParticleScene::buildCollision(const m::Pose& pose,
-                                   const std::vector<std::optional<m::Mat4>>& bases,
-                                   bool includeReferences) {
-    std::vector<m::ParticleTriangle> triangles;
-    bool valid=true;
-    const auto add=[&](const m::Model& model,const m::Pose& sampled,const m::Mat4& base) {
-        for(std::size_t i=0;i<model.meshes.size()&&valid;++i) {
-            const auto& mesh=model.meshes[i];
-            // Explicit viewer proxy: visible, non-background mesh triangles.
-            // This deliberately makes no walkmesh/material collision claim.
-            if(!mesh.render||mesh.backgroundGeometry||mesh.nodeIndex>=sampled.worldTransforms.size()) continue;
-            const auto faceCount=mesh.animated ? mesh.faces.size() : mesh.indices.size()/3;
-            if(faceCount>32768-triangles.size()) {valid=false;break;}
-            const m::DeformedMesh* deformed=i<sampled.deformedMeshes.size()&&sampled.deformedMeshes[i].valid &&
-                sampled.deformedMeshes[i].positions.size()==mesh.vertices.size()?&sampled.deformedMeshes[i]:nullptr;
-            if(mesh.animated && !deformed) {valid=false;break;}
-            const auto transform=deformed?base:m::multiply(base,sampled.worldTransforms[mesh.nodeIndex]);
-            const auto vertex=[&](std::uint32_t n) {return m::transformPoint(transform,
-                deformed?deformed->positions[n]:mesh.vertices[n].position);};
-            // Animmesh indexes are engine primitive batches, not a flattened
-            // triangle list. This explicit inspection proxy uses its authored
-            // face topology with the current pose, never groups strip indexes.
-            for(std::size_t n=0;n<faceCount;++n) {
-                const auto a=mesh.animated ? static_cast<std::uint32_t>(mesh.faces[n].indices[0]) : mesh.indices[n*3];
-                const auto b=mesh.animated ? static_cast<std::uint32_t>(mesh.faces[n].indices[1]) : mesh.indices[n*3+1];
-                const auto c=mesh.animated ? static_cast<std::uint32_t>(mesh.faces[n].indices[2]) : mesh.indices[n*3+2];
-                if(a>=mesh.vertices.size()||b>=mesh.vertices.size()||c>=mesh.vertices.size()) {valid=false;break;}
-                triangles.push_back({vertex(a),vertex(b),vertex(c)});
-            }
-        }
-    };
-    if(settings_.meshCollision) {
-        add(document_->model(), pose,
-            references_ ? references_->mainWorld() : m::identityMatrix());
-        if (includeReferences && references_) {
-            for (std::size_t r = 0u; r < document_->references().size() && valid; ++r) {
-                const auto* runtime = references_->instance(r);
-                if (runtime && runtime->active)
-                    add(document_->references()[r].model, runtime->pose, runtime->world);
-            }
-        } else if (includeReferences) {
-            for(std::size_t r=0;r<bases.size()&&valid;++r) if(bases[r])
-                add(document_->references()[r].model,document_->references()[r].pose,*bases[r]);
-        }
-    }
-    if(!valid || !collision_.build(std::move(triangles))) {
-        collision_.build({});sceneDiagnostic_="Mesh collision disabled for this frame: invalid geometry or 32768-triangle limit";
-    }
-}
 std::shared_ptr<const neoshared::texture::TextureData> assembleParticleAtlas(
     const neoshared::texture::TextureData& texture,std::uint32_t columns,std::uint32_t rows,
     std::string& diagnostic) {
     diagnostic.clear();
-    if(texture.cubeMap || columns==0 || rows==0 || columns>256 || rows>256 ||
-       texture.layers.size()!=static_cast<std::size_t>(columns)*rows || texture.layers.empty()) {
+    if(texture.cubeMap || columns==0 || rows==0 ||
+       texture.layers.size()!=static_cast<std::uint64_t>(columns)*rows || texture.layers.empty()) {
         diagnostic="Particle texture layers do not match the authored 2D frame grid";return {};
     }
     const auto width=texture.layers.front().width,height=texture.layers.front().height;
     const std::uint64_t atlasWidth=static_cast<std::uint64_t>(width)*columns;
     const std::uint64_t atlasHeight=static_cast<std::uint64_t>(height)*rows;
-    if(!width || !height || atlasWidth>8192 || atlasHeight>8192 || atlasWidth*atlasHeight>16777216) {
-        diagnostic="Particle frame atlas exceeds the 64 MiB / 8192-pixel safety limits";return {};
+    const auto maximumBytes=std::vector<std::uint8_t>{}.max_size();
+    if(!width || !height || atlasWidth>std::numeric_limits<std::uint32_t>::max() ||
+       atlasHeight>std::numeric_limits<std::uint32_t>::max() ||
+       atlasWidth>maximumBytes/4u/atlasHeight) {
+        diagnostic="Particle frame atlas dimensions exceed its image storage";return {};
     }
     for(const auto& layer:texture.layers) if(layer.width!=width || layer.height!=height ||
        layer.rgba.size()!=static_cast<std::uint64_t>(width)*height*4) {
@@ -343,11 +291,12 @@ std::shared_ptr<const neoshared::texture::TextureData> assembleParticleAtlas(
     result->canvasWidth=static_cast<std::uint32_t>(atlasWidth);result->canvasHeight=static_cast<std::uint32_t>(atlasHeight);
     neoshared::texture::TextureLayer out;out.width=result->canvasWidth;out.height=result->canvasHeight;
     out.rgba.resize(static_cast<std::size_t>(atlasWidth*atlasHeight)*4);
+    const auto rowBytes=static_cast<std::size_t>(width)*4u;
     for(std::size_t frame=0;frame<texture.layers.size();++frame) {
         const auto& in=texture.layers[frame];
         for(std::size_t y=0;y<height;++y) {
             const auto offset=((frame/columns*height+y)*out.width+frame%columns*width)*4;
-            std::copy_n(in.rgba.begin()+static_cast<std::ptrdiff_t>(y*width*4),width*4,
+            std::copy_n(in.rgba.begin()+static_cast<std::ptrdiff_t>(y*rowBytes),rowBytes,
                         out.rgba.begin()+static_cast<std::ptrdiff_t>(offset));
         }
     }
@@ -356,18 +305,17 @@ std::shared_ptr<const neoshared::texture::TextureData> assembleParticleAtlas(
 void ParticleScene::setDocument(const ModelDocument* document) {
     if(rootScene()->resourcesDestroyed_)rootScene()->resourcesDestroyed_(*this);
     deregisterWindyEmitters();emitters_.clear();diagnostics_.clear();
-    if(!rootScene_) {atlases_.clear();atlasBytes_=0;}
+    if(!rootScene_) atlases_.clear();
     owners_.clear();emitterBucket_.clear();emitterAdmissions_.clear();visibilityInitialized_=false;
     referenceRegistrations_.clear();
-    prewarmed_=false;prewarmFailure_.clear();deterministicReplay_=false;document_=document;random_.state=1;
+    prewarmed_=false;deterministicReplay_=false;document_=document;random_.state=1;
     configureWind();
     prepared_ = false; preparedEnvironment_ = {}; preparedTarget_.reset();
     objectVisualInputs_={};
-    replayDiagnostic_.clear();sceneDiagnostic_.clear();
-    collision_.build({});droppedBlasts_=0;missingTargets_=0;
+    replayDiagnostic_.clear();
+    missingTargets_=0;
     if(!document_ || !document_->isOpen()) return;
     auto& atlases=rootScene()->atlases_;
-    auto& atlasBytes=rootScene()->atlasBytes_;
     const auto add=[&](const m::Model& model,std::optional<std::size_t> reference) {
         for(std::size_t n=0;n<model.nodes.size();++n) {
             if(!model.nodes[n].emitter) continue;
@@ -440,12 +388,8 @@ void ParticleScene::setDocument(const ModelDocument* document) {
                 if(found!=atlases.end()) e->atlas=found->second;
                 else {
                     std::string message;
-                    const auto estimate=static_cast<std::uint64_t>(image->layers.size())*
-                        std::min<std::uint32_t>(image->layers[0].width,8193)*
-                        std::min<std::uint32_t>(image->layers[0].height,8193)*4;
-                    if(estimate>134217728u-atlasBytes) message="Particle scene atlas memory limit (128 MiB) reached";
-                    else e->atlas=assembleParticleAtlas(*image,e->data->xGrid,e->data->yGrid,message);
-                    if(e->atlas) {atlasBytes+=e->atlas->layers[0].rgba.size();atlases.emplace(key,e->atlas);}
+                    e->atlas=assembleParticleAtlas(*image,e->data->xGrid,e->data->yGrid,message);
+                    if(e->atlas) atlases.emplace(key,e->atlas);
                     else e->diagnostic+="; "+message;
                 }
                 e->textureSupported=static_cast<bool>(e->atlas);
@@ -472,9 +416,9 @@ void ParticleScene::setDocument(const ModelDocument* document) {
 }
 void ParticleScene::resetSimulation() {
     random_.state=1;configureWind();prepared_=false;preparedEnvironment_={};preparedTarget_.reset();replayDiagnostic_.clear();
-    sceneDiagnostic_.clear();collision_.build({});droppedBlasts_=0;missingTargets_=0;
+    missingTargets_=0;
     owners_.clear();emitterBucket_.clear();emitterAdmissions_.clear();visibilityInitialized_=false;
-    prewarmed_=false;prewarmFailure_.clear();deterministicReplay_=false;
+    prewarmed_=false;deterministicReplay_=false;
     for(auto& e:emitters_) {
         e->simulation.reset(e->simulation.seed);e->mesh.vertices.clear();e->mesh.indices.clear();
         e->visible=true;e->roomMembership.clear();e->calculatedRadius=1.0f;
@@ -849,13 +793,8 @@ void ParticleScene::refreshEngineEmitterFrame(ParticleEmitterInstance& emitter,
     emitter.ownerPosition=staticPrimary_ && !emitter.reference?emitter.center:owner.position;
 }
 
-void ParticleScene::prewarmEmitter(ParticleEmitterInstance& emitter,
-                                      std::size_t& totalParticles,
-                                      ParticleChunkBudget& chunkBudget) {
+void ParticleScene::prewarmEmitter(ParticleEmitterInstance& emitter) {
     if(!emitter.active || !engineRuntime(emitter.game)) return;
-    const auto old=emitter.simulation.particles.size();
-    if(totalParticles<old) throw m::ModelError("Particle scene population accounting underflow");
-    totalParticles-=old;
     auto localEnvironment=emitter.preparedEnvironment;
 
 
@@ -865,59 +804,35 @@ void ParticleScene::prewarmEmitter(ParticleEmitterInstance& emitter,
         m::advanceEmitter(*emitter.data,*emitter.properties,emitter.frame,0.1,
             emitter.simulation,&runtimeRandom(),&localEnvironment,emitter.ownerScale);
     }
-    totalParticles+=emitter.simulation.particles.size();
-    (void)chunkBudget;
     if(emitter.chunkAsset) synchronizeEmitterSpatialState(emitter,emitter.preparedTarget);
 }
 
-void ParticleScene::prewarmRegisteredEmitter(std::size_t index,std::size_t& total,
-    ParticleChunkBudget& chunks,ParticlePrewarmStep& step) {
-    if(!prewarmFailure_.empty()) throw m::ModelError(prewarmFailure_);
+void ParticleScene::prewarmRegisteredEmitter(std::size_t index,ParticlePrewarmStep& step) {
     auto& emitter=*emitters_.at(index);
     step.emitterIndex=index;step.particlesBefore=emitter.simulation.particles.size();
     step.randomBefore=runtimeRandom().state;
     try {
-        prewarmEmitter(emitter,total,chunks);step.completed=true;
-    } catch(const std::exception& error) {
-        prewarmFailure_="Engine emitter prewarm failed after partial execution: "+std::string(error.what());
+        prewarmEmitter(emitter);step.completed=true;
+    } catch(...) {
         step.particlesAfter=emitter.simulation.particles.size();step.randomAfter=runtimeRandom().state;
         throw;
     }
     step.particlesAfter=emitter.simulation.particles.size();step.randomAfter=runtimeRandom().state;
 }
 
-void ParticleScene::prewarmPrepared(std::size_t& totalParticles,
-                                    ParticleChunkBudget& chunkBudget,
-                                    std::vector<ParticlePrewarmStep>* output) {
+void ParticleScene::prewarmPrepared(std::vector<ParticlePrewarmStep>* output) {
     if(!prewarmPending()) return;
-    if(!prewarmFailure_.empty()) throw m::ModelError(prewarmFailure_);
-    if(!prepared_) throw m::ModelError("Particle scene must be pose-prepared before engine prewarm");
-    try {
-        for(std::size_t index=0;index<emitters_.size();++index) {
-            auto& emitter=*emitters_[index];
-            if(!emitter.active || !engineRuntime(emitter.game)) continue;
-            ParticlePrewarmStep step;step.emitterIndex=index;
-            step.particlesBefore=emitter.simulation.particles.size();
-            step.randomBefore=runtimeRandom().state;
-            try {
-                prewarmEmitter(emitter,totalParticles,chunkBudget);
-                step.completed=true;
-            } catch(...) {
-                step.particlesAfter=emitter.simulation.particles.size();
-                step.randomAfter=runtimeRandom().state;
-                if(output)output->push_back(step);
-                throw;
-            }
-            step.particlesAfter=emitter.simulation.particles.size();
-            step.randomAfter=runtimeRandom().state;
+    for(std::size_t index=0;index<emitters_.size();++index) {
+        const auto& emitter=*emitters_[index];
+        if(!emitter.active || !engineRuntime(emitter.game)) continue;
+        ParticlePrewarmStep step;
+        try {
+            prewarmRegisteredEmitter(index,step);
+        } catch(...) {
             if(output)output->push_back(step);
+            throw;
         }
-    } catch(const std::exception& error) {
-        prewarmFailure_="Engine emitter prewarm failed after partial execution: "+std::string(error.what());
-        throw m::ModelError(prewarmFailure_);
-    } catch(...) {
-        prewarmFailure_="Engine emitter prewarm failed after partial execution";
-        throw m::ModelError(prewarmFailure_);
+        if(output)output->push_back(step);
     }
     prewarmed_=true;
     rebuildEmitterBucket();
@@ -944,10 +859,7 @@ void ParticleScene::prepareFrame(const m::Pose& pose,double elapsed,bool include
         ? document_->referenceBases(pose) : std::vector<std::optional<m::Mat4>>{};
     const auto frames=includeReferences && !references_
         ? document_->referenceFrames(pose) : std::vector<std::optional<m::EngineFrame>>{};
-    sceneDiagnostic_.clear();missingTargets_=0;
-    const float sceneDt=static_cast<float>(std::min(elapsed,0.25));
-    if((sceneDt>0.0f || !prewarmed_) && settings_.meshCollision)
-        buildCollision(pose,bases,includeReferences);
+    missingTargets_=0;
 
     std::optional<m::Mat4> fallbackTarget;
     std::optional<m::EngineFrame> fallbackTargetFrame;
@@ -987,11 +899,7 @@ void ParticleScene::prepareFrame(const m::Pose& pose,double elapsed,bool include
             // passes authored values directly (K2 Desktop 0x11f74a..0x11f7f4).
             windManager().addPointSourceWind(position,radius,lifetime,strength);
         };
-    if(settings_.groundCollision||settings_.meshCollision)
-        environment.trace=[this](m::Vec3 from,m::Vec3 to) {
-            return traceCollisionProxy(from,to);
-        };
-    else if(sceneQueries_&&engineRuntime(document_->model().game))
+    if(sceneQueries_&&engineRuntime(document_->model().game))
         environment.trace=[this](m::Vec3 from,m::Vec3 to) {return traceEngineScene(from,to);};
 
     // Synchronize Parts and owning objects without running PartEmitter. Engine
@@ -1147,17 +1055,12 @@ bool ParticleScene::preparedOwnerAnimating(std::size_t emitterIndex) const noexc
     return found!=owners_.end() && found->pendingAnimating;
 }
 
-bool ParticleScene::animatePreparedEmitter(std::size_t emitterIndex,double elapsed,
-                                           std::size_t& totalParticles,
-                                           ParticleChunkBudget& chunkBudget) {
+bool ParticleScene::animatePreparedEmitter(std::size_t emitterIndex,double elapsed) {
     if(!prepared_ || emitterIndex>=emitters_.size()) return false;
     auto& emitter=*emitters_[emitterIndex];
     if(!engineRuntime(emitter.game) && (!std::isfinite(elapsed) || elapsed<0)) return false;
     if(!emitter.active || (engineRuntime(emitter.game) && !emitter.visible && !deterministicReplay_))
         return false;
-    const auto old=emitter.simulation.particles.size();
-    if(totalParticles<old) throw m::ModelError("Particle scene population accounting underflow");
-    totalParticles-=old;
     auto localEnvironment=emitter.preparedEnvironment;
     if(!engineRuntime(emitter.game))localEnvironment.ownerTranslationDelta=emitter.ownerTranslationDelta;
 
@@ -1177,17 +1080,9 @@ bool ParticleScene::animatePreparedEmitter(std::size_t emitterIndex,double elaps
         emitter.lastAnimatedOwnerPositionValid=true;
         emitter.ownerTranslationDelta={};
     }
-    if(emitter.simulation.invalidEnvironmentSamples)
-        emitter.diagnostic+="; invalid scene samples were rejected";
-    totalParticles+=emitter.simulation.particles.size();
-    if(!engineRuntime(emitter.game)) updateEmitterChunks(emitter,static_cast<float>(emitterDt),chunkBudget);
+    if(!engineRuntime(emitter.game)) updateEmitterChunks(emitter,static_cast<float>(emitterDt));
     if(engineRuntime(emitter.game) && emitter.chunkAsset)
         synchronizeEmitterSpatialState(emitter,emitter.preparedTarget);
-    if(droppedBlasts_) {
-        if(!sceneDiagnostic_.empty()) sceneDiagnostic_+="; ";
-        if(sceneDiagnostic_.find("Invalid blast-wind source rejected")==std::string::npos)
-            sceneDiagnostic_+="Invalid blast-wind source rejected";
-    }
     return true;
 }
 
@@ -1197,9 +1092,7 @@ void ParticleScene::advance(const m::Pose& pose,double elapsed,bool includeRefer
     sceneAnimation_->beginRender();
     std::vector<bool> references(document_->references().size(),elapsed>0);
     prepareFrame(pose,elapsed,includeReferences,elapsed>0,references);
-    std::size_t total=particleCount();
-    ParticleChunkBudget chunks;
-    prewarmPrepared(total,chunks);
+    prewarmPrepared();
     // Scene::Render updates wind before RenderSinglePass dispatches the
     // emitter bucket; births in this frame must see that updated wind field.
     if(finishWind) finishWindFrame(static_cast<float>(elapsed));
@@ -1208,7 +1101,7 @@ void ParticleScene::advance(const m::Pose& pose,double elapsed,bool includeRefer
         // Compatibility/headless path. Engine scene hosts use the merged sorted
         // coordinator instead; this retains the declared original admission order.
         for(const auto index:emitterAdmissions_)
-            animatePreparedEmitter(index,elapsed,total,chunks);
+            animatePreparedEmitter(index,elapsed);
     }
     finishBucketFrame();
     sceneAnimation_->endRender();
@@ -1281,8 +1174,7 @@ std::vector<ChunkMeshDraw> chunkParticleMeshes(const ChunkParticleInstance& inst
 }
 
 void ParticleScene::updateEmitterChunks(ParticleEmitterInstance& emitter,
-                                        float elapsedSeconds,
-                                        ParticleChunkBudget& budget) {
+                                        float elapsedSeconds) {
     auto* e=&emitter;
     if(engineRuntime(e->game)) {
         // RenderNothing skips its Gob-transform writes while TileData alpha
@@ -1322,16 +1214,7 @@ void ParticleScene::updateEmitterChunks(ParticleEmitterInstance& emitter,
     if(e->game==m::GameVersion::Kotor2 && visibilityInitialized_ &&
        !e->visible && !deterministicReplay_) return;
     const auto& model=e->chunkAsset->model();
-    std::size_t cost=model.nodes.size()+1;
-    for(const auto& mesh:model.meshes) cost+=mesh.vertices.size();
-    for(const auto& ref:e->chunkAsset->references()) {
-        cost+=ref.model.nodes.size();for(const auto& mesh:ref.model.meshes) cost+=mesh.vertices.size();
-    }
     for(const auto& p:e->simulation.particles) {
-        if(budget.population>=128 || cost>1048576u-budget.poseWork) {
-            e->diagnostic+="; chunk draw budget (128 instances / 1M pose vertices) reached";break;
-        }
-        ++budget.population;budget.poseWork+=cost;
         ChunkParticleInstance* instance=nullptr;
         for(auto& chunk:e->chunks) if(chunk->serial==p.serial) {instance=chunk.get();break;}
         if(!instance) for(auto& chunk:e->chunks) if(!chunk->active &&
@@ -1425,14 +1308,6 @@ void ParticleScene::updateEmitterChunks(ParticleEmitterInstance& emitter,
     }
 }
 
-std::optional<m::ParticleContact> ParticleScene::traceCollisionProxy(m::Vec3 from,m::Vec3 to) const noexcept {
-    auto hit=settings_.groundCollision?m::traceParticleGround(from,to,settings_.groundHeight):std::optional<m::ParticleContact>{};
-    if(settings_.meshCollision) {
-        const auto triangle=collision_.trace(from,to);
-        if(triangle&&(!hit||triangle->fraction<hit->fraction)) hit=triangle;
-    }
-    return hit;
-}
 void ParticleScene::dispatchEvent(const std::string& name,std::optional<std::size_t> reference) {
     std::string folded=name;for(auto& c:folded) if(c>='A'&&c<='Z') c=static_cast<char>(c-'A'+'a');
     if(folded!="detonate") return;
@@ -1445,37 +1320,13 @@ void ParticleScene::detonateAll(bool includeReferences) {
 }
 bool ParticleScene::replay(std::optional<std::size_t> clip,double seconds,bool loop,bool includeReferences,
                            const ParticleReplayContext& context) {
-    resetSimulation();
     if(!document_ || !document_->isOpen() || !std::isfinite(seconds) || seconds<0 ||
        (clip && *clip>=document_->animations().size())) {replayDiagnostic_="Invalid particle replay target";return false;}
     const double steps=std::ceil(seconds*60.0);
-    std::size_t vertices=0;
-    for(const auto& mesh:document_->model().meshes) vertices+=mesh.vertices.size();
-    // Collision rebuilds and target-node lookup are part of replay's work
-    // budget. Include reference geometry rather than budgeting only the root.
-    std::size_t collisionWork=0;
-    if(settings_.meshCollision) {
-        for(const auto& mesh:document_->model().meshes) collisionWork+=mesh.animated ? mesh.faces.size()*3 : mesh.indices.size();
-        if(includeReferences) for(const auto& r:document_->references())
-            for(const auto& mesh:r.model.meshes) collisionWork+=mesh.animated ? mesh.faces.size()*3 : mesh.indices.size();
+    if(!std::isfinite(steps) || steps>=static_cast<double>(std::numeric_limits<std::size_t>::max())) {
+        replayDiagnostic_="Particle replay frame count is not representable";return false;
     }
-    std::size_t chunkWork=0;
-    for(const auto& e:emitters_) if(e->chunkAsset) {
-        const auto& model=e->chunkAsset->model();std::size_t cost=model.nodes.size();
-        for(const auto& mesh:model.meshes) cost+=mesh.vertices.size();
-        for(const auto& ref:e->chunkAsset->references()) {
-            cost+=ref.model.nodes.size();
-            for(const auto& mesh:ref.model.meshes) cost+=mesh.vertices.size();
-        }
-        // Conservative population cap is preferable to unbounded replay work.
-        chunkWork+=cost*128u;
-    }
-    const double work=steps*(static_cast<double>(vertices+document_->model().nodes.size()+1+chunkWork)+
-        static_cast<double>(collisionWork)*16.0);
-    if(steps>1800 || work>32000000) {
-        replayDiagnostic_="Particle seek exceeds the 1800-step / 32-million pose-work limit; no partial history is presented";
-        return false;
-    }
+    resetSimulation();
     // A seek reconstructs only this inspection particle tree. Its temporary
     // scene must not advance live area/main owners sharing the ordinary scene.
     struct ReplaySceneScope {
@@ -1586,8 +1437,7 @@ void ParticleScene::renderPreparedEmitter(std::size_t emitterIndex,
     // PartEmitter::RenderFunc advances authored frame animation even when its
     // Scene/Gob animation guard skipped AnimateParticles for this frame.
     if(engineRuntime(emitter.game) && emitter.chunkAsset) {
-        ParticleChunkBudget chunks;
-        updateEmitterChunks(emitter,0.0f,chunks);
+        updateEmitterChunks(emitter,0.0f);
         synchronizeEmitterSpatialState(emitter,emitter.preparedTarget);
         // RenderFunc branches directly to RenderNothing for chunk models
         // (K1 Desktop 0x2f9f46..0x2f9f60); it does not enter sprite frame updates.
@@ -1638,14 +1488,13 @@ ParticleSceneStatistics ParticleScene::statistics() const noexcept {
     for(const auto& e:emitters_) {
         if(!e->support.supported || !e->textureSupported) ++result.unsupported;
         for(const auto& chunk:e->chunks) if(chunk->active) ++result.chunkInstances;
-        result.particles+=e->simulation.particles.size();result.droppedBirths+=e->simulation.droppedBirths;
-        result.invalidSceneSamples+=e->simulation.invalidEnvironmentSamples;
+        result.particles+=e->simulation.particles.size();
     }
-    result.collisionTriangles=collision_.triangleCount();result.activeBlasts=windManager().pointSources().size();
+    result.activeBlasts=windManager().pointSources().size();
     result.registeredWindyEmitters=windManager().registeredWindyEmitters();
     result.visibleEmitters=emitterBucket_.size();result.prewarmed=prewarmed_;
     for(const auto& emitter:emitters_) result.roomRegistrations+=emitter->roomMembership.size();
-    result.droppedBlasts=droppedBlasts_;result.missingTargets=missingTargets_;return result;
+    result.missingTargets=missingTargets_;return result;
 }
 m::Bounds ParticleScene::bounds() const noexcept {
     m::Bounds result;

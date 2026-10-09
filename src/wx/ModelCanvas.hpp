@@ -681,7 +681,6 @@ private:
     float distance_{10.0f};
     float panX_{};
     float panY_{};
-    float dynamicTime_{};
     ReferenceScene referenceScene_;
     CameraScene cameraScene_;
     ParticleScene particleScene_;

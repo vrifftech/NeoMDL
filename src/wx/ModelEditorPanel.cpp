@@ -1323,18 +1323,14 @@ private:
                 const auto contextStats=canvas_->particleScene().statistics();
                 text << "Loaded chunk assets / live model instances: " << document_->loadedChunkModelCount()
                      << " / " << contextStats.chunkInstances << "\n";
-                text << "Scene collision triangles / blast winds / missing targets: " << contextStats.collisionTriangles << " / "
-                     << contextStats.activeBlasts << " / " << contextStats.missingTargets << "\n"
-                     << "Registered windy emitters: " << contextStats.registeredWindyEmitters << "\n"
-                     << "Rejected scene samples / dropped blasts: " << contextStats.invalidSceneSamples << " / " << contextStats.droppedBlasts << "\n";
-                if(!canvas_->particleScene().sceneDiagnostic().empty()) text << canvas_->particleScene().sceneDiagnostic() << "\n";
+                text << "Scene blast winds / missing targets: " << contextStats.activeBlasts << " / " << contextStats.missingTargets << "\n"
+                     << "Registered windy emitters: " << contextStats.registeredWindyEmitters << "\n";
                 if(!canvas_->particleScene().replayDiagnostic().empty())
                     text << canvas_->particleScene().replayDiagnostic() << "\n";
                 for(const auto& emitter:canvas_->particleScene().emitters())
                     if(!emitter->reference && emitter->nodeIndex==*selected)
                         text << "Particle preview: " << emitter->diagnostic << "\n"
-                             << "Live / dropped particles: " << emitter->simulation.particles.size() << " / "
-                             << emitter->simulation.droppedBirths << "\n";
+                             << "Live particles: " << emitter->simulation.particles.size() << "\n";
             }
             if (node.camera) {
                 text << "Camera node payload: no camera-specific fields\n"
@@ -3157,7 +3153,6 @@ private:
                 bytes.assign(exported.text.begin(),exported.text.end());
                 job.check();
             })) return;
-            neoshared::checkResourceOutput(output,protectedInputs);
             neoshared::texture::writeFileBytes(output,bytes);
             setModuleStatusText("ASCII model exported to "+wxui::toWx(neoshared::pathToUtf8(output)),0);
             if(!exported.warnings.empty()) {
@@ -3175,7 +3170,7 @@ private:
         auto* page=activePage();
         if(!page || !page->document().hasModelOwner()) return;
         const auto& document=page->document();
-        const auto protectedInputs=openPaths();
+        auto protectedInputs=document.openPaths();
         const auto filename=neoshared::pathToUtf8(document.path().stem())+"-packed.mdl";
         wxFileDialog file(this,"Export packed MDL/MDX",neosettings::pathToWx(document.path().parent_path()),
             wxui::toWx(filename),"Packed models (*.mdl)|*.mdl",
@@ -3185,25 +3180,20 @@ private:
             const auto output=neosettings::pathFromWx(file.GetPath());
             auto companion=output;companion.replace_extension(".mdx");
             neoshared::checkResourceOutput(output,protectedInputs);
+            protectedInputs.push_back(output);
             neoshared::checkResourceOutput(companion,protectedInputs);
-            neoshared::checkResourceOutput(companion,{output});
             if(std::filesystem::exists(companion) && wxMessageBox(
                     "Replace the companion file "+wxui::toWx(neoshared::pathToUtf8(companion))+"?",
                     "Export packed MDL/MDX",wxYES_NO|wxNO_DEFAULT|wxICON_QUESTION,this)!=wxYES) return;
-            bool saved=false;
-            const bool completed=runJob("Compiling packed model",[&](const neoshared::bif::JobControl& job) {
+            model::PackedExportResult exported;
+            if(!runJob("Compiling packed model",[&](const neoshared::bif::JobControl& job) {
                 job.check();
                 const auto snapshot=document.sourceModel();
-                const auto exported=model::exportPackedModel(snapshot,job);
+                exported=model::exportPackedModel(snapshot,job);
                 job.check();
-                neoshared::checkResourceOutput(output,protectedInputs);
-                neoshared::checkResourceOutput(companion,protectedInputs);
-                // Publish the companion before the MDL that references it.
-                neoshared::texture::writeFileBytes(companion,exported.mdx);
-                neoshared::texture::writeFileBytes(output,exported.mdl);
-                saved=true;
-            });
-            if(!completed&&!saved) return;
+            })) return;
+            neoshared::texture::writeFileBytes(companion,exported.mdx);
+            neoshared::texture::writeFileBytes(output,exported.mdl);
             setModuleStatusText("Packed MDL/MDX exported to "+wxui::toWx(neoshared::pathToUtf8(output)),0);
         } catch(const std::exception& error) {
             wxMessageBox(wxui::toWx(error.what()),"Packed model not exported",wxOK|wxICON_ERROR,this);
@@ -3886,8 +3876,7 @@ private:
         auto* root=new wxBoxSizer(wxVERTICAL);
         root->Add(new wxStaticText(&dialog,wxID_ANY,
             "Preview-world inputs, not changes to the MDL. All targeted emitters use this target.\n"
-            "Wind uses the KOTOR II scene WindManager; particles and DanglyMesh share each sample.\n"
-            "Collision uses point segments against preview geometry, not the game's collision world."),0,wxALL,10);
+            "Wind uses the KOTOR II scene WindManager; particles and DanglyMesh share each sample."),0,wxALL,10);
         auto* grid=new wxFlexGridSizer(2,6,10);grid->AddGrowableCol(1,1);
         const auto add=[&](const char* label,wxWindow* c) {
             grid->Add(new wxStaticText(&dialog,wxID_ANY,label),0,wxALIGN_CENTER_VERTICAL);
@@ -3897,32 +3886,32 @@ private:
         auto* target=new wxCheckBox(&dialog,wxID_ANY,"Enable point-to-point target");
         target->SetValue(settings.targetEnabled);add("Target",target);
         auto* node=new wxTextCtrl(&dialog,wxID_ANY,wxui::toWx(settings.targetNode));add("Target node (optional)",node);
-        const auto vector=[&](const char* label,std::initializer_list<float> values,float limit) {
+        const auto vector=[&](const char* label,std::initializer_list<float> values) {
             auto* panel=new wxPanel(&dialog);auto* row=new wxBoxSizer(wxHORIZONTAL);
             std::vector<wxSpinCtrlDouble*> controls;
             for(const float v:values) {
                 auto* c=new wxSpinCtrlDouble(panel,wxID_ANY,wxEmptyString,wxDefaultPosition,wxSize(105,-1),
-                    wxSP_ARROW_KEYS,-limit,limit,v,0.1);c->SetDigits(3);
+                    wxSP_ARROW_KEYS,std::numeric_limits<float>::lowest(),std::numeric_limits<float>::max(),v,0.1);c->SetDigits(3);
                 row->Add(c,1,wxRIGHT,4);controls.push_back(c);
             }
             panel->SetSizer(row);add(label,panel);return controls;
         };
         const auto p=settings.targetPosition,q=settings.windVelocity;
-        const auto position=vector("World target X / Y / Z",{p.x,p.y,p.z},1000000);
+        const auto position=vector("World target X / Y / Z",{p.x,p.y,p.z});
         const auto rotation=settings.targetOrientation;
-        const auto orientation=vector("Target quaternion X / Y / Z / W",{rotation.x,rotation.y,rotation.z,rotation.w},1);
+        const auto orientation=vector("Target quaternion X / Y / Z / W",{rotation.x,rotation.y,rotation.z,rotation.w});
         auto* windPreset=new wxChoice(&dialog,wxID_ANY);
         windPreset->Append("Custom");
         windPreset->Append("K2 area wind 0 (none)");
         windPreset->Append("K2 area wind 1 (light)");
         windPreset->Append("K2 area wind 2 (strong)");
         windPreset->SetSelection(0);add("Area wind preset",windPreset);
-        const auto wind=vector("Global wind X / Y / Z",{q.x,q.y,q.z},10000);
+        const auto wind=vector("Global wind X / Y / Z",{q.x,q.y,q.z});
         const auto windDeviation=vector("Maximum deviation Z / X (degrees)",
-            {settings.windMaximumDeviationZDegrees,settings.windMaximumDeviationXDegrees},3600);
+            {settings.windMaximumDeviationZDegrees,settings.windMaximumDeviationXDegrees});
         const auto windPeriod=vector("Noise interpolation period (seconds)",
-            {settings.windInterpolationPeriod},3600);
-        windPeriod[0]->SetRange(0.001,3600.0);
+            {settings.windInterpolationPeriod});
+        windPeriod[0]->SetRange(std::numeric_limits<float>::denorm_min(),std::numeric_limits<float>::max());
         const auto near=[](float a,float b) {return std::fabs(a-b)<=1.0e-4f;};
         for(unsigned mode=0;mode<=2;++mode) {
             const auto preset=neomdl::model::k2AreaWindPreset(static_cast<std::uint8_t>(mode));
@@ -3946,14 +3935,9 @@ private:
             windDeviation[1]->SetValue(preset->maximumDeviationXDegrees);
         });
         const auto tint=settings.objectTint;
-        const auto objectTint=vector("Object tint R / G / B",{tint.x,tint.y,tint.z},1);
-        const auto objectAlpha=vector("Object alpha",{settings.objectAlpha},1);
-        const auto tileAlpha=vector("Resolved tile alpha",{settings.tileAlpha},1);
-        auto* ground=new wxCheckBox(&dialog,wxID_ANY,"Collide with a horizontal plane");
-        ground->SetValue(settings.groundCollision);add("Ground proxy",ground);
-        const auto height=vector("Ground world Z",{settings.groundHeight},1000000);
-        auto* mesh=new wxCheckBox(&dialog,wxID_ANY,"Use visible posed mesh triangles (up to 32768)");
-        mesh->SetValue(settings.meshCollision);add("Mesh proxy",mesh);
+        const auto objectTint=vector("Object tint R / G / B",{tint.x,tint.y,tint.z});
+        const auto objectAlpha=vector("Object alpha",{settings.objectAlpha});
+        const auto tileAlpha=vector("Resolved tile alpha",{settings.tileAlpha});
         auto* blast=new wxCheckBox(&dialog,wxID_ANY,"Enable explosion point-source winds");
         blast->SetValue(settings.blastWind);add("Blast wind",blast);
         auto* bounce=new wxChoice(&dialog,wxID_ANY);
@@ -3964,13 +3948,12 @@ private:
             node->Enable(target->GetValue());
             for(auto* c:position)c->Enable(manual);
             for(auto* c:orientation)c->Enable(manual);
-            height[0]->Enable(ground->GetValue());
         };
         target->Bind(wxEVT_CHECKBOX,[refresh](wxCommandEvent&){refresh();});
         node->Bind(wxEVT_TEXT,[refresh](wxCommandEvent&){refresh();});
-        ground->Bind(wxEVT_CHECKBOX,[refresh](wxCommandEvent&){refresh();});refresh();
+        refresh();
         root->Add(grid,0,wxEXPAND|wxLEFT|wxRIGHT,10);
-        root->Add(new wxStaticText(&dialog,wxID_ANY,"Applying changed settings resets particles and replays the current animation time within the seek budget."),0,wxALL,10);
+        root->Add(new wxStaticText(&dialog,wxID_ANY,"Applying changed settings resets particles and replays the current animation time."),0,wxALL,10);
         root->Add(dialog.CreateButtonSizer(wxOK|wxCANCEL),0,wxEXPAND|wxALL,10);dialog.SetSizerAndFit(root);
         while(dialog.ShowModal()==wxID_OK) {
             const auto value=[](wxSpinCtrlDouble* c){return static_cast<float>(c->GetValue());};
@@ -3983,11 +3966,10 @@ private:
             settings.windInterpolationPeriod=value(windPeriod[0]);
             settings.objectTint={value(objectTint[0]),value(objectTint[1]),value(objectTint[2])};
             settings.objectAlpha=value(objectAlpha[0]);settings.tileAlpha=value(tileAlpha[0]);
-            settings.groundCollision=ground->GetValue();settings.groundHeight=value(height[0]);
-            settings.meshCollision=mesh->GetValue();settings.blastWind=blast->GetValue();
+            settings.blastWind=blast->GetValue();
             settings.bounceMode=bounce->GetSelection()==1?neomdl::model::ParticleBounceMode::Reflection:neomdl::model::ParticleBounceMode::Legacy;
             if(!validParticleSceneSettings(settings)) {
-                wxMessageBox("Use finite values, a positive wind interpolation period, a nonzero quaternion, a target node name of at most 64 bytes, and tint/alpha values from 0 to 1.","Invalid particle settings",wxOK|wxICON_WARNING,&dialog);continue;
+                wxMessageBox("Use finite values, a positive wind interpolation period, and a nonzero quaternion.","Invalid particle settings",wxOK|wxICON_WARNING,&dialog);continue;
             }
             options_.particleSettings=settings;applyOptions();break;
         }

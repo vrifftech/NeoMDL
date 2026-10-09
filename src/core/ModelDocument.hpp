@@ -198,17 +198,11 @@ public:
 
 private:
     std::vector<const neomdl::model::Model*> modelHierarchy() const;
-    void loadSupermodelsFromDirectory(const std::filesystem::path& directory,
-                                      const std::string& initialResref);
     void loadSupermodelsFromResolver(const ResourceResolver& resolver,
                                      const std::string& initialResref);
     void rebuildAnimations();
-    void loadReferencesFromDirectory(const std::filesystem::path& directory,
-                                     const std::string& rootResref);
     void loadReferencesFromResolver(const ResourceResolver& resolver,
                                     const std::string& rootResref);
-    void loadTexturesFromDirectory(const std::filesystem::path& directory,
-                                   const std::vector<std::string>& names = {});
     void loadTexturesFromResolver(const ResourceResolver& resolver,
                                   const std::vector<std::string>& names = {});
     void appendParserWarnings(const neomdl::model::Model& model,
@@ -222,7 +216,6 @@ private:
     void instantiateParts();
 
     void loadChunkModels(const ResourceResolver& resolver);
-    void loadChunkModelsFromDirectory(const std::filesystem::path& directory);
     bool runtimeScopePinned_{true};
     ResourceResolver resolver_;
     model::AsciiResourceResolver asciiResources_;
