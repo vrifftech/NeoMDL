@@ -1277,7 +1277,7 @@ static void buildEmitterMeshWithScale(const EmitterNodeData& data,const NodeEmit
     output.vertices.clear();output.indices.clear();output.castsShadow=false;
     output.hasVertexColors=true;output.render=true;output.diffuse={1,1,1};
     const auto support=emitterPreviewSupport(data);
-    if(!finite(view)||!support.supported||!data.chunkName.empty()||pass>4 || (pass && !data.frameBlending)) return;
+    if(!support.supported||!data.chunkName.empty()||pass>4 || (pass && !data.frameBlending)) return;
     const bool lightning=support.update==EmitterUpdate::Lightning;
     const bool linked=support.render==EmitterRender::Linked;
     const auto count=lightning&&!linked?sim.lightningMainCount:sim.particles.size();
@@ -1425,7 +1425,7 @@ static void buildEmitterMeshWithScale(const EmitterNodeData& data,const NodeEmit
         if(linked) uv={{{u1,v0},{u1,v1},{u0,v1},{u0,v0}}};
         const auto first=static_cast<std::uint32_t>(output.vertices.size());
         for(std::size_t n=0;n<4;++n) {
-            Vertex vertex;vertex.position=corners[n];vertex.normal=unit(cross(right,up));vertex.texcoord0=uv[n];
+            Vertex vertex;vertex.position=corners[n];vertex.texcoord0=uv[n];
             std::uint32_t rgba=0;
             for(std::size_t c=0;c<4;++c) {
                 float value=appearance.color[c];

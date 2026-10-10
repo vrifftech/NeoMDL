@@ -401,7 +401,7 @@ private:
         if (namesCount_ == 0u) return;
         if (namesOffset_ == 0u || namesOffset_ == 0xFFFFFFFFu ||
             namesCount_ > (payload_->size() - std::min<std::size_t>(namesOffset_, payload_->size())) / 4u) {
-            model_.warnings.push_back("The node-name offset table is unavailable; node IDs will be displayed instead.");
+            model_.warnings.push_back("The node-name offset table is unavailable.");
             return;
         }
         payload_->requireArray(namesOffset_, namesCount_, 4u, "name-offset table");
@@ -842,7 +842,6 @@ private:
             node.engineNameIndex=nameIndex;
             node.parent = parent;
             node.name = nameIndex < names_.size() ? names_[nameIndex] : std::string{};
-            if (node.name.empty()) node.name = "node_" + std::to_string(node.id);
             // Engine packed reset/conversion copies the three stored words.
             // Keep NaN payloads, infinities and signed zero just like orientation;
             // this header is also the source for static-position ASCII export.
@@ -882,7 +881,6 @@ private:
             node.engineNameIndex=nameIndex;
             node.parent = parent;
             node.name = nameIndex < names_.size() ? names_[nameIndex] : std::string{};
-            if (node.name.empty()) node.name = "node_" + std::to_string(node.id);
             node.position = payload_->vec3(offset + 16u, "animation node position");
             node.orientation =
                 {payload_->f32(offset + 32u, "animation node quaternion x"),
@@ -912,7 +910,6 @@ private:
 
         Animation animation;
         animation.name = payload_->fixedString(offset + 8u, 32u, "animation name");
-        if (animation.name.empty()) animation.name = "animation_" + std::to_string(index);
         const auto rootOffset = payload_->u32(offset + 40u, "animation root-node offset");
         const auto declaredNodes = payload_->u32(offset + 44u, "animation node count");
         animation.engineNodeCount=declaredNodes;
@@ -970,15 +967,9 @@ private:
             return;
         }
         model_.animations.reserve(count);
-        std::unordered_set<std::uint32_t> seen;
         for (std::size_t index = 0u; index < count; ++index) {
             const auto offset = payload_->u32(static_cast<std::size_t>(animationsOffset_) + index * 4u,
                                               "animation offset");
-            if (!seen.insert(offset).second) {
-                model_.warnings.push_back("Animation entry " + std::to_string(index) +
-                                          " repeats an earlier animation offset and was skipped.");
-                continue;
-            }
             parseAnimation(offset, index);
         }
         if (model_.animations.size() != count) {

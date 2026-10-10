@@ -27,26 +27,15 @@ bool finite(Vec3 value) noexcept {
     return finite(value.x) && finite(value.y) && finite(value.z);
 }
 
-float safeValue(float value, float fallback = 0.0f) noexcept {
-    return finite(value) ? value : fallback;
-}
-
-Vec3 safeVector(const std::array<float, 3>& value) noexcept {
-    return {safeValue(value[0]), safeValue(value[1]), safeValue(value[2])};
-}
-
 bool black(Vec3 color) noexcept {
     // The manager compares the three PartLight color floats against
     // exact zero before multiplier/fade are applied.
     return color.x == 0.0f && color.y == 0.0f && color.z == 0.0f;
 }
 
-float moveTowards(float value, float target, float amount) noexcept {
-    value = std::clamp(safeValue(value), 0.0f, 1.0f);
-    target = std::clamp(safeValue(target), 0.0f, 1.0f);
-    amount = std::max(0.0f, safeValue(amount));
-    if (value < target) return std::min(target, value + amount);
-    return std::max(target, value - amount);
+float fadeWeight(float value, bool enabled, float amount) noexcept {
+    if (enabled) return std::min(1.0f, value + amount);
+    return std::max(0.0f, value - amount);
 }
 
 std::uint64_t lightId(std::size_t instanceIndex, std::size_t nodeIndex) noexcept {
@@ -56,8 +45,6 @@ std::uint64_t lightId(std::size_t instanceIndex, std::size_t nodeIndex) noexcept
 
 Vec3 scaledColor(const RuntimeLight& light, float scale) noexcept {
     // Engine submission does not clamp authored RGB to nonnegative values.
-    // Invalid host inputs are sanitized at registration, not converted to an
-    // invented color or attenuation model during selection.
     return {light.color.x * scale, light.color.y * scale, light.color.z * scale};
 }
 
@@ -81,7 +68,7 @@ ActiveLight active(const RuntimeLight& light, float fade, Vec3 ownerPosition, fl
     result.radius = light.radius;
     result.shadowRadius = light.shadowRadius;
     result.verticalDisplacement = light.verticalDisplacement;
-    result.fade = std::clamp(safeValue(fade), 0.0f, 1.0f);
+    result.fade = fade;
     result.normalizedDistance = normalizedDistance(light, ownerPosition);
     result.priority = effectivePriority(light);
     result.dynamicType = light.dynamicType;
@@ -92,16 +79,20 @@ ActiveLight active(const RuntimeLight& light, float fade, Vec3 ownerPosition, fl
 
 } // namespace
 
+float k1LightQuadraticAttenuation(float radius) noexcept {
+    const float squared = radius > 0.1f ? radius * radius : 0.1f * 0.1f;
+    return 9.0f / (squared + squared);
+}
+
 float k2LightQuadraticAttenuation(float radius) noexcept {
-    radius = finite(radius) ? std::max(0.1f, radius) : 0.1f;
-    return 4.5f / (radius * radius);
+    radius = std::max(radius, 0.1f);
+    const float squared = radius * radius;
+    return 9.0f / (squared + squared);
 }
 
 float k2VertexLightQuadraticAttenuation(float radius) noexcept {
-    if (!finite(radius) || !(radius > 0.0f)) return std::numeric_limits<float>::quiet_NaN();
     const float squared = radius * radius;
-    const float value = 9.0f / (squared + squared);
-    return value;
+    return 9.0f / (squared + squared);
 }
 
 void LightScene::setDocument(const ModelDocument* document) {
@@ -160,11 +151,11 @@ void LightScene::appendModelLights(const Model& model, const Pose& pose,
         const auto& local=pose.worldTransforms[nodeIndex].values;
         runtime.position = neomdl::model::transformPoint(base,
             {local[12]*ownerScale,local[13]*ownerScale,local[14]*ownerScale});
-        runtime.color = safeVector(state.color);
-        runtime.radius = safeValue(state.radius);
-        runtime.shadowRadius = safeValue(state.shadowRadius, -1.0f);
-        runtime.verticalDisplacement = safeValue(state.verticalDisplacement);
-        runtime.multiplier = safeValue(state.multiplier, 1.0f);
+        runtime.color = {state.color[0], state.color[1], state.color[2]};
+        runtime.radius = state.radius;
+        runtime.shadowRadius = state.shadowRadius;
+        runtime.verticalDisplacement = state.verticalDisplacement;
+        runtime.multiplier = state.multiplier;
         runtime.flareRadius = data.flareRadius;
         runtime.priority = data.priority;
         runtime.dynamicType = data.dynamicType;
@@ -326,11 +317,6 @@ const ModelDocument* LightScene::chunkLightDocument(std::size_t instanceIndex) c
 }
 
 void LightScene::storeLight(RuntimeLight light) {
-    light.color = {safeValue(light.color.x), safeValue(light.color.y), safeValue(light.color.z)};
-    light.radius = safeValue(light.radius);
-    light.multiplier = safeValue(light.multiplier, 1.0f);
-    light.shadowRadius = safeValue(light.shadowRadius, -1.0f);
-    light.verticalDisplacement = safeValue(light.verticalDisplacement);
     light.registeredStatic = light.dynamicType == 0;
     light.registeredDynamic = light.hasOwner && (light.dynamicType != 0 || light.affectDynamic);
     light.registeredRender = !black(light.color);
@@ -758,9 +744,7 @@ std::vector<ActiveLight> LightScene::nearestLights(Vec3 position, float radius,
 }
 
 void LightScene::beginSelectionFrame(float elapsedSeconds) {
-    // The viewer limits its simulation step upstream. Do not silently change
-    // an explicit headless timestep here; the fades clamp weights.
-    selectionElapsed_ = std::max(0.0f, safeValue(elapsedSeconds));
+    selectionElapsed_ = elapsedSeconds;
     refreshRoomCollection();
     if (++selectionFrame_ == 0u) { owners_.clear(); ++selectionFrame_; }
 }
@@ -954,7 +938,7 @@ void LightScene::advanceIlluminationSlots(OwnerLightSelection& owner) {
         const auto* light = find(slot.id);
         const bool wanted = light && std::find(owner.rankedIllumination.begin(), desiredEnd, slot.id) != desiredEnd;
         slot.weight = light && light->fading
-            ? moveTowards(slot.weight, wanted ? 1.0f : 0.0f, step)
+            ? fadeWeight(slot.weight, wanted, step)
             : (wanted ? 1.0f : 0.0f);
     }
     owner.illumination.erase(std::remove_if(owner.illumination.begin(), owner.illumination.end(),
@@ -983,12 +967,12 @@ void LightScene::advanceShadowSlot(OwnerLightSelection& owner) {
     // Object shadow fading is unconditional, unlike illumination's authored
     // fading flag (Desktop 0xdf1c9..0xdf2a3). It has its own weight per owner.
     if (owner.shadow && (!desired || owner.shadow->id != *desired)) {
-        owner.shadow->weight = moveTowards(owner.shadow->weight, 0.0f, step);
+        owner.shadow->weight = fadeWeight(owner.shadow->weight, false, step);
         if (owner.shadow->weight <= 0.0f) owner.shadow.reset();
     }
     if (!owner.shadow && desired) owner.shadow = OwnerLightSlot{*desired, 0.0f};
     if (owner.shadow && desired && owner.shadow->id == *desired)
-        owner.shadow->weight = moveTowards(owner.shadow->weight, 1.0f, step);
+        owner.shadow->weight = fadeWeight(owner.shadow->weight, true, step);
 }
 
 std::vector<ActiveLight> LightScene::illuminationLights(LightOwnerId id, LightColorSource source) const {

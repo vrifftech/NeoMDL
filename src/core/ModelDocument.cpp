@@ -771,29 +771,22 @@ void ModelDocument::loadSupermodelsFromResolver(
             messages_.push_back("Supermodel cycle stopped at: " + next);
             return;
         }
-        try {
-            auto mdl = resolver(next, kMdlResourceType);
-            if (!mdl) {
-                messages_.push_back("Supermodel resource was not found in the game session: " + next);
-                return;
-            }
-            std::vector<std::uint8_t> mdx;
-            if (!model::isAsciiModelInput(mdl->bytes)) {
-                if (auto companion = resolver(next, kMdxResourceType))
-                    mdx = std::move(companion->bytes);
-            }
-            auto decoded = neomdl::model::decodeModelBytes(
-                mdl->bytes, mdx,
-                mdl->sourceDescription.empty() ? next + ".mdl" : mdl->sourceDescription, resourceLoadJob(),model_.game,asciiResources_);
-            supermodels_.push_back(std::move(decoded));
-            appendParserWarnings(supermodels_.back(), "Supermodel " + next + ": ");
-            current = &supermodels_.back();
-        } catch (const neoshared::bif::JobCancelled&) {
-            throw;
-        } catch (const std::exception& error) {
-            messages_.push_back("Unable to load supermodel " + next + ": " + error.what());
+        auto mdl = resolver(next, kMdlResourceType);
+        if (!mdl) {
+            messages_.push_back("Supermodel resource was not found in the game session: " + next);
             return;
         }
+        std::vector<std::uint8_t> mdx;
+        if (!model::isAsciiModelInput(mdl->bytes)) {
+            if (auto companion = resolver(next, kMdxResourceType))
+                mdx = std::move(companion->bytes);
+        }
+        auto decoded = neomdl::model::decodeModelBytes(
+            mdl->bytes, mdx,
+            mdl->sourceDescription.empty() ? next + ".mdl" : mdl->sourceDescription, resourceLoadJob(),model_.game,asciiResources_);
+        supermodels_.push_back(std::move(decoded));
+        appendParserWarnings(supermodels_.back(), "Supermodel " + next + ": ");
+        current = &supermodels_.back();
     }
 }
 
@@ -807,27 +800,18 @@ void ModelDocument::loadReferencesFromResolver(
     std::unordered_set<std::string> missing;
     bool warnedMissingResolver=false;
 
-    const auto decode = [&](const std::string& resref,
-                            const std::string& diagnosticPrefix)
+    const auto decode = [&](const std::string& resref)
             -> std::optional<neomdl::model::Model> {
-        try {
-            auto mdl = resolver(resref, kMdlResourceType);
-            if (!mdl) return std::nullopt;
-            std::vector<std::uint8_t> mdx;
-            if (!model::isAsciiModelInput(mdl->bytes)) {
-                if (auto companion = resolver(resref, kMdxResourceType))
-                    mdx = std::move(companion->bytes);
-            }
-            return neomdl::model::decodeModelBytes(
-                mdl->bytes, mdx,
-                mdl->sourceDescription.empty() ? resref + ".mdl" : mdl->sourceDescription, resourceLoadJob(),model_.game,asciiResources_);
-        } catch (const neoshared::bif::JobCancelled&) {
-            throw;
-        } catch (const std::exception& error) {
-            messages_.push_back(diagnosticPrefix + "Unable to load " + resref +
-                                ": " + error.what());
-            return std::nullopt;
+        auto mdl = resolver(resref, kMdlResourceType);
+        if (!mdl) return std::nullopt;
+        std::vector<std::uint8_t> mdx;
+        if (!model::isAsciiModelInput(mdl->bytes)) {
+            if (auto companion = resolver(resref, kMdxResourceType))
+                mdx = std::move(companion->bytes);
         }
+        return neomdl::model::decodeModelBytes(
+            mdl->bytes, mdx,
+            mdl->sourceDescription.empty() ? resref + ".mdl" : mdl->sourceDescription, resourceLoadJob(),model_.game,asciiResources_);
     };
 
     const auto load = [&](const std::string& resref)
@@ -869,7 +853,7 @@ void ModelDocument::loadReferencesFromResolver(
             missing.emplace(key);
             return {};
         }
-        const auto decoded = decode(resref, "Reference " + resref + ": ");
+        const auto decoded = decode(resref);
         if (!decoded) {
             missing.emplace(key);
             return {};
@@ -892,8 +876,7 @@ void ModelDocument::loadReferencesFromResolver(
                     " supermodel cycle stopped at: " + next);
                 break;
             }
-            const auto inherited = decode(next,
-                "Reference " + resref + " supermodel " + next + ": ");
+            const auto inherited = decode(next);
             if (!inherited) {
                 messages_.push_back("Reference " + resref +
                     " supermodel resource was not found in the game session: " + next);

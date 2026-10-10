@@ -31,8 +31,7 @@ RenderGeometry prepareRenderGeometry(const Mesh& mesh,
                                      const DeformedMesh* deformed = nullptr,
                                      bool engineAnimMeshLocal = false);
 
-// Inverse-transpose of the upper-left 3x3, column-major. Unrepresentable
-// inputs raise ModelError.
+// Inverse-transpose of the upper-left 3x3, column-major.
 std::array<float,9> makeNormalMatrix(const Mat4& matrix);
 float transformHandedness(const Mat4& matrix) noexcept;
 

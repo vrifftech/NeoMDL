@@ -3,10 +3,8 @@
 #include "render/DesktopMaterialPrograms.hpp"
 #include "render/ShaderMeshRenderer.hpp"
 #include <algorithm>
-#include <cmath>
 #include <cstdio>
 #include <cstring>
-#include <limits>
 #include <map>
 #include <stdexcept>
 #include <string>
@@ -56,40 +54,13 @@ model::Vec3 localPoint(const model::Mat4& frame,model::Vec3 p) {
     const auto& m=frame.values;p={p.x-m[12],p.y-m[13],p.z-m[14]};
     return {m[0]*p.x+m[1]*p.y+m[2]*p.z,m[4]*p.x+m[5]*p.y+m[6]*p.z,m[8]*p.x+m[9]*p.y+m[10]*p.z};
 }
-bool finite(const model::Vec3& p){return std::isfinite(p.x)&&std::isfinite(p.y)&&std::isfinite(p.z);}
-bool rigid(const model::Mat4& frame) {
-    for(float x:frame.values)if(!std::isfinite(x))return false;
-    const auto& m=frame.values;
-    if(std::abs(m[3])+std::abs(m[7])+std::abs(m[11])+std::abs(m[15]-1)>1e-4f)return false;
-    for(unsigned a=0;a<3;++a)for(unsigned b=0;b<3;++b) {
-        float dot=0;for(unsigned k=0;k<3;++k)dot+=m[a*4+k]*m[b*4+k];
-        if(std::abs(dot-(a==b?1.0f:0.0f))>1e-3f)return false;
-    }
-    const float determinant=m[0]*(m[5]*m[10]-m[6]*m[9])-
-        m[4]*(m[1]*m[10]-m[2]*m[9])+m[8]*(m[1]*m[6]-m[2]*m[5]);
-    return std::abs(determinant-1.0f)<=1e-3f;
-}
-
 }
 
 void validateEngineSkinFrame(const model::Mesh& mesh,const model::DeformedMesh& pose,bool requireBasis) {
     if(!pose.valid)
         throw std::invalid_argument("Engine skin needs authored influences and its current palette");
-    if(!rigid(pose.skinPartFrame))
-        throw std::invalid_argument("Engine skin part frame must be position/quaternion only");
-    for(const auto& slot:pose.skinPalette) if(slot.valid)
-        for(float value:slot.rows) if(!std::isfinite(value))
-            throw std::invalid_argument("Non-finite engine skin palette");
-    for(std::size_t n=0;n<mesh.vertices.size();++n) {
-        const auto& vertex=mesh.vertices[n];
-        if(!finite(vertex.position) || !finite(mesh.normalAt(n)) ||
-           !std::isfinite(vertex.texcoord0.x) || !std::isfinite(vertex.texcoord0.y))
-            throw std::invalid_argument("Non-finite engine skin source vertex");
-        if(requireBasis && (!vertex.tangentBasis.valid ||
-           !finite(vertex.tangentBasis.bitangent) || !finite(vertex.tangentBasis.tangent) ||
-           !finite(vertex.tangentBasis.normal)))
-            throw std::invalid_argument("Engine skin-bump pass requires the authored finite three-vector basis; generated basis is not a substitute");
-    }
+    if(requireBasis && mesh.mdxTangentOffset==0xffffffffu)
+        throw std::invalid_argument("Engine skin-bump pass requires the authored three-vector basis");
 }
 
 void validateEngineSkinPose(const model::Mesh& mesh,const model::DeformedMesh& pose,bool requireBasis) {
@@ -97,7 +68,7 @@ void validateEngineSkinPose(const model::Mesh& mesh,const model::DeformedMesh& p
         throw std::invalid_argument("Engine skin needs authored influences and its current palette");
     validateEngineSkinFrame(mesh,pose,requireBasis);
     for(const auto& influence:mesh.skinInfluences) for(unsigned k=0;k<4;++k)
-        if(!std::isfinite(influence.weights[k]) || influence.boneIndices[k]>=pose.skinPalette.size() ||
+        if(influence.boneIndices[k]>=pose.skinPalette.size() ||
            (influence.weights[k]!=0 && !pose.skinPalette[influence.boneIndices[k]].valid))
             throw std::invalid_argument("Engine skin references an invalid bone-palette slot");
 }
@@ -107,26 +78,12 @@ std::vector<EngineSkinVertex> engineSkinVertices(const model::Mesh& mesh,const m
     std::vector<EngineSkinVertex> vertices;vertices.reserve(mesh.vertices.size());
     for(std::size_t n=0;n<mesh.vertices.size();++n){
         const auto& v=mesh.vertices[n];const auto& influence=mesh.skinInfluences[n];
-        if(!finite(v.position) || !finite(mesh.normalAt(n)) || (requireBasis &&
-           (!v.tangentBasis.valid || !finite(v.tangentBasis.bitangent) ||
-            !finite(v.tangentBasis.tangent) || !finite(v.tangentBasis.normal))))
-            throw std::invalid_argument("Engine skin-bump pass requires the authored finite three-vector basis; generated basis is not a substitute");
         EngineSkinVertex out{v.position,mesh.normalAt(n),influence.weights,{},v.texcoord0,
             v.tangentBasis.bitangent,v.tangentBasis.tangent,v.tangentBasis.normal};
-        for(unsigned k=0;k<4;++k){
-            if(!std::isfinite(influence.weights[k]) || influence.boneIndices[k]>=pose.skinPalette.size())
-                throw std::invalid_argument("Invalid engine skin weight/palette index");
-            if(influence.weights[k]!=0 && !pose.skinPalette[influence.boneIndices[k]].valid)
-                throw std::invalid_argument("Engine skin references a missing bone-palette slot");
+        for(unsigned k=0;k<4;++k)
             out.indices[k]=static_cast<float>(influence.boneIndices[k]);
-        }
-        if(!std::isfinite(v.texcoord0.x)||!std::isfinite(v.texcoord0.y))throw std::invalid_argument("Non-finite engine skin UV");
         vertices.push_back(out);
     }
-    if(!rigid(pose.skinPartFrame))
-        throw std::invalid_argument("Engine skin part frame must be position/quaternion only");
-    for(const auto& slot:pose.skinPalette) if(slot.valid)
-        for(float x:slot.rows)if(!std::isfinite(x))throw std::invalid_argument("Non-finite engine skin palette");
     return vertices;
 }
 struct SkinMaterialPass::Impl : desktop_programs::ProgramCache {};
@@ -145,14 +102,10 @@ bool SkinMaterialPass::prepare(g::Api& a,const MeshDrawParameters& p,MaterialPro
     }
     if(p.skinBumpLights.size()>3){error="Engine skin bump list exceeds the manager's three illumination slots";return false;}
     if(baseLights(p,type).size()>4){error="Engine skin base supports three authored lights plus the explicit inspection headlight";return false;}
-    for(const auto& light:p.skinBumpLights) {
-        if(!finite(light.position) || !std::isfinite(light.radius) || light.radius<=0 ||
-           !std::all_of(light.color.begin(),light.color.end(),[](float x){return std::isfinite(x);})){error="Invalid engine bump light";return false;}
-    }
     // The object position/quaternion conversion is rigid, not a scale-bearing
     // inverse model matrix. No mesh-derived bounding sphere enters this pass.
-    if(!p.hasSkinOwnerFrame || !rigid(p.skinOwnerFrame)) {
-        error="Engine skin owner frame must be position/quaternion only";return false;
+    if(!p.hasSkinOwnerFrame) {
+        error="Engine skin requires its owner frame";return false;
     }
     LegacyGuard restore(a,i.x);
     const auto lights=baseLights(p,type);

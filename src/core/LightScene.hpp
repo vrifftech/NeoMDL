@@ -281,8 +281,8 @@ private:
     std::uint64_t revision_{};
 };
 
-
-
+// SetLightGL uses 9/(r*r+r*r), with a 0.1 radius floor.
+float k1LightQuadraticAttenuation(float radius) noexcept;
 float k2LightQuadraticAttenuation(float radius) noexcept;
 // SetUpVertexProgramLightShaderConstants uses 9/(2*r*r), with no 0.1 clamp.
 float k2VertexLightQuadraticAttenuation(float radius) noexcept;

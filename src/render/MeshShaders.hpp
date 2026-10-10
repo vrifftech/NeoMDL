@@ -77,7 +77,7 @@ void main() {
         // previous Gob position in this part's model space.
         float movement = length(uSkinMotion);
         vec3 direction = engineBlur ? uSkinBlurDirection : uSkinMotion / movement;
-        float maximumLength = engineBlur ? uSkinMaximumBlurLength : max(0.000001, uSkinMaximumBlurLength);
+        float maximumLength = uSkinMaximumBlurLength;
         float amount = min(engineBlur ? uSkinBlurSpeed : movement, maximumLength);
         float backFacing = dot(direction, localNormal) < 0.0 ? 1.0 : 0.0;
         localPosition -= direction * amount * backFacing;
@@ -316,8 +316,7 @@ vec3 perturbedNormal(vec3 n,vec3 t) {
         sampleNormal=texture2D(uBumpTexture,uv).xyz*2.0-1.0;
         sampleNormal.xy*=uBumpScale;
     } else {
-        vec2 stepSize=max(uBumpUvInfo.xy,vec2(0.00001));
-        vec2 localStep=stepSize/max(uBumpUv.xy,vec2(0.00001));
+        vec2 localStep=uBumpUvInfo.xy/uBumpUv.xy;
         float l=texture2D(uBumpTexture,materialUv(vUv0-vec2(localStep.x,0.0),uBumpUv,uBumpScroll,uBumpUvInfo)).r;
         float r=texture2D(uBumpTexture,materialUv(vUv0+vec2(localStep.x,0.0),uBumpUv,uBumpScroll,uBumpUvInfo)).r;
         float d=texture2D(uBumpTexture,materialUv(vUv0-vec2(0.0,localStep.y),uBumpUv,uBumpScroll,uBumpUvInfo)).r;
@@ -518,7 +517,7 @@ void main() {
             float attenuation = 1.0;
             if (uLightPosition[i].w != 0.0) {
                 vec3 att = uLightAttenuation[i];
-                attenuation = 1.0 / max(0.0001,att.x+att.y*distanceToLight+att.z*distanceToLight*distanceToLight);
+                attenuation = 1.0 / (att.x+att.y*distanceToLight+att.z*distanceToLight*distanceToLight);
             }
             ambient += attenuation*uLightAmbient[i]*uMeshAmbient;
             illumination += attenuation*uLightDiffuse[i]*max(0.0,dot(diffuseNormal,direction));
@@ -542,7 +541,7 @@ void main() {
         if(uEnvironmentMode==2) environment=textureCube(uEnvironmentCube,uEyeToWorld*reflected).rgb;
         else {
             // Legacy sphere-map preview for a non-cube environment texture.
-            float divisor=max(0.00001,2.0*length(reflected+vec3(0.0,0.0,1.0)));
+            float divisor=2.0*length(reflected+vec3(0.0,0.0,1.0));
             environment=texture2D(uEnvironmentTexture,reflected.xy/divisor+vec2(0.5)).rgb;
         }
         color.rgb+=environment*uEnvironmentStrength*(uUseDiffuse ? 1.0-texel.a : 1.0);

@@ -32,7 +32,9 @@ void appendK2Lights(const std::vector<ActiveLight>& sources,
         light.attenuation = {{1.0f, 0.0f,
             sourceFamily == LightColorSource::VertexProgram
                 ? k2VertexLightQuadraticAttenuation(source.radius)
-                : k2LightQuadraticAttenuation(source.radius)}};
+                : parameters.material.engineGame == material::EngineMaterialGame::Kotor1
+                    ? k1LightQuadraticAttenuation(source.radius)
+                    : k2LightQuadraticAttenuation(source.radius)}};
         const std::array<float, 3> color{{source.color.x, source.color.y, source.color.z}};
         light.diffuse = source.ambientOnly ? std::array<float, 3>{} : color;
         light.ambient = source.ambientOnly ? color : std::array<float, 3>{};

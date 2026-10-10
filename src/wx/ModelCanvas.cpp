@@ -2539,15 +2539,6 @@ void ModelCanvas::collectAnimationRuntimeEvents() {
         // counterpart. This queue is only the UI's observational event log.
         pendingAnimationRuntimeEvents_.push_back(event);
     }
-    constexpr std::size_t maximumPendingEvents = 512u;
-    if (pendingAnimationRuntimeEvents_.size() > maximumPendingEvents) {
-        pendingAnimationRuntimeEvents_.erase(
-            pendingAnimationRuntimeEvents_.begin(),
-            pendingAnimationRuntimeEvents_.begin() +
-                static_cast<std::ptrdiff_t>(
-                    pendingAnimationRuntimeEvents_.size() -
-                    maximumPendingEvents));
-    }
 }
 
 void ModelCanvas::resetParticleHistoryForAnimationSeek() {
@@ -3913,6 +3904,8 @@ void ModelCanvas::drawScene() {
                 cfg.forceSight=effectiveForceSight().enabled;cfg.desaturation=effectiveForceSight().desaturation;
                 if(k2Lights_&&options_.previewLights) {
                     render::MeshDrawParameters fixed;
+                    fixed.material.engineGame=cfg.game==model::GameVersion::Kotor1
+                        ? material::EngineMaterialGame::Kotor1 : material::EngineMaterialGame::Kotor2;
                     render::appendK2Lights(lightScene_.illuminationLights(AreaScene::sceneDynamicLightOwner,
                         LightColorSource::FixedFunction),cameraView_,fixed,LightColorSource::FixedFunction);
                     cfg.fixedLights.assign(fixed.lights.begin(),fixed.lights.begin()+fixed.lightCount);

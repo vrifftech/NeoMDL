@@ -72,20 +72,14 @@ RenderGeometry prepareRenderGeometry(const Mesh& mesh, const DeformedMesh* defor
 
 std::array<float,9> makeNormalMatrix(const Mat4& m) {
     const auto& a=m.values;
-    for (const auto i : {0,1,2,4,5,6,8,9,10})
-        if (!std::isfinite(a[i])) throw ModelError("Normal matrix source is non-finite");
     const double d=determinant(m);
-    if (!std::isfinite(d) || d==0.0) throw ModelError("Normal matrix source is singular");
     const double x=a[0], y=a[4], z=a[8], p=a[1], q=a[5], r=a[9], s=a[2], t=a[6], u=a[10];
     const double values[9]={(q*u-r*t)/d,(z*t-y*u)/d,(y*r-z*q)/d,
                             (r*s-p*u)/d,(x*u-z*s)/d,(z*p-x*r)/d,
                             (p*t-q*s)/d,(y*s-x*t)/d,(x*q-y*p)/d};
     std::array<float,9> out;
-    for (std::size_t i=0;i<out.size();++i) {
-        if (!std::isfinite(values[i]) || std::abs(values[i])>std::numeric_limits<float>::max())
-            throw ModelError("Normal matrix exceeds the float representation");
+    for (std::size_t i=0;i<out.size();++i)
         out[i]=static_cast<float>(values[i]);
-    }
     return out;
 }
 float transformHandedness(const Mat4& m) noexcept {

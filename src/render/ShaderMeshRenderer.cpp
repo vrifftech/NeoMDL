@@ -660,48 +660,6 @@ bool ShaderMeshRenderer::draw(const neomdl::model::Mesh& mesh,
                 p.ownerIllumination[0],p.ownerIllumination[1],p.ownerIllumination[2],1}};
         }
     }
-    for(const auto value:p.modelView.values) if(!std::isfinite(value)) { error="Non-finite mesh transform"; return false; }
-    for(const auto value:p.projection.values) if(!std::isfinite(value)) { error="Non-finite projection"; return false; }
-    const auto finiteRange=[](const auto& values) {
-        return std::all_of(values.begin(),values.end(),[](float value){return std::isfinite(value);});
-    };
-    const auto validUv=[&](const neomdl::material::UvState& uv) {
-        return finiteRange(uv.scroll) && finiteRange(uv.scale) && finiteRange(uv.offset) &&
-               finiteRange(uv.texel) && uv.scale[0]>0 && uv.scale[1]>0;
-    };
-    const auto& materialInput=p.material;
-    const std::array<float,10> materialFloats{{materialInput.opacity,materialInput.alphaCutoff,
-        materialInput.bumpScale,materialInput.diffuseBumpIntensity,materialInput.specularBumpIntensity,
-        materialInput.environmentStrength,materialInput.vertexOpacity,materialInput.fixedFunctionAlphaScale,
-        materialInput.environmentOpacity,materialInput.instanceOpacity}};
-    if(!std::isfinite(p.textureAngleDegrees) || !finiteRange(p.fixedTextureMatrix.values) || !finiteRange(p.worldFromEye.values) || !finiteRange(p.ownerIllumination) ||
-       !std::isfinite(p.shellAmount) || !finiteRange(p.eyeToWorld) || !finiteRange(materialFloats) || !finiteRange(materialInput.specularColor) ||
-       !finiteRange(materialInput.selfIllumination) ||
-       !std::isfinite(materialInput.engineBumpIntensity) || !finiteRange(materialInput.engineSpecularColor) ||
-       !validUv(materialInput.diffuseUv) || !validUv(materialInput.bumpUv) ||
-       (!p.engineSkinBlur&&(!std::isfinite(p.skinBlurSideScale) ||
-       !std::isfinite(p.skinMotion.x) || !std::isfinite(p.skinMotion.y) ||
-       !std::isfinite(p.skinMotion.z) ||
-       !std::isfinite(p.skinCameraPosition.x) || !std::isfinite(p.skinCameraPosition.y) ||
-       !std::isfinite(p.skinCameraPosition.z) ||
-       !std::isfinite(p.skinBlurSideDirection.x) ||
-       !std::isfinite(p.skinBlurSideDirection.y) ||
-       !std::isfinite(p.skinBlurSideDirection.z))) ||
-       !finiteRange(p.colorOverride)) {
-        error="Non-finite or invalid material/skin uniforms";return false;
-    }
-    if(!finiteRange(p.sceneAmbient) || !neomdl::model::validFog(p.fog) ||
-       !std::isfinite(mesh.ambient.x) || !std::isfinite(mesh.ambient.y) || !std::isfinite(mesh.ambient.z) ||
-       !std::isfinite(mesh.diffuse.x) || !std::isfinite(mesh.diffuse.y) || !std::isfinite(mesh.diffuse.z)) {
-        error="Invalid lighting/fog uniforms";return false;
-    }
-    for(std::size_t l=0;l<std::min(p.lightCount,p.lights.size());++l) {
-        const auto& light=p.lights[l];
-        if(!finiteRange(light.position) || !finiteRange(light.diffuse) || !finiteRange(light.ambient) ||
-           !finiteRange(light.attenuation)) {
-            error="Non-finite light uniforms";return false;
-        }
-    }
     auto& i=*impl_; auto& a=i.api;
     const auto priorError=a.GetError();
     if(priorError!=g::NoError) {

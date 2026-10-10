@@ -767,14 +767,6 @@ private:
             if (!event.name.empty()) text << "  " << event.name;
             eventLog_.push_back(text.str());
         }
-        constexpr std::size_t maximumRememberedEvents = 40u;
-        if (eventLog_.size() > maximumRememberedEvents) {
-            eventLog_.erase(eventLog_.begin(),
-                            eventLog_.begin() +
-                                static_cast<std::ptrdiff_t>(
-                                    eventLog_.size() -
-                                    maximumRememberedEvents));
-        }
     }
 
     bool drainAnimationEvents() {
@@ -2302,8 +2294,8 @@ private:
         if(action<2){page->pauseAreaObject(object->instanceIndex(),action==0);return;}
         if(action==2){page->resetAreaObject(object->instanceIndex());return;}
         const auto text=wxGetTextFromUser("Playback rate", "Area animation", "1",this);if(text.empty())return;
-        double rate=0;if(!text.ToDouble(&rate)||!std::isfinite(rate)||rate<=0||rate>100) {
-            wxMessageBox("Enter a finite rate greater than 0 and no more than 100.","Area animation",wxOK|wxICON_ERROR,this);return;
+        double rate=0;if(!text.ToDouble(&rate)||!std::isfinite(rate)||rate<=0) {
+            wxMessageBox("Enter a finite rate greater than 0.","Area animation",wxOK|wxICON_ERROR,this);return;
         }
         std::string error;
         if(!page->playAreaAnimation(object->instanceIndex(),doc.animation(static_cast<std::size_t>(action-3)).name,static_cast<float>(rate),error))

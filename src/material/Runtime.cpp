@@ -62,18 +62,16 @@ void evaluateBumpFields(RuntimeMaterial& result, const Material& material) {
         result.bumpKind = bump.bumpMapKind.value_or(BumpMapKind::Height);
     else
         result.bumpKind = BumpMapKind::None;
-    result.bumpScale=bounded(diffuse.bumpMapScaling.value_or(
-        bump.bumpMapScaling.value_or(1)),-100,100,1)*
-        bounded(bump.bumpIntensity.value_or(diffuse.bumpIntensity.value_or(1)),0,100,1);
+    result.bumpScale=diffuse.bumpMapScaling.value_or(bump.bumpMapScaling.value_or(1))*
+        bump.bumpIntensity.value_or(diffuse.bumpIntensity.value_or(1));
     result.diffuseBump=bump.diffuseBump.value_or(diffuse.diffuseBump.value_or(true));
     result.specularBump=bump.specularBump.value_or(diffuse.specularBump.value_or(false));
-    result.diffuseBumpIntensity=bounded(bump.diffuseBumpIntensity.value_or(
-        diffuse.diffuseBumpIntensity.value_or(1)),0,10,1);
-    result.specularBumpIntensity=bounded(bump.specularBumpIntensity.value_or(
-        diffuse.specularBumpIntensity.value_or(1)),0,10,1);
+    result.diffuseBumpIntensity=bump.diffuseBumpIntensity.value_or(
+        diffuse.diffuseBumpIntensity.value_or(1));
+    result.specularBumpIntensity=bump.specularBumpIntensity.value_or(
+        diffuse.specularBumpIntensity.value_or(1));
     result.specularColor=bump.specularColor.value_or(
         diffuse.specularColor.value_or(std::array<float,3>{{1,1,1}}));
-    for(auto& value:result.specularColor) value=bounded(value,0,10,1);
 }
 }
 
@@ -316,10 +314,7 @@ RuntimeMaterial evaluateMaterial(const Material& m,const SurfaceInputs& surface,
     const auto& b=props(m.bumpMap);
     r.opacity=bounded(surface.opacity,0,1,1)*bounded(surface.instanceOpacity,0,1,1)*
         bounded(p.waterAlpha.value_or(1),0,1,1);
-    // Display bound, not an authored format range. Preserve the sampled value
-    // in Pose; reject non-finite input per component here at the render boundary.
-    for(std::size_t channel=0;channel<r.selfIllumination.size();++channel)
-        r.selfIllumination[channel]=bounded(surface.selfIllumination[channel],0,16,0);
+    r.selfIllumination=surface.selfIllumination;
     const bool environment=(!m.environmentMap.key.empty() || !m.bumpyShiny.key.empty()) &&
         p.environmentMapped.value_or(true);
     // Odyssey-style inverse diffuse-alpha reflection mask. Explicit blend
@@ -346,15 +341,14 @@ RuntimeMaterial evaluateMaterial(const Material& m,const SurfaceInputs& surface,
     r.useBumpMap=!m.bumpMap.key.empty();
     r.useEnvironmentMap=environment;
     if(!m.bumpMap.key.empty()) r.bumpKind=b.bumpMapKind.value_or(BumpMapKind::Height);
-    r.bumpScale=bounded(p.bumpMapScaling.value_or(b.bumpMapScaling.value_or(1)),-100,100,1)*
-        bounded(b.bumpIntensity.value_or(p.bumpIntensity.value_or(1)),0,100,1);
+    r.bumpScale=p.bumpMapScaling.value_or(b.bumpMapScaling.value_or(1))*
+        b.bumpIntensity.value_or(p.bumpIntensity.value_or(1));
     r.diffuseBump=b.diffuseBump.value_or(p.diffuseBump.value_or(true));
     r.specularBump=b.specularBump.value_or(p.specularBump.value_or(false));
-    r.diffuseBumpIntensity=bounded(b.diffuseBumpIntensity.value_or(p.diffuseBumpIntensity.value_or(1)),0,10,1);
-    r.specularBumpIntensity=bounded(b.specularBumpIntensity.value_or(p.specularBumpIntensity.value_or(1)),0,10,1);
+    r.diffuseBumpIntensity=b.diffuseBumpIntensity.value_or(p.diffuseBumpIntensity.value_or(1));
+    r.specularBumpIntensity=b.specularBumpIntensity.value_or(p.specularBumpIntensity.value_or(1));
     r.specularColor=b.specularColor.value_or(p.specularColor.value_or(std::array<float,3>{{1,1,1}}));
-    for(auto& v:r.specularColor) v=bounded(v,0,10,1);
-    r.environmentStrength=environment ? bounded(p.environmentAlpha.value_or(1),0,10,1) : 0;
+    r.environmentStrength=environment ? p.environmentAlpha.value_or(1) : 0;
     r.diffuseUv=evaluateUv(m.diffuse);
     r.bumpUv=evaluateUv(m.bumpMap);
     return r;
@@ -402,7 +396,7 @@ RuntimeMaterial evaluateEnginePartTriMeshMaterial(
 
     // Engine material arithmetic is not clamped here. Vertex primary color
     // is clamped after lighting, before interpolation; fragment env alpha is
-    // a separate, unclamped constant. Non-finite inputs fail at submission.
+    // a separate, unclamped constant.
     result.instanceOpacity=surface.instanceOpacity;
     result.environmentOpacity=surface.opacity;
     result.vertexOpacity=surface.opacity*surface.instanceOpacity;
@@ -463,7 +457,7 @@ RuntimeMaterial evaluateEnginePartTriMeshMaterial(
 
     evaluateBumpFields(result,material);
     // CAurTextureBasic constructor 0xbb837 / 0xbb94f..0xbb95d; getters
-    // 0xbacf0 / 0xbaca4. Non-finite authored data fails at draw validation.
+    // 0xbacf0 / 0xbaca4.
     result.engineBumpIntensity=props(material.bumpMap).bumpIntensity.value_or(1.0f);
     // K1 CAurTextureBasic initializes both authored bump flags and both
     // intensities to one (0x3709df..0x3709e2, 0x370aa4..0x370aab).
