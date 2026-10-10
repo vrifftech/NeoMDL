@@ -1464,7 +1464,6 @@ class ModelEditorPanelImpl final : public ModelEditorPanel {
 public:
     ModelEditorPanelImpl(wxWindow* parent, neomodules::Context context)
         : ModelEditorPanel(parent, std::move(context)) {
-        buildMenus();
         tabs_ = new wxAuiNotebook(this, wxID_ANY, wxDefaultPosition, wxDefaultSize,
             wxAUI_NB_TOP | wxAUI_NB_TAB_MOVE | wxAUI_NB_CLOSE_ON_ACTIVE_TAB |
                 wxAUI_NB_SCROLL_BUTTONS);
@@ -1474,6 +1473,7 @@ public:
         createModuleStatusBar(2);
         int widths[] = {-3, -2};
         moduleStatusBar()->SetStatusWidths(2, widths);
+        buildMenus();
         bindEvents();
         updateState();
     }
