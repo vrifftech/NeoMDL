@@ -213,8 +213,6 @@ bool validObjectVisualStateLayer(const ObjectVisualStateLayer& layer,std::string
             const bool owner=route.targetOwner.has_value(),world=route.explicitWorld.has_value();
             if(owner==world)return fail("Emitter target route must set exactly one target owner or explicit transform");
             if(world&&!finite(*route.explicitWorld))return fail("Emitter target transform contains non-finite values");
-            if(route.emitterName.size()>64u||route.targetNode.size()>64u)
-                return fail("Emitter target selector exceeds the retained name limit");
             if(!owner&&!route.targetNode.empty())return fail("A target node requires a target owner");
             if(route.allSourceOwners&&route.sourceReference)
                 return fail("An all-owner target route cannot also select one source reference");

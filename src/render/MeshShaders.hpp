@@ -66,22 +66,17 @@ varying float vFogCoordinate;
 varying vec2 vUv0;
 varying vec2 vUv1;
 varying vec4 vColor;
-vec3 vertexSafeUnit(vec3 value, vec3 fallback) {
-    float squared = dot(value, value);
-    return squared > 0.000000000001 ? value * inversesqrt(squared) : fallback;
-}
 void main() {
     bool engineBlur = uEngineSkinBlur && uSkinEffect == 1;
     vec3 localNormal = engineBlur ? aRawNormal * inversesqrt(dot(aRawNormal,aRawNormal))
-        : vertexSafeUnit(aNormal, vec3(0.0,0.0,1.0));
+        : normalize(aNormal);
     vec3 localPosition = aPosition;
     vSkinBlurAlpha = 1.0;
     if (uSkinEffect == 1) {
         // cSkinMotionBlurVP after skinning. uSkinMotion is current minus
         // previous Gob position in this part's model space.
         float movement = length(uSkinMotion);
-        vec3 direction = engineBlur ? uSkinBlurDirection : movement > 0.000000000001
-            ? uSkinMotion / movement : vec3(0.0,0.0,1.0);
+        vec3 direction = engineBlur ? uSkinBlurDirection : uSkinMotion / movement;
         float maximumLength = engineBlur ? uSkinMaximumBlurLength : max(0.000001, uSkinMaximumBlurLength);
         float amount = min(engineBlur ? uSkinBlurSpeed : movement, maximumLength);
         float backFacing = dot(direction, localNormal) < 0.0 ? 1.0 : 0.0;
@@ -89,7 +84,7 @@ void main() {
 
         vec3 sideDirection = engineBlur
             ? uSkinBlurSideDirection * inversesqrt(dot(uSkinBlurSideDirection,uSkinBlurSideDirection))
-            : vertexSafeUnit(uSkinBlurSideDirection, vec3(1.0,0.0,0.0));
+            : normalize(uSkinBlurSideDirection);
         // Engine c17.xyz is the Gob origin in Part space, not the camera.
         // The CPU-posed stream and engine constants here are in Gob space.
         vec3 sideOrigin = engineBlur ? vec3(0.0) : uSkinCameraPosition;
@@ -303,10 +298,6 @@ varying float vFogCoordinate;
 varying vec2 vUv0;
 varying vec2 vUv1;
 varying vec4 vColor;
-vec3 safeUnit(vec3 v, vec3 fallback) {
-    float squared = dot(v,v);
-    return squared > 0.000000000001 ? v * inversesqrt(squared) : fallback;
-}
 vec2 materialUv(vec2 source, vec4 atlas, vec3 scroll, vec3 info) {
     vec2 uv=source+scroll.xy;
     if(scroll.z>0.5) {
@@ -318,9 +309,9 @@ vec2 materialUv(vec2 source, vec4 atlas, vec3 scroll, vec3 info) {
     return info.z>0.5 ? clamp(uv,0.0,1.0) : uv;
 }
 vec3 perturbedNormal(vec3 n,vec3 t) {
-    vec3 b=safeUnit(cross(n,t),vec3(0.0,1.0,0.0))*vTangent.w;
+    vec3 b=normalize(cross(n,t))*vTangent.w;
     vec2 uv=materialUv(vUv0,uBumpUv,uBumpScroll,uBumpUvInfo);
-    vec3 sampleNormal=vec3(0.0,0.0,1.0);
+    vec3 sampleNormal;
     if(uBumpKind==2) {
         sampleNormal=texture2D(uBumpTexture,uv).xyz*2.0-1.0;
         sampleNormal.xy*=uBumpScale;
@@ -342,10 +333,10 @@ vec3 perturbedNormal(vec3 n,vec3 t) {
         // cNewSkinBumpyVP does not independently normalize or orthogonalize
         // TEX4/TEX5/TEX6 after weighted bone deformation. Only the final
         // perturbed result is normalized for lighting.
-        return safeUnit(exactB*sampleNormal.x + exactT*sampleNormal.y +
-                        exactN*sampleNormal.z, safeUnit(exactN,n));
+        return normalize(exactB*sampleNormal.x + exactT*sampleNormal.y +
+                         exactN*sampleNormal.z);
     }
-    return safeUnit(t*sampleNormal.x+b*sampleNormal.y+n*sampleNormal.z,n);
+    return normalize(t*sampleNormal.x+b*sampleNormal.y+n*sampleNormal.z);
 }
 
 float fogAmount() {
@@ -367,13 +358,13 @@ void main() {
         if(uAlphaTest && !(c.a>uAlphaCutoff)) discard;
         gl_FragColor=c;return;
     }
-    vec3 n = safeUnit(vNormal, vec3(0.0,0.0,1.0));
-    vec3 t = safeUnit(vTangent.xyz - n * dot(n,vTangent.xyz), vec3(1.0,0.0,0.0));
-    vec3 debugT = vBasisNormal.w > 0.5 ? safeUnit(vTangent.xyz,t) : t;
-    vec3 debugN = vBasisNormal.w > 0.5 ? safeUnit(vBasisNormal.xyz,n) : n;
+    vec3 n = normalize(vNormal);
+    vec3 t = normalize(vTangent.xyz - n * dot(n,vTangent.xyz));
+    vec3 debugT = vBasisNormal.w > 0.5 ? normalize(vTangent.xyz) : t;
+    vec3 debugN = vBasisNormal.w > 0.5 ? normalize(vBasisNormal.xyz) : n;
     vec3 debugB = vBasisNormal.w > 0.5
-        ? safeUnit(vBitangent,vec3(0.0,1.0,0.0))
-        : safeUnit(cross(n,t),vec3(0.0,1.0,0.0))*vTangent.w;
+        ? normalize(vBitangent)
+        : normalize(cross(n,t))*vTangent.w;
     if (uBasisDebug == 1) { gl_FragColor=vec4(debugT*0.5+0.5,1.0); return; }
     if (uBasisDebug == 2) { gl_FragColor=vec4(debugN*0.5+0.5,1.0); return; }
     if (uBasisDebug == 3) { gl_FragColor=vec4(debugB*0.5+0.5,1.0); return; }
@@ -514,7 +505,7 @@ void main() {
     }
     vec4 color=vec4(uColor.rgb*primary.rgb*texel.rgb,fragmentAlpha);
     vec3 shadingNormal=uBumpKind!=0 ? perturbedNormal(n,t) : n;
-    vec3 diffuseNormal=uDiffuseBump ? safeUnit(mix(n,shadingNormal,uBumpIntensities.x),n) : n;
+    vec3 diffuseNormal=uDiffuseBump ? normalize(mix(n,shadingNormal,uBumpIntensities.x)) : n;
     vec3 specular=vec3(0.0);
     if (uLighting) {
         vec3 illumination = vec3(0.0);
@@ -523,7 +514,7 @@ void main() {
             if (i >= uLightCount) break;
             vec3 delta = uLightPosition[i].xyz - vPosition * uLightPosition[i].w;
             float distanceToLight = length(delta);
-            vec3 direction = safeUnit(delta,vec3(0.0,0.0,1.0));
+            vec3 direction = normalize(delta);
             float attenuation = 1.0;
             if (uLightPosition[i].w != 0.0) {
                 vec3 att = uLightAttenuation[i];
@@ -532,7 +523,7 @@ void main() {
             ambient += attenuation*uLightAmbient[i]*uMeshAmbient;
             illumination += attenuation*uLightDiffuse[i]*max(0.0,dot(diffuseNormal,direction));
             if(uSpecularBump && uBumpKind!=0 && dot(shadingNormal,direction)>0.0) {
-                vec3 halfVector=safeUnit(direction+safeUnit(-vPosition,vec3(0.0,0.0,1.0)),shadingNormal);
+                vec3 halfVector=normalize(direction+normalize(-vPosition));
                 specular+=attenuation*uLightDiffuse[i]*uSpecularColor*uBumpIntensities.y*
                     pow(max(0.0,dot(shadingNormal,halfVector)),32.0);
             }
@@ -546,7 +537,7 @@ void main() {
     color.rgb += texel.rgb * vColor.rgb * uSelfIllumination;
     color.rgb+=specular;
     if(uEnvironmentMode!=0) {
-        vec3 reflected=reflect(safeUnit(vPosition,vec3(0.0,0.0,-1.0)),shadingNormal);
+        vec3 reflected=reflect(normalize(vPosition),shadingNormal);
         vec3 environment;
         if(uEnvironmentMode==2) environment=textureCube(uEnvironmentCube,uEyeToWorld*reflected).rgb;
         else {

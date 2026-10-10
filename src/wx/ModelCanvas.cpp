@@ -28,6 +28,7 @@
 #include <cstring>
 #include <algorithm>
 #include <array>
+#include <charconv>
 #include <cmath>
 #include <chrono>
 #include <cstdint>
@@ -988,15 +989,20 @@ void ModelCanvas::configureGrass(const GrassSettings& settings) {
 bool ModelCanvas::playAreaAnimation(std::size_t instance,const std::string& clip,float rate,std::string& error) {
     auto* object=areaScene_.object(instance);
     if(!object){error="Unknown area object";return false;}
-    model::AnimationPlayResult result;
+    std::optional<std::uint16_t> roomAnimation;
     if(object->kind()==AreaObjectKind::AnimatedRoom && clip.rfind("scriptloop",0)==0 && rate==1.0f) {
-        const auto suffix=clip.substr(10);std::size_t used=0;
-        try {const auto number=std::stoul(suffix,&used);if(used!=suffix.size()||number>65535)throw std::out_of_range("scriptloop");
-            result=object->playRoomAnimation(static_cast<std::uint16_t>(number));}
-        catch(const std::exception&) {result=object->play(clip,rate);}
-    } else result=object->play(clip,rate);
-    if(!result){error=result.diagnostic;return false;}
-    object->setPaused(false);synchronizeEngineQueries();updateSceneBounds();Refresh(false);error.clear();return true;
+        std::uint16_t number{};
+        const auto end=clip.data()+clip.size();
+        const auto parsed=std::from_chars(clip.data()+10,end,number);
+        if(parsed.ec==std::errc{}&&parsed.ptr==end)roomAnimation=number;
+    }
+    try {
+        const auto result=roomAnimation?object->playRoomAnimation(*roomAnimation):object->play(clip,rate);
+        if(!result){error=result.diagnostic;return false;}
+        object->setPaused(false);synchronizeEngineQueries();updateSceneBounds();Refresh(false);error.clear();return true;
+    } catch(const std::exception& failure) {
+        error=failure.what();return false;
+    }
 }
 void ModelCanvas::pauseAreaObject(std::size_t instance,bool paused) {
     if(auto* object=areaScene_.object(instance))object->setPaused(paused);

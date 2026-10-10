@@ -229,7 +229,6 @@ bool GameResourceSession::open(const neoshared::game::GameInstall& supplied,std:
         if(b.key.missingBifCount()) b.diagnostics.push_back(std::to_string(b.key.missingBifCount())+" KEY-referenced BIF archives are unavailable");
         for(const auto& issue:b.key.issues()) {
             job.check();
-            if(b.diagnostics.size()>=100) break;
             b.diagnostics.push_back("KEY/BIF: "+issue.message);
         }
         b.diagnostics.push_back("Preview mounts: distinct configured override > shared override aliases in discovery order > selected module archives > GUI/quality-A textures > KEY/BIF. Alias discovery is shared with NeoBIF; configured-directory and archive layer precedence are explicit viewer policy. Save state, other modules and other texture qualities are excluded.");

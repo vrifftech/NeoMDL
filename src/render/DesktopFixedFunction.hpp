@@ -3,6 +3,7 @@ namespace neomdl::render {
 // GLSL realization of the compatibility vertex texture-coordinate stage.
 // Enabled modes come from the engine Desktop sphere/reflection TexGen calls.
 inline constexpr const char* desktopFixedCoordinatesGlsl=R"GLSL(
+varying vec4 gl_TexCoord[gl_MaxTextureCoords];
 uniform vec4 uFixedCoordinates[6];
 uniform vec4 uFixedTexgenEnabled[6];
 uniform vec4 uFixedTexgenModes[6];

@@ -88,7 +88,7 @@ std::vector<std::string> lines(const std::string& input) {
     return result;
 }
 void validResref(const std::string& name) {
-    require(!name.empty() && name.size() <= 64u && name != "." && name != ".." &&
+    require(!name.empty() && name != "." && name != ".." &&
             name.find_first_of("/\\:") == std::string::npos,
             "invalid room resource name: " + name);
 }
