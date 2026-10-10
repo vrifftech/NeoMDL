@@ -3904,13 +3904,13 @@ private:
         const auto windPeriod=vector("Noise interpolation period (seconds)",
             {settings.windInterpolationPeriod});
         windPeriod[0]->SetRange(std::numeric_limits<float>::denorm_min(),std::numeric_limits<float>::max());
-        const auto near=[](float a,float b) {return std::fabs(a-b)<=1.0e-4f;};
+        const auto nearlyEqual=[](float a,float b) {return std::fabs(a-b)<=1.0e-4f;};
         for(unsigned mode=0;mode<=2;++mode) {
             const auto preset=neomdl::model::k2AreaWindPreset(static_cast<std::uint8_t>(mode));
-            if(preset && near(q.x,preset->globalWind.x)&&near(q.y,preset->globalWind.y)&&
-               near(q.z,preset->globalWind.z)&&
-               near(settings.windMaximumDeviationZDegrees,preset->maximumDeviationZDegrees)&&
-               near(settings.windMaximumDeviationXDegrees,preset->maximumDeviationXDegrees)) {
+            if(preset && nearlyEqual(q.x,preset->globalWind.x)&&nearlyEqual(q.y,preset->globalWind.y)&&
+               nearlyEqual(q.z,preset->globalWind.z)&&
+               nearlyEqual(settings.windMaximumDeviationZDegrees,preset->maximumDeviationZDegrees)&&
+               nearlyEqual(settings.windMaximumDeviationXDegrees,preset->maximumDeviationXDegrees)) {
                 windPreset->SetSelection(static_cast<int>(mode)+1);break;
             }
         }
@@ -4043,7 +4043,7 @@ private:
         double degrees=0;std::string error;
         if(!text.ToDouble(&degrees) || !std::isfinite(degrees) ||
            !page->setTextureAngle(part.first,part.second,static_cast<float>(degrees),error))
-            wxMessageBox(error.empty()?"Enter a finite angle in degrees.":wxui::toWx(error),
+            wxMessageBox(wxui::toWx(error.empty()?"Enter a finite angle in degrees.":error),
                 "Invalid texture rotation",wxOK|wxICON_WARNING,this);
     }
 
