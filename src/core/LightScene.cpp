@@ -253,11 +253,11 @@ void LightScene::synchronize(const Pose& mainPose, bool includeReferences) {
     ++revision_;
 }
 
-void LightScene::registerLight(RuntimeLight light) {
+void LightScene::registerLight(RuntimeLight light, bool refreshCollection) {
     const auto id=light.id;
     storeLight(std::move(light));
     setLightSceneMember(id,true);
-    refreshRoomCollection();
+    if(refreshCollection)refreshRoomCollection();
 }
 
 void LightScene::setLightSceneMember(std::uint64_t id, bool member) {
@@ -397,12 +397,12 @@ void LightScene::pruneRemovedLights() {
 
 }
 
-void LightScene::registerRoom(LightRoomRegistration room) {
+void LightScene::registerRoom(LightRoomRegistration room, bool refreshCollection) {
     const auto it = std::find_if(rooms_.begin(), rooms_.end(),
         [&](const LightRoomRegistration& entry) { return entry.id == room.id; });
     if (it == rooms_.end()) rooms_.push_back(std::move(room));
     else *it = std::move(room);
-    refreshRoomCollection();
+    if(refreshCollection)refreshRoomCollection();
     ++revision_;
 }
 

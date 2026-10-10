@@ -1304,7 +1304,7 @@ void AreaScene::synchronize(LightScene& lights,const std::vector<model::TriggerP
     ownedLightIds_.clear();
     for (auto& light : pending) {
         const auto id=light.id;
-        ownedLightIds_.push_back(id);lights.registerLight(std::move(light));
+        ownedLightIds_.push_back(id);lights.registerLight(std::move(light),false);
         if(detachedIds.count(id))lights.setLightSceneMember(id,false);
     }
     for (const auto& light : lights.lights()) {
@@ -1320,7 +1320,7 @@ void AreaScene::synchronize(LightScene& lights,const std::vector<model::TriggerP
             registration.secondaryLights.push_back(light.id);
         }
     }
-    for (auto& registration : registrations) lights.registerRoom(std::move(registration));
+    for (auto& registration : registrations) lights.registerRoom(std::move(registration),false);
     lights.collectLightsForGivenRoom(ignoreVisibility_ ? std::nullopt : currentRoom_);
     activeRooms_.clear();
     if (!currentRoom_ || ignoreVisibility_) {

@@ -440,6 +440,11 @@ GpuTexture TextureCache::get(const neoshared::texture::TextureData& texture,
     if(const auto found=procedures_.find(&texture);found!=procedures_.end()) {
         return selected(*found->second,error);
     }
+    if(const auto found=entries_.find(&texture);found!=entries_.end()) {
+        const auto first=found->second.find(0u);
+        if(first!=found->second.end()&&first->second.cube)return first->second;
+        if(const auto cached=found->second.find(layer);cached!=found->second.end())return cached->second;
+    }
     try {
         // A supplied metadata object is the caller's authoritative state.
         // Implicit resource metadata needs CAurTextureBasic's physical-line

@@ -172,7 +172,7 @@ public:
 
     // Application-owned scene inputs. Re-registering an ID updates authored /
     // animated data without resetting owner fades.
-    void registerLight(RuntimeLight light);
+    void registerLight(RuntimeLight light, bool refreshCollection = true);
     bool removeLight(std::uint64_t id);
     // SetScene(null) unlists a retained PartLight without destroying its
     // registration or Gob fade-container references.
@@ -180,7 +180,7 @@ public:
 
     // Engine room lists are provided by an area-aware host, not generated from
     // preview bounding boxes. Null room means the scene's registered room list.
-    void registerRoom(LightRoomRegistration room);
+    void registerRoom(LightRoomRegistration room, bool refreshCollection = true);
     bool removeRoom(LightRoomId room);
     void collectLightsForGivenRoom(std::optional<LightRoomId> room);
     void clearRoomCollection();

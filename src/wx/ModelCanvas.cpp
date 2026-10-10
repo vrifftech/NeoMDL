@@ -39,6 +39,7 @@
 #include <set>
 #include <sstream>
 #include <stdexcept>
+#include <unordered_set>
 
 #ifndef GL_CLAMP_TO_EDGE
 #define GL_CLAMP_TO_EDGE 0x812F
@@ -2844,10 +2845,12 @@ bool ModelCanvas::engineOwnerAdmitted(LightOwnerId id,std::uint16_t classificati
 }
 
 void ModelCanvas::animateRenderOwner(LightOwnerId id) {
+    const auto scene=particleScene_.sceneAnimation();
+    if(!scene->interleaved())return;
     const auto found=renderAnimationOwners_.find(id);
     if(found!=renderAnimationOwners_.end()) {
         auto* owner=found->second;
-        particleScene_.sceneAnimation()->animateForRender(*owner);
+        scene->animateForRender(*owner);
         // Engine Parts expose their updated transforms immediately to Mat,
         // light selection and hit queries in this owner's render callback.
         synchronizeEngineQueries();
@@ -3536,10 +3539,11 @@ void ModelCanvas::drawScene() {
     textureCache_.setDirtyAreaInputs(dirtyAreaState().controllerInputs(),
         (explicitDirtyArea_?explicitDirtyIdentity_:areaScene_.identity())+"#"+std::to_string(dirtyAreaEpoch_));
     std::vector<render::ProcedureRegistration> pendingProcedures;
+    std::unordered_set<const neoshared::texture::TextureData*> registeredTextures;
     const auto registerDocument=[&](const ModelDocument& resource) {
         const auto registerTexture=[&](const std::string& name) {
             const auto* image=resource.texture(name);const auto metadata=resource.textureMetadata(name);
-            if(!image || !metadata)return;
+            if(!image || !metadata || !registeredTextures.insert(image).second)return;
             textureCache_.orderFor(*image);
             try {
                 // Nonprocedural images keep their existing lazy GPU upload.
