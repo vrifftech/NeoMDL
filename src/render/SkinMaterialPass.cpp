@@ -2,6 +2,7 @@
 #include "render/SkinMaterialPrograms.hpp"
 #include "render/DesktopMaterialPrograms.hpp"
 #include "render/ShaderMeshRenderer.hpp"
+#include <model/EngineCpuSkin.hpp>
 #include <algorithm>
 #include <cstdio>
 #include <cstring>
@@ -63,25 +64,14 @@ void validateEngineSkinFrame(const model::Mesh& mesh,const model::DeformedMesh& 
         throw std::invalid_argument("Engine skin-bump pass requires the authored three-vector basis");
 }
 
-void validateEngineSkinPose(const model::Mesh& mesh,const model::DeformedMesh& pose,bool requireBasis) {
-    if(mesh.skinInfluences.size()!=mesh.vertices.size())
-        throw std::invalid_argument("Engine skin needs authored influences and its current palette");
-    validateEngineSkinFrame(mesh,pose,requireBasis);
-    for(const auto& influence:mesh.skinInfluences) for(unsigned k=0;k<4;++k)
-        if(influence.boneIndices[k]>=pose.skinPalette.size() ||
-           (influence.weights[k]!=0 && !pose.skinPalette[influence.boneIndices[k]].valid))
-            throw std::invalid_argument("Engine skin references an invalid bone-palette slot");
-}
-
 std::vector<EngineSkinVertex> engineSkinVertices(const model::Mesh& mesh,const model::DeformedMesh& pose,bool requireBasis) {
-    validateEngineSkinPose(mesh,pose,requireBasis);
+    validateEngineSkinFrame(mesh,pose,requireBasis);
+    const auto channels=model::decodeEngineFloatSkinChannels(mesh);
     std::vector<EngineSkinVertex> vertices;vertices.reserve(mesh.vertices.size());
     for(std::size_t n=0;n<mesh.vertices.size();++n){
-        const auto& v=mesh.vertices[n];const auto& influence=mesh.skinInfluences[n];
-        EngineSkinVertex out{v.position,mesh.normalAt(n),influence.weights,{},v.texcoord0,
+        const auto& v=mesh.vertices[n];const auto& influence=channels[n];
+        EngineSkinVertex out{v.position,mesh.normalAt(n),influence.weights,influence.indices,v.texcoord0,
             v.tangentBasis.bitangent,v.tangentBasis.tangent,v.tangentBasis.normal};
-        for(unsigned k=0;k<4;++k)
-            out.indices[k]=static_cast<float>(influence.boneIndices[k]);
         vertices.push_back(out);
     }
     return vertices;

@@ -739,7 +739,7 @@ bool ShaderMeshRenderer::draw(const neomdl::model::Mesh& mesh,
     if(engineSkin) {
         try {
             if(!deformed)throw std::invalid_argument("Engine skin material requires its current pose");
-            validateEngineSkinPose(mesh,*deformed,engineProgram==MaterialProgram::SkinBump || engineProgram==MaterialProgram::SkinBumpyShiny);
+            validateEngineSkinFrame(mesh,*deformed,engineProgram==MaterialProgram::SkinBump || engineProgram==MaterialProgram::SkinBumpyShiny);
         } catch(const std::exception& e) {error=e.what();return false;}
         if(!i.skinMaterials.prepare(a,p,engineProgram,error))return false;
     }

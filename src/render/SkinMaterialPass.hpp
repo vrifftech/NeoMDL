@@ -17,7 +17,6 @@ struct EngineSkinVertex {
 };
 // Validate current pose on EVERY draw, including cached source-vertex draws.
 void validateEngineSkinFrame(const model::Mesh&, const model::DeformedMesh&, bool requireBasis=false);
-void validateEngineSkinPose(const model::Mesh&, const model::DeformedMesh&, bool requireBasis=false);
 std::vector<EngineSkinVertex> engineSkinVertices(const model::Mesh&,
                                                 const model::DeformedMesh&, bool requireBasis=true);
 // A per-context program bundle, owned by ShaderMeshRenderer. Geometry stays in
