@@ -37,6 +37,7 @@
 #include <utility>
 #include <vector>
 #include <set>
+#include <sstream>
 #include <stdexcept>
 
 #ifndef GL_CLAMP_TO_EDGE

@@ -201,13 +201,6 @@ Vec3 cross(const Vec3& left, const Vec3& right) noexcept {
             left.x * right.y - left.y * right.x};
 }
 
-Vec3 normalize(const Vec3& value) noexcept {
-    const double lengthSquared = static_cast<double>(value.x) * value.x +
-        static_cast<double>(value.y) * value.y + static_cast<double>(value.z) * value.z;
-    const auto reciprocal = static_cast<float>(1.0 / std::sqrt(lengthSquared));
-    return {value.x * reciprocal, value.y * reciprocal, value.z * reciprocal};
-}
-
 std::string normalizedResourceName(std::string value) {
     while (!value.empty() && (value.back() == ' ' || value.back() == '\t')) value.pop_back();
     std::size_t first = 0u;
@@ -2973,6 +2966,13 @@ Vec3 transformPoint(const Mat4& matrix, const Vec3& point) noexcept {
                 matrix.values[9] * point.z + matrix.values[13],
             matrix.values[2] * point.x + matrix.values[6] * point.y +
                 matrix.values[10] * point.z + matrix.values[14]};
+}
+
+Vec3 normalize(const Vec3& value) noexcept {
+    const double lengthSquared = static_cast<double>(value.x) * value.x +
+        static_cast<double>(value.y) * value.y + static_cast<double>(value.z) * value.z;
+    const auto reciprocal = static_cast<float>(1.0 / std::sqrt(lengthSquared));
+    return {value.x * reciprocal, value.y * reciprocal, value.z * reciprocal};
 }
 
 Vec3 transformDirection(const Mat4& matrix, const Vec3& direction) noexcept {

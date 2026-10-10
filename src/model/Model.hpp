@@ -815,6 +815,7 @@ Mat4 multiply(const Mat4& left, const Mat4& right) noexcept;
 Mat4 nodeTransform(const Vec3& position, const Quaternion& orientation) noexcept;
 Mat4 nodeTransform(const Vec3& position, const Quaternion& orientation, float uniformScale) noexcept;
 Vec3 transformPoint(const Mat4& matrix, const Vec3& point) noexcept;
+Vec3 normalize(const Vec3& value) noexcept;
 Vec3 transformDirection(const Mat4& matrix, const Vec3& direction) noexcept;
 inline Vec3 deformedNormalAt(const Mesh& mesh,const DeformedMesh& pose,std::size_t index) noexcept {
     // Dangly SetupArrays binds the shared MDX normal channel at draw time;
