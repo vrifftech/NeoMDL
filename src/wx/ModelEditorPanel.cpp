@@ -1521,8 +1521,9 @@ public:
             std::string installationWarning;
             const auto installed = installedResourceResolver(
                 document->model().game, path, installationSession,
-                installationWarning);
-            const auto combined = combineResolvers(captureHostResolver(), installed);
+                installationWarning, true);
+            const auto combined = installed
+                ? combineResolvers(captureHostResolver(), installed) : ResourceResolver{};
             if (combined) {
                 auto enriched = std::make_unique<ModelDocument>();
                 asciiGame=document->model().game;
@@ -1729,7 +1730,8 @@ private:
         neomdl::model::GameVersion modelGame,
         const std::filesystem::path& modelPath,
         std::shared_ptr<GameResourceSession>& selectedSession,
-        std::string& warning) {
+        std::string& warning,
+        bool containingOnly = false) {
         selectedSession.reset();
         warning.clear();
         const auto gameId = gameIdForModel(modelGame);
@@ -1737,7 +1739,28 @@ private:
         if (definition == nullptr) return {};
 
         std::optional<neogames::GameInstall> selected;
-        if (const auto inferred = neogames::resolver().inferFromOpenedPath(modelPath)) {
+        if (containingOnly) {
+            auto directory = neogames::normalizeConfiguredPath(modelPath).parent_path();
+            while (!directory.empty()) {
+                if (neogames::isValidGameInstallation(*definition, directory)) {
+                    selected = neoshared::game::inspectGameInstallation(
+                        directory, gameId, "Opened resource");
+                    if (selected) {
+                        for (const auto& saved : neogames::resolver().settings().readSaved(*definition)) {
+                            if (neoshared::sameResourcePath(saved.installPath, selected->installPath)) {
+                                selected = saved;
+                                break;
+                            }
+                        }
+                    }
+                    break;
+                }
+                const auto parent = directory.parent_path();
+                if (parent == directory) break;
+                directory = parent;
+            }
+            if (!selected) return {};
+        } else if (const auto inferred = neogames::resolver().inferFromOpenedPath(modelPath)) {
             if (inferred->id == definition->id &&
                 neogames::isValidGameInstallation(*definition, inferred->installPath)) {
                 selected = *inferred;
