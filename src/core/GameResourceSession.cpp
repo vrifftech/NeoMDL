@@ -10,7 +10,7 @@
 #include <neoshared/PathUtf8.hpp>
 #include <algorithm>
 #include <map>
-#include <limits>
+#include <mutex>
 #include <set>
 #include <stdexcept>
 
@@ -22,6 +22,24 @@ using Index=std::map<Key,std::vector<std::size_t>>;
 std::string lower(std::string s) {for(auto& c:s) if(c>='A'&&c<='Z') c=char(c+32);return s;}
 std::string pathIdentity(const Path& p) {return neoshared::genericPathToUtf8(std::filesystem::weakly_canonical(p));}
 std::string component(const std::string& s) {return std::to_string(s.size())+":"+s;}
+
+std::vector<Path> installationArchives(const Path& root,const neoshared::bif::JobControl& job) {
+    std::vector<Path> paths;
+    for(const auto& directory:std::filesystem::directory_iterator(root)) {
+        job.check();
+        const auto folder=lower(neoshared::pathToUtf8(directory.path().filename()));
+        if(folder!="modules"&&folder!="rims"&&folder!="texturepacks") continue;
+        if(!std::filesystem::is_directory(directory.symlink_status())) continue;
+        job.update(0,0,"Discovering archives: "+neoshared::pathToUtf8(directory.path()));
+        for(const auto& file:std::filesystem::directory_iterator(
+                directory.path(),std::filesystem::directory_options::skip_permission_denied)) {
+            job.check();
+            if(neoshared::bif::LooseArchiveCatalog::hasSupportedExtension(file.path())&&file.is_regular_file())
+                paths.push_back(file.path());
+        }
+    }
+    return paths;
+}
 
 struct Mount {
     neoshared::bif::LooseArchiveCatalog catalog;
@@ -79,6 +97,10 @@ struct Mount {
         return {};
     }
 };
+struct VoiceIndex {
+    Mount mount;
+    std::vector<std::map<std::string,std::vector<std::size_t>>> paths;
+};
 struct InstallationState {
     neoshared::game::GameInstall installation;
     model::GameVersion game{model::GameVersion::Kotor2};
@@ -87,11 +109,48 @@ struct InstallationState {
     Index keyIndex;
     Mount globals;
     Mount overrides;
-    Mount voices;
-    std::vector<std::map<std::string,std::vector<std::size_t>>> voicePaths;
+    std::vector<neoshared::override_aliases::OverrideRoot> overrideRoots;
+    std::once_flag voiceOnce;
+    std::unique_ptr<VoiceIndex> voices;
     std::string identity;
     std::vector<ModuleScope> modules;
     std::vector<std::string> diagnostics;
+
+    const VoiceIndex& voiceIndex(const neoshared::bif::JobControl& job) {
+        std::call_once(voiceOnce,[&] {
+            job.update(0,0,"Indexing dialogue voice streams");
+            auto next=std::make_unique<VoiceIndex>();
+            std::vector<neoshared::override_aliases::OverrideRoot> roots;
+            const std::string folder=game==model::GameVersion::Kotor1?"streamwaves":"streamvoice";
+            const std::string alias=game==model::GameVersion::Kotor1?"STREAMWAVES":"STREAMVOICE";
+            const auto directory=[&](const Path& parent) {
+                if(!std::filesystem::is_directory(parent)) return parent/folder;
+                return uniqueResourceDirectory(parent,folder).value_or(parent/folder);
+            };
+            roots.push_back({alias,directory(root),{},0,false});
+            // K1 Play resolves HD0:STREAMWAVES once; its InitializeSource has
+            // no K2 streamvoice override-directory loop (Desktop 0x3bfdae).
+            if(game==model::GameVersion::Kotor2)for(const auto& overrideRoot:overrideRoots) {
+                auto voice=overrideRoot;voice.path=directory(overrideRoot.path);
+                voice.alias=alias+" / "+overrideRoot.alias;voice.precedence=roots.size();
+                roots.push_back(std::move(voice));
+            }
+            next->mount.openOverrides(root,roots,job);
+            for(const auto& archive:next->mount.catalog.archives()) {
+                std::map<std::string,std::vector<std::size_t>> index;
+                for(const auto n:archive.resourceIndices) {
+                    job.check();
+                    const auto& item=next->mount.catalog.resources().at(n);
+                    if(item.type==4 || item.type==8)
+                        index[lower(neoshared::genericPathToUtf8(item.directPath.lexically_relative(archive.resolvedPath)))].push_back(n);
+                }
+                next->paths.push_back(std::move(index));
+            }
+            job.check();
+            voices=std::move(next);
+        });
+        return *voices;
+    }
 };
 }
 struct GameResourceSession::State final {
@@ -131,16 +190,11 @@ bool GameResourceSession::open(const neoshared::game::GameInstall& supplied,std:
             b.keyIndex[{lower(r.resref),r.type}].push_back(r.index);
         }
         job.update(0,0,"Discovering module and texture archives");
-        const auto paths=neoshared::bif::LooseArchiveCatalog::scanForArchiveFiles(
-            b.root,std::numeric_limits<std::size_t>::max(),job);
+        const auto paths=installationArchives(b.root,job);
         std::map<std::string,Path> globalFiles;
         std::map<std::string,std::map<std::string,Path>> grouped;
         for(const auto& p:paths) {
             job.check();
-            // Discovery is installation-root scoped, not a recursive save-game
-            // search. Nested backups can contain their own Modules directory.
-            const auto relative=p.lexically_relative(b.root);
-            if(std::distance(relative.begin(),relative.end())!=2)continue;
             const auto folder=lower(neoshared::pathToUtf8(p.parent_path().filename()));
             const auto file=lower(neoshared::pathToUtf8(p.filename()));
             const auto stem=lower(neoshared::pathToUtf8(p.stem()));
@@ -187,36 +241,7 @@ bool GameResourceSession::open(const neoshared::game::GameInstall& supplied,std:
             for(std::size_t n=0;n<aliases.size();++n)aliases[n].precedence=n;
         }
         b.overrides.openOverrides(b.root,aliases,job);
-        // Preserve complete directory/revision snapshots through the shared
-        // reader. Engine voice callers select relative stream paths, rather
-        // than treating nested voice files as flat archive ResRefs.
-        job.update(0,0,"Indexing dialogue voice streams");
-        std::vector<neoshared::override_aliases::OverrideRoot> voices;
-        const std::string voiceFolder=b.game==model::GameVersion::Kotor1?"streamwaves":"streamvoice";
-        const std::string voiceAlias=b.game==model::GameVersion::Kotor1?"STREAMWAVES":"STREAMVOICE";
-        const auto voiceDirectory=[&](const Path& parent) {
-            if(!std::filesystem::is_directory(parent)) return parent/voiceFolder;
-            return uniqueResourceDirectory(parent,voiceFolder).value_or(parent/voiceFolder);
-        };
-        voices.push_back({voiceAlias,voiceDirectory(b.root),{},0,false});
-        // K1 Play resolves HD0:STREAMWAVES once; its InitializeSource has
-        // no K2 streamvoice override-directory loop (Desktop 0x3bfdae).
-        if(b.game==model::GameVersion::Kotor2)for(const auto& root:aliases) {
-            auto voice=root;voice.path=voiceDirectory(root.path);
-            voice.alias=voiceAlias+" / "+root.alias;voice.precedence=voices.size();
-            voices.push_back(std::move(voice));
-        }
-        b.voices.openOverrides(b.root,voices,job);
-        for(const auto& archive:b.voices.catalog.archives()) {
-            std::map<std::string,std::vector<std::size_t>> index;
-            for(const auto n:archive.resourceIndices) {
-                job.check();
-                const auto& item=b.voices.catalog.resources().at(n);
-                if(item.type==4 || item.type==8)
-                    index[lower(neoshared::genericPathToUtf8(item.directPath.lexically_relative(archive.resolvedPath)))].push_back(n);
-            }
-            b.voicePaths.push_back(std::move(index));
-        }
+        b.overrideRoots=std::move(aliases);
 
         for(const auto& root:b.overrides.catalog.archives()) {
             job.check();
@@ -323,28 +348,30 @@ ResourceResolver GameResourceSession::voiceResolver() const {
         const auto& job=resourceLoadJob();job.check();
         const auto stem=resourceKey(name);
         auto& b=*state->base;
+        if(type!=4&&type!=8) return {};
+        const auto& voices=b.voiceIndex(job);
         const auto relative=std::filesystem::path(dialogueVoicePath(stem,b.game)).lexically_normal().generic_string();
         const auto nested=dialogueVoiceUsesOverridePaths(stem,b.game);
         const auto overrideCount=nested?std::min<std::size_t>(
             32u,
-            b.voicePaths.empty()?0u:b.voicePaths.size()-1u):0u;
+            voices.paths.empty()?0u:voices.paths.size()-1u):0u;
         const auto read=[&](std::size_t root,const char* extension)
             ->std::optional<neoshared::ResourceDocument> {
             job.check();
-            if(root>=b.voicePaths.size()) return {};
-            const auto found=b.voicePaths[root].find(relative+extension);
-            if(found==b.voicePaths[root].end()) return {};
+            if(root>=voices.paths.size()) return {};
+            const auto found=voices.paths[root].find(relative+extension);
+            if(found==voices.paths[root].end()) return {};
             if(found->second.size()!=1)
                 throw std::runtime_error("Ambiguous dialogue voice path: "+relative+extension);
             const auto index=found->second.front();
-            const auto& item=b.voices.catalog.resources().at(index);
+            const auto& item=voices.mount.catalog.resources().at(index);
             // InitializeSource tries the next engine path when fopen fails.
             std::ifstream probe(item.directPath,std::ios::binary);
             if(!probe) return {};
             probe.close();
-            auto result=neoshared::bif::readResourceDocument(b.key,b.voices.catalog,
+            auto result=neoshared::bif::readResourceDocument(b.key,voices.mount.catalog,
                 {neoshared::bif::ResourceSource::LooseArchive,index},job);
-            const auto& owner=b.voices.catalog.archives().at(item.archiveIndex);
+            const auto& owner=voices.mount.catalog.archives().at(item.archiveIndex);
             result.identity=state->identity+component("voice")+component(result.identity);
             result.sourceDescription="[engine voice / "+owner.overrideAlias+"] "+result.sourceDescription;
             return result;
@@ -355,7 +382,6 @@ ResourceResolver GameResourceSession::voiceResolver() const {
             return read(0,".wav");
         };
         if(type==4) return wav();
-        if(type!=8) return {};
         if(b.game==model::GameVersion::Kotor1) {
             // The desktop compressed-voice request opens the base WAV stream.
             return read(0,".wav");
