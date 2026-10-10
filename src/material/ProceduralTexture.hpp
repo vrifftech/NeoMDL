@@ -1,5 +1,5 @@
 #pragma once
-#include <material/Material.hpp>
+#include <neoshared/material/Material.hpp>
 #include <material/Runtime.hpp>
 #include <array>
 #include <cstdint>
@@ -13,7 +13,7 @@ namespace neomdl::material {
 
 struct ProcedureDefinition {
     EngineMaterialGame game{EngineMaterialGame::Kotor2};
-    std::optional<ProcedureType> type;
+    std::optional<neoshared::material::ProcedureType> type;
     int defaultWidth{2}, defaultHeight{2}, numX{1}, numY{1};
     bool distort{}, distortAngle{true};
     // Texture-owned flags survive replacement of the controller object.
@@ -23,7 +23,7 @@ struct ProcedureDefinition {
     float forceCycleSpeed{57.2957763671875f}, angleCycleSpeed{2.864788770675659f};
     std::vector<float> channelScale, channelTranslate;
 };
-ProcedureDefinition procedureDefinition(const TxiMetadata&,
+ProcedureDefinition procedureDefinition(const neoshared::material::TxiMetadata&,
     EngineMaterialGame = EngineMaterialGame::Kotor2);
 
 struct DirtyTextureInputs {

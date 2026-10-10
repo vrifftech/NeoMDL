@@ -3,7 +3,7 @@
 #include "core/ResourceContext.hpp"
 #include <model/Model.hpp>
 #include <model/Lighting.hpp>
-#include <material/Material.hpp>
+#include <neoshared/material/Material.hpp>
 #include <neoshared/texture/Image.hpp>
 
 #include <filesystem>
@@ -183,10 +183,10 @@ public:
                             std::string& error);
     bool runtimeTextureTxiAvailable(const std::string& resref) const;
     // Read-only metadata snapshots. No image payloads or GPU objects are copied.
-    neomdl::material::TextureMetadataPtr textureMetadata(const std::string& resref) const;
+    neoshared::material::TextureMetadataPtr textureMetadata(const std::string& resref) const;
     std::size_t materialCount() const noexcept { return materials_.size(); }
-    const neomdl::material::Material& material(std::size_t meshIndex) const;
-    const neomdl::material::Material& referenceMaterial(
+    const neoshared::material::Material& material(std::size_t meshIndex) const;
+    const neoshared::material::Material& referenceMaterial(
         std::size_t instanceIndex, std::size_t meshIndex) const;
     std::vector<std::filesystem::path> openPaths() const;
     // Immutable, shared model assets. A particle owns pose/time, not another
@@ -235,10 +235,10 @@ private:
     std::vector<neomdl::model::AnimationReference> animations_;
     std::unordered_map<std::string, neoshared::texture::TextureData> textures_;
     std::vector<std::string> textureLoadOrder_;
-    std::unordered_map<std::string, neomdl::material::TextureMetadataPtr> textureMetadata_;
+    std::unordered_map<std::string, neoshared::material::TextureMetadataPtr> textureMetadata_;
     std::unordered_map<std::string, bool> textureTxiAvailable_;
-    std::vector<neomdl::material::Material> materials_;
-    std::vector<std::vector<neomdl::material::Material>> referenceMaterials_;
+    std::vector<neoshared::material::Material> materials_;
+    std::vector<std::vector<neoshared::material::Material>> referenceMaterials_;
     std::vector<std::string> messages_;
     std::string appearanceEnvironmentMap_;
 };

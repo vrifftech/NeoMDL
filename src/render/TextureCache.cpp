@@ -20,7 +20,7 @@ constexpr g::Enum luminance=0x1909,rgb=0x1907,rgba=0x1908,
 bool samplerSpace(char ch) {
     return ch==' '||ch=='\t'||ch=='\r'||ch=='\n'||ch=='\v'||ch=='\f';
 }
-void engineSamplerFields(material::TxiMetadata& metadata) {
+void engineSamplerFields(neoshared::material::TxiMetadata& metadata) {
     auto& properties=metadata.properties;
     properties.mipmap=true;properties.filter=true;properties.clamp=0;
     const auto& text=metadata.sourceText;
@@ -69,7 +69,7 @@ void engineSamplerFields(material::TxiMetadata& metadata) {
 std::uint16_t engineTextureHash(const neoshared::texture::TextureData& texture) {
     // AurTextureCalculateHashID, zero palette-scheme entries: K1 Desktop 0x36cfdc,
     // K2 Desktop 0xbbf7f. Resources use ASCII ResRefs.
-    const auto name=material::textureResourceKey(texture.sourcePath.stem().u8string());
+    const auto name=neoshared::material::textureResourceKey(texture.sourcePath.stem().u8string());
     std::uint32_t hash=0;
     for(const unsigned char c:name)hash=(hash?hash*c:c)%65101u;
     return static_cast<std::uint16_t>(hash);
@@ -134,7 +134,7 @@ bool TextureCache::initialize(const gl::Loader& loader,std::string& error) {
     return ready_;
 }
 GpuTexture TextureCache::uploadProcessed(const neoshared::texture::TextureData& texture,
-                            const neomdl::material::TextureMetadata* metadata,
+                            const neoshared::material::TextureMetadata* metadata,
                             std::size_t layer,std::string& error,bool engineProcedure) {
     error.clear();
     if(!ready_){error="Texture upload context is not initialized";return {};}
@@ -190,7 +190,7 @@ GpuTexture TextureCache::uploadProcessed(const neoshared::texture::TextureData& 
     if(!result.id){error="OpenGL could not allocate a processed texture";return {};}
     const auto target=cube?g::TextureCube:g::Texture2D;
     api_.BindTexture(target,result.id);
-    const auto txi=metadata?metadata->txi:material::makeTextureMetadata(texture).txi;
+    const auto txi=metadata?metadata->txi:neoshared::material::makeTextureMetadata(texture).txi;
     const bool filter=txi.properties.filter.value_or(true);
     const bool mipmap=txi.properties.mipmap.value_or(true);
     if(cube) {
@@ -236,7 +236,7 @@ GpuTexture TextureCache::uploadProcessed(const neoshared::texture::TextureData& 
 }
 
 GpuTexture TextureCache::upload(const neoshared::texture::TextureData& texture,
-                            const neomdl::material::TextureMetadata* metadata,
+                            const neoshared::material::TextureMetadata* metadata,
                             std::size_t layer,std::string& error,bool engineProcedure) {
     error.clear();
     if(!ready_) {error="Texture upload context is not initialized";return {};}
@@ -245,7 +245,7 @@ GpuTexture TextureCache::upload(const neoshared::texture::TextureData& texture,
         // GLRender::CreateTexture and CreateCubeTexture consume the engine
         // source component layout. Decoded RGBA
         // is the editor representation, not a replacement upload encoding.
-        const auto txi=metadata?metadata->txi:material::parseMaterialTxi(texture.txi);
+        const auto txi=metadata?metadata->txi:neoshared::material::parseMaterialTxi(texture.txi);
         const bool cube=texture.cubeMap||txi.properties.cube.value_or(false);
         if(cube)layer=0;
         if(const auto found=entries_.find(&texture);found!=entries_.end()) {
@@ -280,7 +280,7 @@ GpuTexture TextureCache::upload(const neoshared::texture::TextureData& texture,
                 const bool glu=mip&&!normal&&(cube||(!automatic&&face.bytesPerPixel!=2));
                 if(normal)plans.push_back(material::procedureNormalLevels(face,
                     txi.properties.bumpMapScaling.value_or(1.0f),
-                    txi.properties.bumpMapKind==material::BumpMapKind::AuthoredNormal));
+                    txi.properties.bumpMapKind==neoshared::material::BumpMapKind::AuthoredNormal));
                 else if(glu)plans.push_back(material::procedureMipLevels(face,
                     material::ProcedureMipKernel::GluByte,unsigned(gluMaximum)));
                 else if(mip&&!automatic)plans.push_back(material::procedureMipLevels(face,material::ProcedureMipKernel::AurUpdate));
@@ -432,7 +432,7 @@ bool TextureCache::makeCurrent(const std::vector<ProcedureRegistration>& request
     return error.empty();
 }
 GpuTexture TextureCache::get(const neoshared::texture::TextureData& texture,
-                            const material::TextureMetadata* metadata,
+                            const neoshared::material::TextureMetadata* metadata,
                             std::size_t layer,std::string& error) {
     error.clear();
     if(!ready_){error="Texture upload context is not initialized";return {};}
@@ -444,21 +444,21 @@ GpuTexture TextureCache::get(const neoshared::texture::TextureData& texture,
         // A supplied metadata object is the caller's authoritative state.
         // Implicit resource metadata needs CAurTextureBasic's physical-line
         // sampler scan, which differs from the shared editor's CR tokenizer.
-        std::optional<material::TextureMetadata> implicitMetadata;
+        std::optional<neoshared::material::TextureMetadata> implicitMetadata;
         if(!metadata&&engineRuntime_) {
-            implicitMetadata=material::makeTextureMetadata(texture);
+            implicitMetadata=neoshared::material::makeTextureMetadata(texture);
             engineSamplerFields(implicitMetadata->txi);
             metadata=&*implicitMetadata;
         }
-        const auto definition=material::procedureDefinition(metadata?metadata->txi:material::parseMaterialTxi(texture.txi),engineGame_);
+        const auto definition=material::procedureDefinition(metadata?metadata->txi:neoshared::material::parseMaterialTxi(texture.txi),engineGame_);
         if(definition.volumeTexture && (!definition.type ||
-           (*definition.type!=material::ProcedureType::Dirty && *definition.type!=material::ProcedureType::Dirty2 && *definition.type!=material::ProcedureType::Dirty3)))
+           (*definition.type!=neoshared::material::ProcedureType::Dirty && *definition.type!=neoshared::material::ProcedureType::Dirty2 && *definition.type!=neoshared::material::ProcedureType::Dirty3)))
             throw std::invalid_argument("A prior Dirty procedure left a engine 3D texture flag with no matching volume consumer");
         if(definition.volumeTexture)dirtySources_.insert(&texture);
         if(!definition.type)return upload(texture,metadata,layer,error);
         if(!engineRuntime_)throw std::invalid_argument("Procedural runtime requires a verified game and platform controller");
         const bool cube=texture.cubeMap || (metadata && metadata->txi.properties.cube.value_or(false)) ||
-            (!metadata && material::parseMaterialTxi(texture.txi).properties.cube.value_or(false));
+            (!metadata && neoshared::material::parseMaterialTxi(texture.txi).properties.cube.value_or(false));
         const auto stream=neoshared::texture::scanTxiStream(metadata?metadata->txi.sourceText:texture.txi);
         if(std::any_of(stream.begin(),stream.end(),[](const auto& row){return row.binary;}) &&
            texture.txiStorage!=neoshared::texture::TxiStorage::Sidecar)
@@ -467,7 +467,7 @@ GpuTexture TextureCache::get(const neoshared::texture::TextureData& texture,
             throw std::invalid_argument("Dirty volume and procedural cube flags select incompatible engine storage");
         if(definition.volumeTexture&&(definition.numX!=1||definition.numY!=1))
             throw std::invalid_argument("Engine multi-TID volume crops have no established complete 3D source span");
-        const bool cycle=*definition.type==material::ProcedureType::Cycle;
+        const bool cycle=*definition.type==neoshared::material::ProcedureType::Cycle;
         const auto storage=material::procedureStorageDescriptor(texture,definition,cube);
         const bool processed=storage.provenance==material::ProcedureStorageProvenance::ProcessedPayload;
         const bool blockCompressed=storage.compression!=material::ProcedureCompressionCodec::None;
@@ -493,7 +493,7 @@ GpuTexture TextureCache::get(const neoshared::texture::TextureData& texture,
             throw std::invalid_argument("Processed Cycle TID count disagrees with the retained engine source surfaces");
         const bool directCycle=processedDirectCycle||decodedCompressedCycle;
         auto record=std::make_unique<ProcedureRecord>();record->source=&texture;
-        record->metadata=metadata?*metadata:material::makeTextureMetadata(texture);
+        record->metadata=metadata?*metadata:neoshared::material::makeTextureMetadata(texture);
         auto& r=*record;r.storage=storage;r.engineHash=engineTextureHash(texture);
         r.metadata.txi.properties.mipmap=r.metadata.txi.properties.mipmap.value_or(true);
         if(processed&&!cycle&&!definition.volumeTexture&&r.metadata.txi.properties.mipmap.value_or(true)) {
@@ -528,10 +528,10 @@ GpuTexture TextureCache::get(const neoshared::texture::TextureData& texture,
             const bool runtimeMips=r.storage.mipOwnership==material::ProcedureMipOwnership::RuntimeGenerated;
             if(initial.bytesPerPixel==2&&!cube&&!cycle&&!r.normalUpload&&!mip)
                 throw std::invalid_argument("Engine non-mipmapped packed-4444 update passes RGBA/UBYTE over a two-byte image (overread)");
-            if(*definition.type==material::ProcedureType::Arturo&&r.normalUpload&&
-               r.metadata.txi.properties.bumpMapKind==material::BumpMapKind::AuthoredNormal)
+            if(*definition.type==neoshared::material::ProcedureType::Arturo&&r.normalUpload&&
+               r.metadata.txi.properties.bumpMapKind==neoshared::material::BumpMapKind::AuthoredNormal)
                 throw std::invalid_argument("Engine Arturo supplies one height byte per pixel to an authored-normal reader that requires four (overread)");
-            if(*definition.type==material::ProcedureType::Arturo&&definition.bumpTexture&&initial.bytesPerPixel!=1&&
+            if(*definition.type==neoshared::material::ProcedureType::Arturo&&definition.bumpTexture&&initial.bytesPerPixel!=1&&
                (cube||definition.numX!=1||definition.numY!=1))
                 throw std::invalid_argument("Engine Arturo height pointer is shorter than the tiled/cube BPP source span");
             // All crop, normal and explicit mip domains are validated BEFORE
@@ -539,7 +539,7 @@ GpuTexture TextureCache::get(const neoshared::texture::TextureData& texture,
             const auto tids=material::procedureTidImages(initial,nx,ny,cube,r.cubeLayout);
             for(const auto& faces:tids)for(const auto& face:faces) {
                 if(r.normalUpload)(void)material::procedureNormalLevels(face,r.metadata.txi.properties.bumpMapScaling.value_or(1.0f),
-                    r.metadata.txi.properties.bumpMapKind==material::BumpMapKind::AuthoredNormal);
+                    r.metadata.txi.properties.bumpMapKind==neoshared::material::BumpMapKind::AuthoredNormal);
                 else if(runtimeMips&&mip&&(cube||!automaticMipmaps())) {
                     (void)material::procedureMipLevels(face,cube||initial.bytesPerPixel!=2?material::ProcedureMipKernel::GluByte:material::ProcedureMipKernel::AurUpdate);
                     if(!cycle&&!cube)(void)material::procedureMipLevels(face,material::ProcedureMipKernel::AurUpdate);
@@ -624,7 +624,7 @@ bool TextureCache::uploadProcedure(ProcedureRecord& r,std::string& error) {
     std::vector<material::ProcedureImage> normal;
     if(r.normalUpload) {
         try {normal=material::procedureNormalLevels(image,r.metadata.txi.properties.bumpMapScaling.value_or(1.0f),
-            r.metadata.txi.properties.bumpMapKind==material::BumpMapKind::AuthoredNormal);}
+            r.metadata.txi.properties.bumpMapKind==neoshared::material::BumpMapKind::AuthoredNormal);}
         catch(const std::exception& exception){error=exception.what();return false;}
     }
     if(!volume && r.uploadedRevision==r.controller.revision())return true;
@@ -642,7 +642,7 @@ bool TextureCache::uploadProcedure(ProcedureRecord& r,std::string& error) {
     if(volume) {
         target.depth=image.depth;target.dirtyInputs=r.controller.initializedDirtyInputs();
         const auto kind=*r.controller.definition().type;
-        target.dirtySlot=kind==material::ProcedureType::Dirty?0u:kind==material::ProcedureType::Dirty2?1u:2u;
+        target.dirtySlot=kind==neoshared::material::ProcedureType::Dirty?0u:kind==neoshared::material::ProcedureType::Dirty2?1u:2u;
     }
     if(r.normalUpload) {target.engineNormal=true;target.width=normal[0].width;target.height=normal[0].height;}
     UploadState restore(api_);
@@ -727,7 +727,7 @@ bool TextureCache::uploadPixelTids(ProcedureRecord& r,std::string& error) {
             p.glu=explicitMips&&(r.cube||(!updating&&face.bytesPerPixel!=2));
             if(r.normalUpload)p.levels=material::procedureNormalLevels(face,
                 r.metadata.txi.properties.bumpMapScaling.value_or(1.0f),
-                r.metadata.txi.properties.bumpMapKind==material::BumpMapKind::AuthoredNormal);
+                r.metadata.txi.properties.bumpMapKind==neoshared::material::BumpMapKind::AuthoredNormal);
             else if(explicitMips) p.levels=material::procedureMipLevels(face,
                 r.cube||(!updating&&face.bytesPerPixel!=2)?material::ProcedureMipKernel::GluByte:material::ProcedureMipKernel::AurUpdate,
                 unsigned(gluMaximum));
@@ -921,7 +921,7 @@ bool TextureCache::bind(MeshDrawParameters& p,std::string& error) {
         if(!use(p.bumpTexture,&p.material.bumpUv))return false;
         const auto found=procedureIds_.find(p.bumpTexture);
         if(found!=procedureIds_.end() && found->second->normalUpload)
-            p.material.bumpKind=material::BumpMapKind::AuthoredNormal;
+            p.material.bumpKind=neoshared::material::BumpMapKind::AuthoredNormal;
     }
     if(p.material.useEnvironmentMap&&!use(p.environmentTexture,nullptr,true))return false;
     return true;

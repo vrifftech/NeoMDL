@@ -18,21 +18,21 @@ std::string lower(std::string s) {
 std::string firstWord(const std::string& text) { std::istringstream s(text);std::string r;s>>r;return r; }
 bool scan(const std::string& s,float& v) {float f{};if(std::sscanf(s.c_str(),"%f",&f)!=1)return false;v=f;return true;}
 bool scan(const std::string& s,int& v) {int n{};if(std::sscanf(s.c_str(),"%d",&n)!=1)return false;v=n;return true;}
-std::optional<ProcedureType> type(const std::string& s,EngineMaterialGame game) {
-    static const std::pair<const char*,ProcedureType> types[]{
-        {"water",ProcedureType::Water},{"life",ProcedureType::Life},{"perlin",ProcedureType::Perlin},
-        {"arturo",ProcedureType::Arturo},{"wave",ProcedureType::Wave},{"cycle",ProcedureType::Cycle},
-        {"random",ProcedureType::Random},{"ringtexdistort",ProcedureType::RingTexDistort},
-        {"dirty",ProcedureType::Dirty},{"dirty2",ProcedureType::Dirty2},{"dirty3",ProcedureType::Dirty3}};
+std::optional<neoshared::material::ProcedureType> type(const std::string& s,EngineMaterialGame game) {
+    static const std::pair<const char*,neoshared::material::ProcedureType> types[]{
+        {"water",neoshared::material::ProcedureType::Water},{"life",neoshared::material::ProcedureType::Life},{"perlin",neoshared::material::ProcedureType::Perlin},
+        {"arturo",neoshared::material::ProcedureType::Arturo},{"wave",neoshared::material::ProcedureType::Wave},{"cycle",neoshared::material::ProcedureType::Cycle},
+        {"random",neoshared::material::ProcedureType::Random},{"ringtexdistort",neoshared::material::ProcedureType::RingTexDistort},
+        {"dirty",neoshared::material::ProcedureType::Dirty},{"dirty2",neoshared::material::ProcedureType::Dirty2},{"dirty3",neoshared::material::ProcedureType::Dirty3}};
     for(const auto& p:types) if(s==p.first) {
         if(game==EngineMaterialGame::Kotor1 &&
-           (p.second==ProcedureType::Dirty||p.second==ProcedureType::Dirty2||p.second==ProcedureType::Dirty3))
+           (p.second==neoshared::material::ProcedureType::Dirty||p.second==neoshared::material::ProcedureType::Dirty2||p.second==neoshared::material::ProcedureType::Dirty3))
             return {}; // Engine K1 factory leaves its destroyed controller null.
         return p.second;
     }
     return {};
 }
-bool isDirty(ProcedureType t) {return t==ProcedureType::Dirty||t==ProcedureType::Dirty2||t==ProcedureType::Dirty3;}
+bool isDirty(neoshared::material::ProcedureType t) {return t==neoshared::material::ProcedureType::Dirty||t==neoshared::material::ProcedureType::Dirty2||t==neoshared::material::ProcedureType::Dirty3;}
 std::size_t checkedProduct(std::size_t a,std::size_t b) {
     if(b&&a>std::numeric_limits<std::size_t>::max()/b)
         throw std::length_error("Procedural image storage size overflows");
@@ -100,10 +100,10 @@ void validateDefinition(const ProcedureDefinition& d) {
 }
 }
 
-ProcedureDefinition procedureDefinition(const TxiMetadata& metadata,EngineMaterialGame game) {
+ProcedureDefinition procedureDefinition(const neoshared::material::TxiMetadata& metadata,EngineMaterialGame game) {
     // Only a live controller consumes Parse<float>'s packed payload. With no
     // controller the engine outer reader would interpret those bytes as text.
-    std::optional<ProcedureType> active;
+    std::optional<neoshared::material::ProcedureType> active;
     for(const auto& row:neoshared::texture::scanTxiStream(metadata.sourceText)) {
         if(row.listData)continue;
         if(row.key=="proceduretype"&&!firstWord(row.value).empty())active=type(firstWord(row.value),game);
@@ -142,13 +142,13 @@ ProcedureDefinition procedureDefinition(const TxiMetadata& metadata,EngineMateri
         if(key=="distort"||key=="distortangle") {int v{};if(scan(value,v)){if(key=="distort")d.distort=v!=0;else d.distortAngle=v!=0;}}
         else if(key=="distortionamplitude")scan(value,d.distortionAmplitude);
         else if(key=="speed")scan(value,d.speed);
-        else if(key=="fps" && *d.type==ProcedureType::Cycle)scan(value,d.fps);
-        else if(key=="waterwidth" && *d.type==ProcedureType::Water)scan(value,d.waterWidth);
-        else if(key=="waterheight" && *d.type==ProcedureType::Water)scan(value,d.waterHeight);
-        else if(key=="forcecyclespeed" && *d.type==ProcedureType::Water)scan(value,d.forceCycleSpeed);
-        else if(key=="anglecyclespeed" && *d.type==ProcedureType::Water)scan(value,d.angleCycleSpeed);
-        else if(key=="arturowidth" && *d.type==ProcedureType::Arturo)scan(value,d.arturoWidth);
-        else if(key=="arturoheight" && *d.type==ProcedureType::Arturo)scan(value,d.arturoHeight);
+        else if(key=="fps" && *d.type==neoshared::material::ProcedureType::Cycle)scan(value,d.fps);
+        else if(key=="waterwidth" && *d.type==neoshared::material::ProcedureType::Water)scan(value,d.waterWidth);
+        else if(key=="waterheight" && *d.type==neoshared::material::ProcedureType::Water)scan(value,d.waterHeight);
+        else if(key=="forcecyclespeed" && *d.type==neoshared::material::ProcedureType::Water)scan(value,d.forceCycleSpeed);
+        else if(key=="anglecyclespeed" && *d.type==neoshared::material::ProcedureType::Water)scan(value,d.angleCycleSpeed);
+        else if(key=="arturowidth" && *d.type==neoshared::material::ProcedureType::Arturo)scan(value,d.arturoWidth);
+        else if(key=="arturoheight" && *d.type==neoshared::material::ProcedureType::Arturo)scan(value,d.arturoHeight);
         else if(key=="channelscale"||key=="channeltranslate") {
             auto& a=key=="channelscale"?d.channelScale:d.channelTranslate;
             int n{};char packed{};const int fields=std::sscanf(value.c_str(),"%d %c",&n,&packed);
@@ -212,33 +212,33 @@ bool ProceduralTexture::initialize(const ProcedureDefinition& d,const ProcedureI
         if(source.bytesPerPixel<1||source.bytesPerPixel>4||source.bytes.size()!=checkedProduct(count,source.bytesPerPixel))
             throw std::invalid_argument("Engine procedural source has inconsistent byte storage");
         if(source.depth!=1)throw std::invalid_argument("Controller input must be a engine 2D image before Dirty initialization");
-        if(*d.type==ProcedureType::Perlin && source.width!=source.height)
+        if(*d.type==neoshared::material::ProcedureType::Perlin && source.width!=source.height)
             throw std::invalid_argument("Engine Perlin writes width squared; nonsquare images are unsupported rather than overrun");
-        if(*d.type==ProcedureType::Water) {
+        if(*d.type==neoshared::material::ProcedureType::Water) {
             checkedPixels(d.waterWidth,d.waterHeight);
             if(d.waterWidth!=d.waterHeight)throw std::invalid_argument("Engine water solver uses width for both axes; nonsquare grids are unsupported");
         }
-        if(*d.type==ProcedureType::Arturo) {
+        if(*d.type==neoshared::material::ProcedureType::Arturo) {
             checkedPixels(d.arturoWidth,d.arturoHeight);
             if(!d.distort)throw std::invalid_argument("Engine non-distorted Arturo uploads an unwritten height buffer; no synthetic output is supplied");
         }
-        if((*d.type==ProcedureType::Life||*d.type==ProcedureType::RingTexDistort||isDirty(*d.type)) && source.bytesPerPixel!=4)
+        if((*d.type==neoshared::material::ProcedureType::Life||*d.type==neoshared::material::ProcedureType::RingTexDistort||isDirty(*d.type)) && source.bytesPerPixel!=4)
             throw std::invalid_argument("This engine controller writes four bytes per pixel; a non-RGBA source is unsupported");
         dirtyInputs_.reset();
         definition_=d;definition_.volumeTexture=isDirty(*d.type);image_=source;snapshot_=source;
-        height_.assign(count,0);lastToken_=*d.type==ProcedureType::Arturo?-1:0;
+        height_.assign(count,0);lastToken_=*d.type==neoshared::material::ProcedureType::Arturo?-1:0;
         phase_=forceAngle_=waveAngle_=0;frame_=0;waterCounter_=0;waterPhase_=2;
         revision_=0;validTexture_=true;
         switch(*d.type) {
-        case ProcedureType::Perlin: buildPerlin(from_,context);buildPerlin(target_,context);break;
-        case ProcedureType::Wave:
+        case neoshared::material::ProcedureType::Perlin: buildPerlin(from_,context);buildPerlin(target_,context);break;
+        case neoshared::material::ProcedureType::Wave:
             current_.resize(count);previous_.assign(count,127.0f);scratch_.resize(count);
             for(auto& f:current_)f=float(context.nextRandom()%256u);
             break;
-        case ProcedureType::Water:
+        case neoshared::material::ProcedureType::Water:
             current_.assign(std::size_t(d.waterWidth)*std::size_t(d.waterHeight),127.0f);
             previous_.assign(current_.size(),0);scratch_.resize(current_.size());target_.resize(count);break;
-        case ProcedureType::Life:
+        case neoshared::material::ProcedureType::Life:
             life_.resize(checkedProduct(count,4));
             for(std::size_t p=0;p<count;++p) {
                 life_[4*p]=context.nextRandom()%100u>=61u?255:0;
@@ -247,7 +247,7 @@ bool ProceduralTexture::initialize(const ProcedureDefinition& d,const ProcedureI
             // Init writes RAM after the original upload. Control later calls
             // glImage(true,NULL), NOT glImage(true,privateLifeBuffer).
             break;
-        case ProcedureType::Arturo: {
+        case neoshared::material::ProcedureType::Arturo: {
             const auto n=std::size_t(d.arturoWidth)*std::size_t(d.arturoHeight);
             current_.resize(n);previous_.assign(n,0);scratch_.resize(n);rowsWritten_.assign(source.height,0);
             for(int y=0;y<d.arturoHeight;++y)for(int x=0;x<d.arturoWidth;++x) {
@@ -261,7 +261,7 @@ bool ProceduralTexture::initialize(const ProcedureDefinition& d,const ProcedureI
             }
             buildArturo(context);buildArturo(context);break;
         }
-        case ProcedureType::Dirty:case ProcedureType::Dirty2:case ProcedureType::Dirty3:dirty(context);++revision_;break;
+        case neoshared::material::ProcedureType::Dirty:case neoshared::material::ProcedureType::Dirty2:case neoshared::material::ProcedureType::Dirty3:dirty(context);++revision_;break;
         default:break;
         }
         initialized_=true;return true;
@@ -494,7 +494,7 @@ void ProceduralTexture::ring(ProcedureContext& context) {
     phase_+=context.elapsed*context.ringSpeed;while(phase_>twoPi)phase_-=twoPi;
 }
 void ProceduralTexture::dirty(ProcedureContext& context) {
-    const auto kind=*definition_.type;const auto index=kind==ProcedureType::Dirty?0u:kind==ProcedureType::Dirty2?1u:2u;
+    const auto kind=*definition_.type;const auto index=kind==neoshared::material::ProcedureType::Dirty?0u:kind==neoshared::material::ProcedureType::Dirty2?1u:2u;
     auto inputs=context.dirty[index];
     // Init stores its formula at +0x40 as a signed byte. Preserve the pinned
     // controller value; later area changes do not rewrite a live controller.
@@ -521,19 +521,19 @@ ProcedureChange ProceduralTexture::control(ProcedureContext& context,std::string
     const auto kind=*definition_.type;
     // Arturo accumulates BEFORE comparing the update token. Multiple binds
     // can therefore affect another instance even within one rendered frame.
-    if(kind==ProcedureType::Arturo) {
+    if(kind==neoshared::material::ProcedureType::Arturo) {
         context.arturoElapsed+=context.elapsed;
 
         if(!(context.arturoElapsed>0.03f))return ProcedureChange::None;
         context.arturoElapsed-=std::floor(context.arturoElapsed/0.03f)*0.03f;
     }
-    if(kind==ProcedureType::Life) {
+    if(kind==neoshared::material::ProcedureType::Life) {
         // Engine LEA/SUB wraps in 32 bits before the signed comparison.
         if(lastToken_>model::engineIntAdd(context.token,-5))return ProcedureChange::None;
     } else if(lastToken_==context.token)return ProcedureChange::None;
     lastToken_=context.token;
     try {
-        if(kind==ProcedureType::Cycle) {
+        if(kind==neoshared::material::ProcedureType::Cycle) {
             phase_+=context.elapsed;
             // Engine division also permits zero/negative fps. Zero -> +inf;
             // negative rates advance once per token, not reverse playback.
@@ -545,23 +545,23 @@ ProcedureChange ProceduralTexture::control(ProcedureContext& context,std::string
             return ProcedureChange::None;
         }
         if(isDirty(kind))return ProcedureChange::None;
-        if(kind==ProcedureType::Life) {
+        if(kind==neoshared::material::ProcedureType::Life) {
             life();validTexture_=false;return ProcedureChange::InvalidTexture;
         }
-        if(kind==ProcedureType::Random)for(auto& b:height_)b=std::uint8_t(context.nextRandom());
-        else if(kind==ProcedureType::Perlin) {
+        if(kind==neoshared::material::ProcedureType::Random)for(auto& b:height_)b=std::uint8_t(context.nextRandom());
+        else if(kind==neoshared::material::ProcedureType::Perlin) {
             phase_+=context.elapsed*4.0f;
             if(phase_>1) {from_=target_;buildPerlin(target_,context);while(phase_>=1)phase_-=1;}
             for(std::size_t p=0;p<height_.size();++p)height_[p]=byteValue(mix(float(from_[p]),float(target_[p]),phase_));
-        } else if(kind==ProcedureType::Wave)wave(context);
-        else if(kind==ProcedureType::Water) {if(!water(context))return ProcedureChange::None;}
-        else if(kind==ProcedureType::Arturo) {
+        } else if(kind==neoshared::material::ProcedureType::Wave)wave(context);
+        else if(kind==neoshared::material::ProcedureType::Water) {if(!water(context))return ProcedureChange::None;}
+        else if(kind==neoshared::material::ProcedureType::Arturo) {
             if(!arturo(context,error))return ProcedureChange::None;
-        } else if(kind==ProcedureType::RingTexDistort) {
+        } else if(kind==neoshared::material::ProcedureType::RingTexDistort) {
             ring(context);++revision_;return ProcedureChange::Image;
         }
-        if((kind==ProcedureType::Water&&image_.bytesPerPixel==1) ||
-           (kind==ProcedureType::Arturo&&definition_.bumpTexture)) {
+        if((kind==neoshared::material::ProcedureType::Water&&image_.bytesPerPixel==1) ||
+           (kind==neoshared::material::ProcedureType::Arturo&&definition_.bumpTexture)) {
             // Arturo supplies its one-byte height pointer to the bump loader.
             // The texture's stored BPP is unchanged; only the active upload span differs.
             std::copy(height_.begin(),height_.end(),image_.bytes.begin());
@@ -640,7 +640,7 @@ std::vector<ProcedureImage> procedureNormalLevels(const ProcedureImage& image,fl
 
 neoshared::texture::TextureData constructProcedureSource(const std::string& txi,const std::string& resref,
                                                         EngineMaterialGame game) {
-    const auto definition=procedureDefinition(parseMaterialTxi(txi),game);
+    const auto definition=procedureDefinition(neoshared::material::parseMaterialTxi(txi),game);
     if(!definition.type)throw std::invalid_argument("TXI-only resource did not construct a engine texture controller");
     const auto count=checkedPixels(definition.defaultWidth,definition.defaultHeight);
     neoshared::texture::TextureData result;

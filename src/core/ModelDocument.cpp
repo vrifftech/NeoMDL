@@ -329,7 +329,7 @@ bool ModelDocument::openResource(neoshared::ResourceDocument resource,
     // bump kind. The decoded materials above remain the runtime render view.
     std::unordered_map<std::string,bool> compilerBumpMaps;
     const auto compilerHasBumpMap=[&](const std::string& primary,model::GameVersion game) {
-        const auto key=material::textureResourceKey(primary);
+        const auto key=neoshared::material::textureResourceKey(primary);
         if(key.empty() || !resolver)return false;
         const auto cacheKey=std::to_string(static_cast<int>(game))+":"+key;
         const auto found=compilerBumpMaps.find(cacheKey);
@@ -337,10 +337,10 @@ bool ModelDocument::openResource(neoshared::ResourceDocument resource,
         bool hasBump=false;
         job.check();
         if(const auto sidecar=resolver(key,kTxiResourceType)) {
-            const auto txi=material::parseAsciiMaterialTxi(bytesToText(sidecar->bytes),
+            const auto txi=neoshared::material::parseAsciiMaterialTxi(bytesToText(sidecar->bytes),
                 game==model::GameVersion::Kotor1);
             hasBump=txi.engineTextureNames &&
-                !material::textureResourceKey(txi.engineTextureNames->bumpMap).empty();
+                !neoshared::material::textureResourceKey(txi.engineTextureNames->bumpMap).empty();
         }
         compilerBumpMaps.emplace(cacheKey,hasBump);
         return hasBump;
@@ -584,20 +584,20 @@ const neoshared::texture::TextureData* ModelDocument::texture(const std::string&
         ? (resourceParent_ ? resourceParent_->texture(resref) : nullptr) : &found->second;
 }
 
-neomdl::material::TextureMetadataPtr ModelDocument::textureMetadata(
+neoshared::material::TextureMetadataPtr ModelDocument::textureMetadata(
     const std::string& resref) const {
-    const auto found = textureMetadata_.find(neomdl::material::textureResourceKey(resref));
+    const auto found = textureMetadata_.find(neoshared::material::textureResourceKey(resref));
     return found == textureMetadata_.end()
         ? (resourceParent_ ? resourceParent_->textureMetadata(resref) : nullptr) : found->second;
 }
 
-const neomdl::material::Material& ModelDocument::material(std::size_t meshIndex) const {
+const neoshared::material::Material& ModelDocument::material(std::size_t meshIndex) const {
     if (meshIndex >= materials_.size())
         throw neomdl::model::ModelError("Material mesh index is outside the loaded model");
     return materials_[meshIndex];
 }
 
-const neomdl::material::Material& ModelDocument::referenceMaterial(
+const neoshared::material::Material& ModelDocument::referenceMaterial(
     std::size_t instanceIndex, std::size_t meshIndex) const {
     if (instanceIndex >= referenceMaterials_.size() ||
         meshIndex >= referenceMaterials_[instanceIndex].size())
@@ -619,8 +619,8 @@ void ModelDocument::rebuildMaterials() {
     for (const auto& key : keys) {
         resourceLoadJob().check();
         if(textureMetadata_.count(key)) continue;
-        auto metadata = std::make_shared<const neomdl::material::TextureMetadata>(
-            neomdl::material::makeTextureMetadata(textures_.at(key)));
+        auto metadata = std::make_shared<const neoshared::material::TextureMetadata>(
+            neoshared::material::makeTextureMetadata(textures_.at(key)));
         for (const auto& issue : metadata->txi.issues) {
             if (issue.severity == neoshared::texture::TxiIssueSeverity::Info) continue;
             messages_.push_back("Material " + key + ": TXI line " +
@@ -628,15 +628,15 @@ void ModelDocument::rebuildMaterials() {
         }
         textureMetadata_.emplace(key, std::move(metadata));
     }
-    const neomdl::material::TextureMetadataLookup lookup = [this](const std::string& key) {
+    const neoshared::material::TextureMetadataLookup lookup = [this](const std::string& key) {
         return textureMetadata(key);
     };
     const auto build = [&lookup](const neomdl::model::Model& model) {
-        std::vector<neomdl::material::Material> result;
+        std::vector<neoshared::material::Material> result;
         result.reserve(model.meshes.size());
         for (const auto& mesh : model.meshes) {
             resourceLoadJob().check();
-            result.push_back(neomdl::material::makeMaterial(mesh.texture0, mesh.texture1, lookup));
+            result.push_back(neoshared::material::makeMaterial(mesh.texture0, mesh.texture1, lookup));
         }
         return result;
     };
@@ -999,20 +999,20 @@ bool ModelDocument::appendLoadedSupermodels(const neomdl::model::Model& model,
 
 std::vector<std::string> ModelDocument::auxiliaryTextures() {
     std::unordered_set<std::string> keys;
-    const auto collect=[&](const neomdl::material::Material& m) {
+    const auto collect=[&](const neoshared::material::Material& m) {
         for(const auto* binding:{&m.bumpMap,&m.environmentMap,&m.bumpyShiny})
             if(!binding->key.empty() && !textures_.count(binding->key))
                 keys.insert(binding->key);
     };
     for(const auto& m:materials_) collect(m);
     for(const auto& instance:referenceMaterials_) for(const auto& m:instance) collect(m);
-    const material::TextureMetadataLookup lookup=[this](const std::string& key) {
+    const neoshared::material::TextureMetadataLookup lookup=[this](const std::string& key) {
         return textureMetadata(key);
     };
     const auto collectAllocations=[&](const model::Model& model) {
         for(const auto& allocation:model.asciiMdxAllocations)
             if(allocation.materialTangents)
-                collect(material::makeMaterial(allocation.primaryTexture,{},lookup));
+                collect(neoshared::material::makeMaterial(allocation.primaryTexture,{},lookup));
     };
     collectAllocations(model_);
     for(const auto& reference:references_) collectAllocations(reference.model);
@@ -1131,7 +1131,7 @@ void ModelDocument::loadTexturesFromResolver(const ResourceResolver& resolver,
 }
 
 bool ModelDocument::runtimeTextureTxiAvailable(const std::string& resref) const {
-    const auto found=textureTxiAvailable_.find(material::textureResourceKey(resref));
+    const auto found=textureTxiAvailable_.find(neoshared::material::textureResourceKey(resref));
     return found!=textureTxiAvailable_.end() ? found->second :
         (resourceParent_ && resourceParent_->runtimeTextureTxiAvailable(resref));
 }
@@ -1139,7 +1139,7 @@ bool ModelDocument::runtimeTextureTxiAvailable(const std::string& resref) const 
 bool ModelDocument::loadRuntimeTexture(const std::string& resref,
     const ResourceResolver& supplied,std::string& error) {
     error.clear();
-    const auto key=material::textureResourceKey(resref);
+    const auto key=neoshared::material::textureResourceKey(resref);
     if(!open_ || key.empty()) {error="Open a model and supply a valid runtime texture ResRef";return false;}
     try {
         auto resolver=resolver_;
@@ -1148,7 +1148,7 @@ bool ModelDocument::loadRuntimeTexture(const std::string& resref,
         const auto* data=texture(key);
         if(!data || !data->hasPixels()) {error="Runtime texture not resolved: "+key;return false;}
         if(textureMetadata_.find(key)==textureMetadata_.end())
-            textureMetadata_.emplace(key,std::make_shared<material::TextureMetadata>(material::makeTextureMetadata(*data)));
+            textureMetadata_.emplace(key,std::make_shared<neoshared::material::TextureMetadata>(neoshared::material::makeTextureMetadata(*data)));
         // A previously loaded TGA may acquire its explicit TXI before an owner
         // effect is enabled. Never infer availability from a non-null wrapper.
         if(!runtimeTextureTxiAvailable(key) && resolver) {
@@ -1157,7 +1157,7 @@ bool ModelDocument::loadRuntimeTexture(const std::string& resref,
                 auto& stored=textures_.at(key);
                 stored.txi=bytesToText(txi->bytes);
                 stored.txiStorage=neoshared::texture::TxiStorage::Sidecar;
-                textureMetadata_[key]=std::make_shared<material::TextureMetadata>(material::makeTextureMetadata(stored));
+                textureMetadata_[key]=std::make_shared<neoshared::material::TextureMetadata>(neoshared::material::makeTextureMetadata(stored));
                 textureTxiAvailable_[key]=true;
             }
         }

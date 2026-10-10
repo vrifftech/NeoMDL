@@ -213,7 +213,7 @@ ProcedureImage procedureSourceImage(const neoshared::texture::TextureData& t,
             if(payload.surfaces.front().levels.empty())
                 throw std::invalid_argument("Processed texture has no base level");
             result=processedImage(payload.surfaces.front().levels.front(),bpp);
-        } else if(d.type==ProcedureType::Cycle&&payload.surfaces.size()==n) {
+        } else if(d.type==neoshared::material::ProcedureType::Cycle&&payload.surfaces.size()==n) {
             if(payload.surfaces.front().levels.empty())
                 throw std::invalid_argument("Processed cycle frame has no base level");
             auto first=processedImage(payload.surfaces.front().levels.front(),bpp);
@@ -252,7 +252,7 @@ ProcedureImage procedureSourceImage(const neoshared::texture::TextureData& t,
             put(result,rotate(face,(4u-turns[i])&3u),0,i*first.height);
         }
     } else if(t.layers.size()==1)result=std::move(first);
-    else if(!cube&&d.type==ProcedureType::Cycle&&t.layers.size()==n) {
+    else if(!cube&&d.type==neoshared::material::ProcedureType::Cycle&&t.layers.size()==n) {
         result=first;result.width=extentProduct(first.width,nx);result.height=extentProduct(first.height,ny);
         result.bytes.resize(imageBytes(result.width,result.height,bpp));
         const bool strip=t.kind==neoshared::texture::TextureFileKind::Tga||t.kind==neoshared::texture::TextureFileKind::Dds;

@@ -25,9 +25,10 @@ endif()
 if(NOT TARGET neoshared::texture)
     message(FATAL_ERROR "NeoMDL requires the shared texture/TXI codec library.")
 endif()
+if(NOT TARGET neoshared::material)
+    message(FATAL_ERROR "NeoMDL requires the shared material/TXI library.")
+endif()
 
-# Model parsing, scene simulation and material policy are used only by NeoMDL.
-# Keeping headless targets does not make them shared tool infrastructure.
 add_subdirectory(src/model)
 add_subdirectory(src/material)
 

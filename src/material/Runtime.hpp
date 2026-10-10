@@ -1,5 +1,5 @@
 #pragma once
-#include <material/Material.hpp>
+#include <neoshared/material/Material.hpp>
 #include <string_view>
 
 namespace neomdl::material {
@@ -37,7 +37,7 @@ enum class TriMeshRenderPath : std::uint8_t {
 
 const char* triMeshRenderPathName(TriMeshRenderPath path) noexcept;
 bool triMeshRenderPathUsesLightmap(TriMeshRenderPath path) noexcept;
-bool engineMaterialHasBumpMap(const Material& material);
+bool engineMaterialHasBumpMap(const neoshared::material::Material& material);
 bool triMeshRenderPathUsesBumpMap(TriMeshRenderPath path) noexcept;
 bool triMeshRenderPathUsesEnvironmentMap(TriMeshRenderPath path) noexcept;
 
@@ -138,13 +138,13 @@ struct K2PartTriMeshSelection {
 // K2 PartTriMesh::GetRenderPath. Texture availability is
 // derived from the resolved Material bindings; no graphics API is required.
 K2PartTriMeshSelection selectK2PartTriMeshRenderPath(
-    const Material& material, const K2PartTriMeshInputs& inputs);
+    const neoshared::material::Material& material, const K2PartTriMeshInputs& inputs);
 // Facts, capability arithmetic and the dispatch ABI are shared. Only the
 // K1 branch tree differs from K2.
 using EnginePartTriMeshInputs = K2PartTriMeshInputs;
 using EnginePartTriMeshSelection = K2PartTriMeshSelection;
 EnginePartTriMeshSelection selectEnginePartTriMeshRenderPath(
-    const Material&, const EnginePartTriMeshInputs&, EngineMaterialGame);
+    const neoshared::material::Material&, const EnginePartTriMeshInputs&, EngineMaterialGame);
 
 struct UvState {
     // For unsplit atlases: repeat locally before scale/offset, with half-texel
@@ -198,7 +198,7 @@ struct RuntimeMaterial {
     bool useLightmap{};
     bool useBumpMap{};
     bool useEnvironmentMap{};
-    BumpMapKind bumpKind{BumpMapKind::None};
+    neoshared::material::BumpMapKind bumpKind{neoshared::material::BumpMapKind::None};
     float bumpScale{1.0f};
     // RenderSkinnedVP reads these from the bump texture itself, without the
     // preview height scaling, diffuse-texture fallback, or value clamps.
@@ -214,14 +214,14 @@ struct RuntimeMaterial {
     float environmentStrength{1.0f};
     UvState diffuseUv, bumpUv;
 };
-UvState evaluateUv(const TextureBinding& binding);
-RuntimeMaterial evaluateMaterial(const Material& material, const SurfaceInputs& surface,
+UvState evaluateUv(const neoshared::material::TextureBinding& binding);
+RuntimeMaterial evaluateMaterial(const neoshared::material::Material& material, const SurfaceInputs& surface,
                                  double seconds);
 RuntimeMaterial evaluateK2PartTriMeshMaterial(
-    const Material& material, const SurfaceInputs& surface,
+    const neoshared::material::Material& material, const SurfaceInputs& surface,
     const K2PartTriMeshInputs& inputs, double seconds);
 RuntimeMaterial evaluateEnginePartTriMeshMaterial(
-    const Material&, const SurfaceInputs&, const EnginePartTriMeshInputs&,
+    const neoshared::material::Material&, const SurfaceInputs&, const EnginePartTriMeshInputs&,
     EngineMaterialGame, double seconds);
 struct QueueKey {
     RenderPass pass{RenderPass::Opaque};

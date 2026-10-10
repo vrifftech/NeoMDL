@@ -337,7 +337,7 @@ void ParticleScene::setDocument(const ModelDocument* document) {
             // Normal=0, PunchThrough=1, every other value (normally
             // Additive/Lighten)=2. This also applies to chunk emitters.
             e->sceneCategory=emitterSceneCategory(*e->data);
-            e->texture=neomdl::material::makeMaterial(e->data->texture,"",
+            e->texture=neoshared::material::makeMaterial(e->data->texture,"",
                 [&](const std::string& key){return document_->textureMetadata(key);}).diffuse;
             e->diagnostic=e->support.supported ? e->data->updateMode+" / "+e->data->renderMode : e->support.reason;
             for(const auto& warning:m::emitterPreviewWarnings(*e->data,*e->properties))

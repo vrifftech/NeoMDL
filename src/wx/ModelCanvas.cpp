@@ -1720,7 +1720,7 @@ bool ModelCanvas::setOwnerVisualEffects(std::size_t owner,const OwnerVisualEffec
         try {
             const auto def=material::procedureDefinition(meta->txi,engineMaterialGame(model.game));
             if(!def.type)return !meta->facts.animated;
-            using P=material::ProcedureType;
+            using P=neoshared::material::ProcedureType;
             return *def.type!=P::Dirty && *def.type!=P::Dirty2 && *def.type!=P::Dirty3 &&
                 *def.type!=P::Life && (*def.type!=P::Arturo || def.distort);
         } catch(const std::exception&) {return false;}
@@ -1735,7 +1735,7 @@ bool ModelCanvas::setOwnerVisualEffects(std::size_t owner,const OwnerVisualEffec
     if(engineOwnerBucket(model,effects)==EngineOwnerBucket::Distortion &&
        (model.game==model::GameVersion::Kotor2 ||
         sceneEffects_.enabled)) {
-        const auto key=material::textureResourceKey(sceneEffects_.forceDistortionTexture);
+        const auto key=neoshared::material::textureResourceKey(sceneEffects_.forceDistortionTexture);
         if(!sceneEffects_.enabled || !validTexture(key)) {
             error="Distortion owners require Engine Scene Effects and a resolved 2D force-distortion texture";return false;
         }
@@ -1776,7 +1776,7 @@ bool ModelCanvas::setSceneEffects(SceneEffectsSettings value,std::string& error,
     }
     if(game==model::GameVersion::Kotor2 && producers&&!value.enabled) {error="Disable owner distortion before disabling the scene-effect graph";return false;}
     for(const auto role:requiredSceneEffectTextures(value,producers,game)) {
-        const auto key=material::textureResourceKey(sceneEffectTextureName(value,role));
+        const auto key=neoshared::material::textureResourceKey(sceneEffectTextureName(value,role));
         const auto* image=document_->texture(key);const auto meta=document_->textureMetadata(key);
         if(!image||!image->hasPixels()||!meta||meta->facts.cubeMap) {
             error=std::string("Scene effects require a resolved 2D ")+sceneEffectTextureLabel(role)+" texture";return false;
@@ -2858,7 +2858,7 @@ void ModelCanvas::animateRenderOwner(LightOwnerId id) {
 
 void ModelCanvas::refreshAnimatedSubmission(render::MeshSubmission& submission,
         const model::Model& asset,const model::Pose& pose,const model::Mat4& world,
-        const model::EngineFrame& frame,float time,std::uint64_t revision,const material::Material& material,
+        const model::EngineFrame& frame,float time,std::uint64_t revision,const neoshared::material::Material& material,
         const ModelDocument* document,const OwnerVisualEffects* effects,
         std::optional<float> textureAngle) {
     const auto& mesh=*submission.mesh;
@@ -3347,7 +3347,7 @@ void ModelCanvas::clearGpuTextures() {
 }
 
 neomdl::render::GpuTexture ModelCanvas::textureFor(
-    const neomdl::material::TextureBinding& binding,std::size_t layer,const ModelDocument* resources) {
+    const neoshared::material::TextureBinding& binding,std::size_t layer,const ModelDocument* resources) {
     const auto* source=resources?resources:document_;
     if(!source || binding.key.empty()) return {};
     const auto* texture=source->texture(binding.key);
@@ -3371,9 +3371,9 @@ neomdl::render::GpuTexture ModelCanvas::textureForResref(
     const std::string& resref,const ModelDocument* resources) {
     const auto* source=resources?resources:document_;
     if (!source) return {};
-    neomdl::material::TextureBinding binding;
+    neoshared::material::TextureBinding binding;
     binding.resref = resref;
-    binding.key = neomdl::material::textureResourceKey(resref);
+    binding.key = neoshared::material::textureResourceKey(resref);
     binding.metadata = source->textureMetadata(resref);
     return textureFor(binding,0,source);
 }
@@ -3555,7 +3555,7 @@ void ModelCanvas::drawScene() {
         // Material::InitializeTextures (Desktop 0xf306a): authored texture slots,
         // then environment, bump and bumpy-shiny references. Registration must
         // not depend on alphabetically sorted resource diagnostics or visibility.
-        const auto registerMaterial=[&](const material::Material& m) {
+        const auto registerMaterial=[&](const neoshared::material::Material& m) {
             for(const auto* binding:{&m.diffuse,&m.lightmap,&m.environmentMap,&m.bumpMap,&m.bumpyShiny})
                 registerTexture(binding->key);
         };
@@ -3868,7 +3868,7 @@ void ModelCanvas::drawScene() {
         sceneSettings.distortionProducerCount=distortionProducerCount_;
         sceneSettings.bindEffectTexture=[this](SceneEffectTexture role,std::string& error)->render::gl::UInt {
             const auto& name=sceneEffectTextureName(sceneEffects_,role);
-            const auto key=material::textureResourceKey(name);
+            const auto key=neoshared::material::textureResourceKey(name);
             const auto* image=document_->texture(key);const auto meta=document_->textureMetadata(key);
             if(!image||!image->hasPixels()||!meta) {error="Unresolved scene-effect texture: "+name;return 0;}
             const auto registered=textureCache_.get(*image,meta.get(),0,error);
@@ -4217,8 +4217,8 @@ bool ModelCanvas::drawEngineLensFlares() {
             } else if(quad.instanceIndex>document_->references().size()) {
                 error="Stale flare owner identity";return 0;
             }
-            material::TextureBinding binding;binding.resref=quad.texture;
-            binding.key=material::textureResourceKey(quad.texture);
+            neoshared::material::TextureBinding binding;binding.resref=quad.texture;
+            binding.key=neoshared::material::textureResourceKey(quad.texture);
             binding.metadata=source->textureMetadata(binding.key);
             const auto* image=source->texture(binding.key);
             if(!image||!image->hasPixels()) {error="Missing authored flare texture: "+quad.texture;return 0;}
@@ -4910,7 +4910,7 @@ void ModelCanvas::retainParticleTextures(const ParticleScene& scene) {
     const auto retain=[&](const std::string& name) {
         if(const auto* image=resource->texture(name))textureCache_.retain(&scene,*image);
     };
-    const auto material=[&](const material::Material& value) {
+    const auto material=[&](const neoshared::material::Material& value) {
         for(const auto* binding:{&value.diffuse,&value.lightmap,&value.environmentMap,
                                  &value.bumpMap,&value.bumpyShiny})retain(binding->key);
     };
@@ -5282,11 +5282,11 @@ void ModelCanvas::queueLightsabers() {
             mat.renderPath=material::TriMeshRenderPath::Flat;
             mat.pass=material::RenderPass::Opaque;mat.blending=true;
             const auto blend=authored.diffuse.metadata ? authored.diffuse.metadata->txi.properties.blending
-                : std::optional<material::BlendDirective>{};
-            mat.blendFunction=blend==material::BlendDirective::Additive ? material::BlendFunction::Additive
-                : blend==material::BlendDirective::PunchThrough ? material::BlendFunction::Replace : material::BlendFunction::Alpha;
-            mat.depthWrite=blend!=material::BlendDirective::Additive;
-            mat.alphaCutoff=blend==material::BlendDirective::PunchThrough ? 0.35f : 0.0f;
+                : std::optional<neoshared::material::BlendDirective>{};
+            mat.blendFunction=blend==neoshared::material::BlendDirective::Additive ? material::BlendFunction::Additive
+                : blend==neoshared::material::BlendDirective::PunchThrough ? material::BlendFunction::Replace : material::BlendFunction::Alpha;
+            mat.depthWrite=blend!=neoshared::material::BlendDirective::Additive;
+            mat.alphaCutoff=blend==neoshared::material::BlendDirective::PunchThrough ? 0.35f : 0.0f;
             mat.textureAlphaIsOpacity=true;
             parameters.engineLightsaberMaterial=true;
             parameters.hasColorOverride=true;
@@ -5637,7 +5637,7 @@ void ModelCanvas::drawTriggerGlyph(bool packedVerified, float scale) {
 
 void ModelCanvas::drawMesh(const neomdl::model::Mesh& mesh,
                            const neomdl::model::DeformedMesh* deformed,
-                           bool selected, const neomdl::material::Material& material,
+                           bool selected, const neoshared::material::Material& material,
                            const neomdl::model::NodeMaterialState& nodeMaterial,
                            neomdl::model::GameVersion game, bool modelFog, LightOwnerId lightOwner,
                            const ModelDocument* resources, float localTime,
@@ -5732,9 +5732,9 @@ void ModelCanvas::drawMesh(const neomdl::model::Mesh& mesh,
             parameters.environmentCube=environment.cube;
         }
         if(ownerEffects&&!ownerEffects->environmentMap.empty()) {
-            neomdl::material::TextureBinding binding;
+            neoshared::material::TextureBinding binding;
             binding.resref=ownerEffects->environmentMap;
-            binding.key=neomdl::material::textureResourceKey(binding.resref);
+            binding.key=neoshared::material::textureResourceKey(binding.resref);
             if(textureSource)binding.metadata=textureSource->textureMetadata(binding.key);
             const auto environment=textureFor(binding,0,resources);
             parameters.environmentTexture=environment.id;

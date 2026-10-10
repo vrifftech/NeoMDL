@@ -479,7 +479,7 @@ private:
     void onCaptureLost(wxMouseCaptureLostEvent& event);
     void initializeGl();
     void clearGpuTextures();
-    neomdl::render::GpuTexture textureFor(const neomdl::material::TextureBinding& binding,
+    neomdl::render::GpuTexture textureFor(const neoshared::material::TextureBinding& binding,
                                          std::size_t layer = 0, const ModelDocument* resources = nullptr);
     neomdl::render::GpuTexture textureForResref(const std::string& resref,
                                                 const ModelDocument* resources = nullptr);
@@ -499,7 +499,7 @@ private:
         const AreaObject* retainedObject,std::optional<std::size_t> retainedReference);
     void refreshAnimatedSubmission(render::MeshSubmission& submission,
         const model::Model& asset,const model::Pose& pose,const model::Mat4& world,
-        const model::EngineFrame& frame,float time,std::uint64_t revision,const material::Material& material,
+        const model::EngineFrame& frame,float time,std::uint64_t revision,const neoshared::material::Material& material,
         const ModelDocument* document,const OwnerVisualEffects* effects,
         std::optional<float> textureAngle = {});
     void resetParticleHistoryForAnimationSeek();
@@ -544,7 +544,7 @@ private:
     void drawTriggerGlyph(bool packedVerified, float scale);
     void drawMesh(const neomdl::model::Mesh& mesh,
                   const neomdl::model::DeformedMesh* deformed,
-                  bool selected, const neomdl::material::Material& material,
+                  bool selected, const neoshared::material::Material& material,
                   const neomdl::model::NodeMaterialState& nodeMaterial,
                   neomdl::model::GameVersion game, bool modelFog, LightOwnerId lightOwner,
                   const ModelDocument* resources = nullptr, float localTime = -1.0f,

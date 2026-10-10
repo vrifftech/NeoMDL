@@ -48,7 +48,7 @@ struct AreaMeshInstance {
     const model::Pose* pose{};
     const model::Mesh* mesh{};
     const model::DeformedMesh* deformed{};
-    const material::Material* material{};
+    const neoshared::material::Material* material{};
     model::NodeMaterialState state;
     model::Mat4 world{model::identityMatrix()}, ownerWorld{model::identityMatrix()};
     model::EngineFrame ownerFrame{};

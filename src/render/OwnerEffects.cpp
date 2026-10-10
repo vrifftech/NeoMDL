@@ -10,8 +10,8 @@ template<class T> bool finite(const T& values) {
     return std::all_of(values.begin(),values.end(),[](float x){return std::isfinite(x);});
 }
 bool finite(model::Vec3 v) { return std::isfinite(v.x)&&std::isfinite(v.y)&&std::isfinite(v.z); }
-const material::TxiProperties& properties(const material::Material& m) {
-    static const material::TxiProperties empty;
+const neoshared::material::TxiProperties& properties(const neoshared::material::Material& m) {
+    static const neoshared::material::TxiProperties empty;
     return m.diffuse.metadata ? m.diffuse.metadata->txi.properties : empty;
 }
 }
@@ -25,10 +25,10 @@ bool validOwnerVisualEffects(const OwnerVisualEffects& e,std::string& error) {
     if(e.instanceOpacity<0.0f||e.instanceOpacity>1.0f) {
         error="Owner instance opacity must be within [0,1]"; return false;
     }
-    if(!e.environmentMap.empty() && material::textureResourceKey(e.environmentMap).empty()) {
+    if(!e.environmentMap.empty() && neoshared::material::textureResourceKey(e.environmentMap).empty()) {
         error="Owner environment-map override is not a valid ResRef"; return false;
     }
-    if(e.shellAmount!=0.0f && material::textureResourceKey(e.shellTexture).empty()) {
+    if(e.shellAmount!=0.0f && neoshared::material::textureResourceKey(e.shellTexture).empty()) {
         error="A bumped-out shell requires a texture ResRef"; return false;
     }
     return true;
@@ -49,7 +49,7 @@ bool hologramTriMeshPathDraws(material::TriMeshRenderPath path) noexcept {
     default: return false;
     }
 }
-material::RuntimeMaterial shellMaterial(const material::TxiMetadata& txi) {
+material::RuntimeMaterial shellMaterial(const neoshared::material::TxiMetadata& txi) {
     material::RuntimeMaterial result;
     result.k2PartTriMeshState=true;
     result.blending=true; // Scene's active blend scope, not SetBlendingMode itself
@@ -104,7 +104,7 @@ void applyEngineDoorAlpha(MeshDrawParameters& p,float alpha) noexcept {
 }
 
 bool configureOwnerVisualEffects(const OwnerVisualEffects& e,const OwnerEffectTextures& textures,
-    const material::Material& authored,const model::NodeMaterialState& state,
+    const neoshared::material::Material& authored,const model::NodeMaterialState& state,
     MeshSubmission& submission,std::string& error) {
     if(!validOwnerVisualEffects(e,error)) return false;
     if(!submission.mesh) {error="Owner effect submission has no mesh";return false;}
@@ -169,7 +169,7 @@ bool configureOwnerVisualEffects(const OwnerVisualEffects& e,const OwnerEffectTe
             // bumpy-shiny and specular-bump branches BEFORE their Holo shader.
             // Plain/environment skins retain Mat's comparison instead.
             p.material.alphaTest=!specializedSkinBump;
-            p.material.alphaCutoff=props.blending==material::BlendDirective::PunchThrough ? 0.35f : 0.0f;
+            p.material.alphaCutoff=props.blending==neoshared::material::BlendDirective::PunchThrough ? 0.35f : 0.0f;
         }
     } else if(k2 && e.perObjectIlluminationEnabled && !mesh.animated) {
         using Path=material::TriMeshRenderPath;

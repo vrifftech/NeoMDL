@@ -1,6 +1,6 @@
 #pragma once
 #include "render/GlApi.hpp"
-#include <material/Material.hpp>
+#include <neoshared/material/Material.hpp>
 #include <material/ProceduralTexture.hpp>
 #include <material/ProcedureStorage.hpp>
 #include <cstdint>
@@ -22,7 +22,7 @@ struct GpuTexture {
 };
 struct ProcedureRegistration {
     const neoshared::texture::TextureData* source;
-    material::TextureMetadataPtr metadata;
+    neoshared::material::TextureMetadataPtr metadata;
 };
 // Context-local image/controller ownership. Source resources and metadata stay
 // immutable; clear with this context current before replacing those resources.
@@ -35,7 +35,7 @@ public:
     bool initialize(const gl::Loader& loader,std::string& error);
     // MakeCurrent/registration: upload and initialize, but do NOT call Control.
     GpuTexture get(const neoshared::texture::TextureData& texture,
-                   const neomdl::material::TextureMetadata* metadata,
+                   const neoshared::material::TextureMetadata* metadata,
                    std::size_t layer,std::string& error);
     // AurTextureMakeCurrent's pending stack: register first requests forward,
     // construct their controllers in reverse. Repeated resource identities do
@@ -84,7 +84,7 @@ public:
 private:
     struct ProcedureRecord {
         const neoshared::texture::TextureData* source{};
-        material::TextureMetadata metadata;
+        neoshared::material::TextureMetadata metadata;
         material::ProceduralTexture controller;
         // Engine-order frames for a strip source; shared decoder data untouched.
         neoshared::texture::TextureData frames;
@@ -99,9 +99,9 @@ private:
         std::string fault;
     };
     GpuTexture upload(const neoshared::texture::TextureData&,
-                      const material::TextureMetadata*,std::size_t,std::string&,bool engineProcedure=false);
+                      const neoshared::material::TextureMetadata*,std::size_t,std::string&,bool engineProcedure=false);
     GpuTexture uploadProcessed(const neoshared::texture::TextureData&,
-                      const material::TextureMetadata*,std::size_t,std::string&,bool engineProcedure);
+                      const neoshared::material::TextureMetadata*,std::size_t,std::string&,bool engineProcedure);
     bool uploadProcedure(ProcedureRecord&,std::string&);
     bool uploadPixelTids(ProcedureRecord&,std::string&);
     GpuTexture selected(ProcedureRecord&,std::string&);

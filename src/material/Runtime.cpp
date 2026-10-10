@@ -7,16 +7,16 @@ namespace neomdl::material {
 namespace {
 float finite(float v, float fallback) { return std::isfinite(v) ? v : fallback; }
 float bounded(float v,float lo,float hi,float fallback) { return std::clamp(finite(v,fallback),lo,hi); }
-const TxiProperties& props(const TextureBinding& b) {
-    static const TxiProperties empty;
+const neoshared::material::TxiProperties& props(const neoshared::material::TextureBinding& b) {
+    static const neoshared::material::TxiProperties empty;
     return b.metadata ? b.metadata->txi.properties : empty;
 }
 
-bool resolvedTexture(const TextureBinding& binding) {
+bool resolvedTexture(const neoshared::material::TextureBinding& binding) {
     return !binding.key.empty() && binding.metadata && binding.metadata->facts.hasPixels;
 }
 
-const TextureBinding& k2EnvironmentBinding(const Material& material) {
+const neoshared::material::TextureBinding& k2EnvironmentBinding(const neoshared::material::Material& material) {
     // Material::InitializeTextures writes both authored names into one runtime
     // slot; envmaptexture is initialized after bumpyshinytexture and therefore
     // wins even when the resulting texture is invalid.
@@ -24,11 +24,11 @@ const TextureBinding& k2EnvironmentBinding(const Material& material) {
         ? material.environmentMap : material.bumpyShiny;
 }
 
-bool k2BumpMap(const Material& material) {
+bool k2BumpMap(const neoshared::material::Material& material) {
     if (!resolvedTexture(material.bumpMap)) return false;
     const auto& properties = props(material.bumpMap);
     const auto kind = properties.engineBumpMapKind.value_or(
-        static_cast<std::int32_t>(properties.bumpMapKind.value_or(BumpMapKind::None)));
+        static_cast<std::int32_t>(properties.bumpMapKind.value_or(neoshared::material::BumpMapKind::None)));
     const auto& facts = material.bumpMap.metadata->facts;
 
 
@@ -38,16 +38,16 @@ bool k2BumpMap(const Material& material) {
         (kind == 2 && facts.engineBytesPerPixel == 4));
 }
 
-bool k2BumpyShinyMap(const Material& material) {
+bool k2BumpyShinyMap(const neoshared::material::Material& material) {
     const auto& binding = k2EnvironmentBinding(material);
     return resolvedTexture(binding) && binding.metadata->facts.cubeMap;
 }
 
-bool k2EnvironmentMap(const Material& material) {
+bool k2EnvironmentMap(const neoshared::material::Material& material) {
     return resolvedTexture(k2EnvironmentBinding(material));
 }
 
-bool k2Lightmap(const Material& material, bool authoredLightmap) {
+bool k2Lightmap(const neoshared::material::Material& material, bool authoredLightmap) {
     if (!authoredLightmap) return false;
     // Material::InitializeTextures always assigns texture slot 1, using the
     // engine NULL texture for an absent/NULL name. GetRenderPath then clears
@@ -55,13 +55,13 @@ bool k2Lightmap(const Material& material, bool authoredLightmap) {
     return resolvedTexture(material.lightmap);
 }
 
-void evaluateBumpFields(RuntimeMaterial& result, const Material& material) {
+void evaluateBumpFields(RuntimeMaterial& result, const neoshared::material::Material& material) {
     const auto& diffuse = props(material.diffuse);
     const auto& bump = props(material.bumpMap);
     if (k2BumpMap(material))
-        result.bumpKind = bump.bumpMapKind.value_or(BumpMapKind::Height);
+        result.bumpKind = bump.bumpMapKind.value_or(neoshared::material::BumpMapKind::Height);
     else
-        result.bumpKind = BumpMapKind::None;
+        result.bumpKind = neoshared::material::BumpMapKind::None;
     result.bumpScale=diffuse.bumpMapScaling.value_or(bump.bumpMapScaling.value_or(1))*
         bump.bumpIntensity.value_or(diffuse.bumpIntensity.value_or(1));
     result.diffuseBump=bump.diffuseBump.value_or(diffuse.diffuseBump.value_or(true));
@@ -153,7 +153,7 @@ const char* triMeshRenderPathName(TriMeshRenderPath path) noexcept {
     return "Unknown PartTriMesh path";
 }
 
-bool engineMaterialHasBumpMap(const Material& material) { return k2BumpMap(material); }
+bool engineMaterialHasBumpMap(const neoshared::material::Material& material) { return k2BumpMap(material); }
 
 bool triMeshRenderPathUsesLightmap(TriMeshRenderPath path) noexcept {
     switch(path) {
@@ -199,7 +199,7 @@ bool triMeshRenderPathUsesEnvironmentMap(TriMeshRenderPath path) noexcept {
 }
 
 EnginePartTriMeshSelection selectEnginePartTriMeshRenderPath(
-    const Material& material, const EnginePartTriMeshInputs& inputs,
+    const neoshared::material::Material& material, const EnginePartTriMeshInputs& inputs,
     EngineMaterialGame game) {
     EnginePartTriMeshSelection result;
     const auto& diffuse = props(material.diffuse);
@@ -288,10 +288,10 @@ EnginePartTriMeshSelection selectEnginePartTriMeshRenderPath(
     return result;
 }
 K2PartTriMeshSelection selectK2PartTriMeshRenderPath(
-    const Material& material, const K2PartTriMeshInputs& inputs) {
+    const neoshared::material::Material& material, const K2PartTriMeshInputs& inputs) {
     return selectEnginePartTriMeshRenderPath(material,inputs,EngineMaterialGame::Kotor2);
 }
-UvState evaluateUv(const TextureBinding& binding) {
+UvState evaluateUv(const neoshared::material::TextureBinding& binding) {
     UvState result;
     const auto& p=props(binding);
     result.clamp=p.clamp.value_or(0)!=0;
@@ -308,7 +308,7 @@ UvState evaluateUv(const TextureBinding& binding) {
 
     return result;
 }
-RuntimeMaterial evaluateMaterial(const Material& m,const SurfaceInputs& surface,double) {
+RuntimeMaterial evaluateMaterial(const neoshared::material::Material& m,const SurfaceInputs& surface,double) {
     RuntimeMaterial r;
     const auto& p=props(m.diffuse);
     const auto& b=props(m.bumpMap);
@@ -320,16 +320,16 @@ RuntimeMaterial evaluateMaterial(const Material& m,const SurfaceInputs& surface,
     // Odyssey-style inverse diffuse-alpha reflection mask. Explicit blend
     // directives take precedence; header alphaBlending is never substituted.
     r.textureAlphaIsOpacity=!environment || p.blending.has_value();
-    const auto alpha=m.diffuse.metadata ? m.diffuse.metadata->facts.pixelAlpha : PixelAlpha::Opaque;
-    r.alphaTest=p.blending==BlendDirective::PunchThrough ||
-        (!p.blending && r.textureAlphaIsOpacity && alpha==PixelAlpha::Packed);
-    if(p.blending==BlendDirective::Additive) {
+    const auto alpha=m.diffuse.metadata ? m.diffuse.metadata->facts.pixelAlpha : neoshared::material::PixelAlpha::Opaque;
+    r.alphaTest=p.blending==neoshared::material::BlendDirective::PunchThrough ||
+        (!p.blending && r.textureAlphaIsOpacity && alpha==neoshared::material::PixelAlpha::Packed);
+    if(p.blending==neoshared::material::BlendDirective::Additive) {
         r.pass=RenderPass::Additive;
         r.blending=true;
         r.blendFunction=BlendFunction::Additive;
         r.depthWrite=false;
     } else if(r.opacity<1 || surface.vertexAlpha || p.decal.value_or(false) ||
-        (r.textureAlphaIsOpacity && alpha==PixelAlpha::Fractional && !r.alphaTest)) {
+        (r.textureAlphaIsOpacity && alpha==neoshared::material::PixelAlpha::Fractional && !r.alphaTest)) {
         r.pass=RenderPass::Translucent;
         r.blending=true;
         r.blendFunction=BlendFunction::Alpha;
@@ -340,7 +340,7 @@ RuntimeMaterial evaluateMaterial(const Material& m,const SurfaceInputs& surface,
     r.useLightmap=!m.lightmap.key.empty();
     r.useBumpMap=!m.bumpMap.key.empty();
     r.useEnvironmentMap=environment;
-    if(!m.bumpMap.key.empty()) r.bumpKind=b.bumpMapKind.value_or(BumpMapKind::Height);
+    if(!m.bumpMap.key.empty()) r.bumpKind=b.bumpMapKind.value_or(neoshared::material::BumpMapKind::Height);
     r.bumpScale=p.bumpMapScaling.value_or(b.bumpMapScaling.value_or(1))*
         b.bumpIntensity.value_or(p.bumpIntensity.value_or(1));
     r.diffuseBump=b.diffuseBump.value_or(p.diffuseBump.value_or(true));
@@ -355,7 +355,7 @@ RuntimeMaterial evaluateMaterial(const Material& m,const SurfaceInputs& surface,
 }
 
 RuntimeMaterial evaluateEnginePartTriMeshMaterial(
-    const Material& material, const SurfaceInputs& surface,
+    const neoshared::material::Material& material, const SurfaceInputs& surface,
     const EnginePartTriMeshInputs& inputs, EngineMaterialGame game, double) {
     RuntimeMaterial result;
     const auto& diffuse=props(material.diffuse);
@@ -418,11 +418,11 @@ RuntimeMaterial evaluateEnginePartTriMeshMaterial(
     result.alphaTest=true;
     result.alphaCutoff=0.0f;
     result.blendFunction=BlendFunction::Alpha;
-    if(diffuse.blending==BlendDirective::Additive) {
+    if(diffuse.blending==neoshared::material::BlendDirective::Additive) {
         result.pass=RenderPass::Additive;
         result.blendFunction=BlendFunction::Additive;
         result.depthWrite=false;
-    } else if(diffuse.blending==BlendDirective::PunchThrough) {
+    } else if(diffuse.blending==neoshared::material::BlendDirective::PunchThrough) {
         result.pass=RenderPass::PunchThrough;
         result.blendFunction=BlendFunction::Replace;
         result.alphaCutoff=0.35f;
@@ -432,10 +432,10 @@ RuntimeMaterial evaluateEnginePartTriMeshMaterial(
     const bool environment=result.useEnvironmentMap;
     result.textureAlphaIsOpacity=!environment || diffuse.blending.has_value();
     const auto alpha=material.diffuse.metadata
-        ? material.diffuse.metadata->facts.pixelAlpha : PixelAlpha::Opaque;
+        ? material.diffuse.metadata->facts.pixelAlpha : neoshared::material::PixelAlpha::Opaque;
     if(result.pass==RenderPass::Opaque &&
        (result.opacity<1.0f || surface.vertexAlpha ||
-        (result.textureAlphaIsOpacity && alpha==PixelAlpha::Fractional))) {
+        (result.textureAlphaIsOpacity && alpha==neoshared::material::PixelAlpha::Fractional))) {
         // Bucket selection is still a scene policy; this does not alter the
         // Material blend factors or depth-write state.
         result.pass=RenderPass::Translucent;
@@ -470,7 +470,7 @@ RuntimeMaterial evaluateEnginePartTriMeshMaterial(
         ? props(material.bumpMap).specularBumpIntensity.value_or(1.0f) : 0.0f;
     result.engineSpecularColor=props(material.bumpMap).specularColor.value_or(
         std::array<float,3>{{1,1,1}});
-    if(!result.useBumpMap) result.bumpKind=BumpMapKind::None;
+    if(!result.useBumpMap) result.bumpKind=neoshared::material::BumpMapKind::None;
     // EnvFP/EMLMFP use (1-base.a) directly. TXI environmental alpha is not
     // an extra reflection gain in these selected engine programs.
     result.environmentStrength=result.useEnvironmentMap ? 1.0f : 0.0f;
@@ -479,7 +479,7 @@ RuntimeMaterial evaluateEnginePartTriMeshMaterial(
     return result;
 }
 RuntimeMaterial evaluateK2PartTriMeshMaterial(
-    const Material& material, const SurfaceInputs& surface,
+    const neoshared::material::Material& material, const SurfaceInputs& surface,
     const K2PartTriMeshInputs& inputs, double seconds) {
     return evaluateEnginePartTriMeshMaterial(material,surface,inputs,EngineMaterialGame::Kotor2,seconds);
 }

@@ -66,7 +66,7 @@ struct ChunkParticleInstance {
 struct ChunkMeshDraw {
     const neomdl::model::Mesh* mesh{};
     const neomdl::model::DeformedMesh* deformed{};
-    const neomdl::material::Material* material{};
+    const neoshared::material::Material* material{};
     const ModelDocument* resources{};
     neomdl::model::NodeMaterialState materialState;
     neomdl::model::GameVersion game{neomdl::model::GameVersion::Kotor2};
@@ -112,7 +112,7 @@ struct ParticleEmitterInstance {
     neomdl::model::Mesh mesh;
     std::array<neomdl::model::Mesh,4> frameBlendMeshes;
     std::shared_ptr<const neoshared::texture::TextureData> atlas;
-    neomdl::material::TextureBinding texture;
+    neoshared::material::TextureBinding texture;
     neomdl::model::EngineFrame frame{};
     neomdl::model::Mat4 world=neomdl::model::identityMatrix();
     std::uint32_t textureWidth{},textureHeight{};
