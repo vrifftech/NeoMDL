@@ -54,11 +54,13 @@ struct StateGuard {
     g::Boolean stencil{}, colorMask[4]{};
     g::Int stencilClear{}, stencilState[2][7]{};
     std::array<AttributeState,15> attributes{};
-    g::Int attributeCount{}, textureCount{};
+    g::Int attributeCount{};
+    static constexpr g::Int textureCount=6;
     explicit StateGuard(g::Api& a,g::Int attributeLimit=15,bool preserveBindings=true,bool preserveStencil=true)
         :api(a),captureBindings(preserveBindings),captureStencil(preserveStencil) {
-        api.GetIntegerv(g::MaxVertexAttribs,&attributeCount);attributeCount=std::min(attributeCount,attributeLimit);
-        api.GetIntegerv(g::MaxTextureUnits,&textureCount);textureCount=std::min(textureCount,6);
+        if(attributeLimit) {
+            api.GetIntegerv(g::MaxVertexAttribs,&attributeCount);attributeCount=std::min(attributeCount,attributeLimit);
+        }
         if(captureStencil) {
             stencil=api.IsEnabled(g::StencilTest);
             api.GetBooleanv(g::ColorWriteMask,colorMask);
@@ -234,6 +236,7 @@ struct ShaderMeshRenderer::Impl {
         g::Int dirtyCommand{},dirtyWorld{},dirtySampler{},dirtyForce{};
         g::Int forceCommand{},forceColor{},forceDesaturation{};
         g::Int fixedUv1Array{},fixedDirtyUnit{};
+        DesktopFixedVertexUniforms fixedInputs;
     } u,fixedU;
 
     gl::Loader fixedLoader;
@@ -293,7 +296,8 @@ struct ShaderMeshRenderer::Impl {
         a.LinkProgram(program);a.DeleteShader(vertex);
         g::Int linked{};a.GetProgramiv(program,g::LinkStatus,&linked);
         if(!linked){error="Engine fixed-fragment vertex link failed: "+shaderLog(a,program,true);a.DeleteProgram(program);return false;}
-        fixedProgram=program;uniformLocations(fixedProgram,fixedU);return true;
+        fixedProgram=program;uniformLocations(fixedProgram,fixedU);
+        fixedU.fixedInputs=desktopFixedVertexUniformLocations(a,fixedProgram);return true;
     }
     struct CachedMesh {
         g::UInt vbo{}, ebo{}, skinVbo{}, rigidVbo{};
@@ -761,6 +765,7 @@ bool ShaderMeshRenderer::drawPrepared(const neomdl::model::Mesh& mesh,
         if(!i.skinMaterials.prepare(a,p,engineProgram,error))return false;
     }
     const bool posed=deformed!=nullptr;
+    const bool genericVboNeeded=!k1Rigid || p.outlineOnly || p.selected;
     try {
         auto& cache=i.meshes[&mesh];
         const bool newGeometry=!cache.vbo || cache.vertices!=mesh.vertices.data() ||
@@ -789,7 +794,7 @@ bool ShaderMeshRenderer::drawPrepared(const neomdl::model::Mesh& mesh,
                     for(unsigned channel=0;channel<4;++channel)
                         vertices[vertex].color[channel]=static_cast<float>(prelight->colors[vertex][channel])/255.0f;
         };
-        const bool refresh=p.engineCpuSkin || newGeometry || normalsChanged || prelightChanged || uvChanged || cache.posed!=posed || cache.streamed!=p.streamedGeometry ||
+        const bool refresh=p.engineCpuSkin || newGeometry || (genericVboNeeded && cache.bytes==0) || normalsChanged || prelightChanged || uvChanged || cache.posed!=posed || cache.streamed!=p.streamedGeometry ||
             ((p.streamedGeometry || (posed&&(!engineSkin||p.selected))) &&
              (cache.revision!=revision || cache.pose!=deformed));
         if(refresh) {
@@ -828,17 +833,19 @@ bool ShaderMeshRenderer::drawPrepared(const neomdl::model::Mesh& mesh,
             if(!cache.vbo) a.GenBuffers(1,&cache.vbo);
             if(!cache.ebo) a.GenBuffers(1,&cache.ebo);
             if(!cache.vbo || !cache.ebo) { error="OpenGL could not allocate mesh buffers"; return false; }
-            a.BindBuffer(g::ArrayBuffer,cache.vbo);
-            if(bytes!=cache.bytes || newGeometry)
-                a.BufferData(g::ArrayBuffer,static_cast<g::Bytes>(bytes),geometry.vertices.data(),(posed || p.streamedGeometry) ? g::DynamicDraw : g::StaticDraw);
-            else a.BufferSubData(g::ArrayBuffer,0,static_cast<g::Bytes>(bytes),geometry.vertices.data());
+            if(genericVboNeeded) {
+                a.BindBuffer(g::ArrayBuffer,cache.vbo);
+                if(bytes!=cache.bytes || newGeometry)
+                    a.BufferData(g::ArrayBuffer,static_cast<g::Bytes>(bytes),geometry.vertices.data(),(posed || p.streamedGeometry) ? g::DynamicDraw : g::StaticDraw);
+                else a.BufferSubData(g::ArrayBuffer,0,static_cast<g::Bytes>(bytes),geometry.vertices.data());
+            }
             a.BindBuffer(g::ElementArrayBuffer,cache.ebo);
             // CPU deformation cannot change topology; the IBO is uploaded only
             // at allocation/replacement, not on every animation frame.
             if(newGeometry || p.streamedGeometry || cache.count!=static_cast<g::Size>(geometryIndices.size()))
                 a.BufferData(g::ElementArrayBuffer,static_cast<g::Bytes>(geometryIndices.size()*sizeof(std::uint32_t)),
                              geometryIndices.data(),p.streamedGeometry ? g::DynamicDraw : g::StaticDraw);
-            cache.count=static_cast<g::Size>(geometryIndices.size()); cache.bytes=bytes;
+            cache.count=static_cast<g::Size>(geometryIndices.size()); cache.bytes=genericVboNeeded?bytes:0u;
             cache.vertices=mesh.vertices.data(); cache.indices=drawIndices.data();
             cache.vertexCount=mesh.vertices.size(); cache.indexCount=drawIndices.size();
             cache.revision=revision; cache.pose=deformed; cache.posed=posed; cache.streamed=p.streamedGeometry;
@@ -1233,7 +1240,7 @@ bool ShaderMeshRenderer::drawPrepared(const neomdl::model::Mesh& mesh,
         if(desktopFixedFragment) {
             a.Disable(desktop_programs::VP);a.Disable(desktop_programs::FP);
             applyDesktopFixedTextureState(a,i.fixedApi,nextMaterialState);
-            applyDesktopFixedVertexInputs(a,i.fixedProgram,nextMaterialState);
+            applyDesktopFixedVertexInputs(a,i.fixedU.fixedInputs,nextMaterialState);
             a.Uniform1i(u.fixedDirtyUnit,dirty?static_cast<int>(dirtyPlan.volumeUnit):-1);
             a.Uniform1i(u.fixedUv1Array,engineProgram==MaterialProgram::Lightmap ||
                 engineProgram==MaterialProgram::EnvironmentLightmap || (dirty&&dirtyPlan.lightmap));

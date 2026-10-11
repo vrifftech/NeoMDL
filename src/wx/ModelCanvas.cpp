@@ -3343,7 +3343,6 @@ void ModelCanvas::clearGpuTextures() {
     dynamicGobQueue_.clear();renderAnimationOwners_.clear();
     hologramQueue_.clear();
     distortionQueue_.clear();distortionProducerCount_=0;
-    particleQueue_.clear();
     lightsaberQueue_.clear();
     diagnosticSkinBlurQueue_.clear();
     aabbDebugQueue_.clear();
@@ -3482,7 +3481,6 @@ void ModelCanvas::drawScene() {
     hologramQueue_.clear();
     distortionQueue_.clear();distortionProducerCount_=0;
     diagnosticSkinBlurQueue_.clear();
-    particleQueue_.clear();
     lightsaberQueue_.clear();
     aabbDebugQueue_.clear();
     GLfloat view[16]{};
@@ -5056,7 +5054,7 @@ void ModelCanvas::queueChunkModels() {
 
 bool ModelCanvas::queueParticles(float elapsedSeconds,bool sceneAnimating,
                                  std::string& error) {
-    particleQueue_.clear();emitterFrameTrace_={};error.clear();
+    emitterFrameTrace_={};error.clear();
     auto scenes=particleScenes();
     if(!options_.previewEmitters || !document_ || !meshRenderer_.ready()) {
         discardSceneEmitterFrame(scenes);return true;
@@ -5150,11 +5148,11 @@ bool ModelCanvas::queueParticles(float elapsedSeconds,bool sceneAnimating,
             for(unsigned pass=0;pass<5;++pass) {
                 const auto& mesh=pass?emitter->frameBlendMeshes[pass-1]:emitter->mesh;
                 if(mesh.indices.empty())continue;
-                auto parameters=base;render::configureParticlePass(
-                    emitter->support.blend,pass,parameters);
                 render::MeshSubmission submission;
+                submission.parameters=base;
+                render::configureParticlePass(emitter->support.blend,pass,submission.parameters);
                 submission.mesh=&mesh;submission.poseRevision=particleRevision_;
-                submission.parameters=parameters;submission.eyeDepth=ownerDepth;
+                submission.eyeDepth=ownerDepth;
                 submission.authoredOrderGroup=ownerGroup;
                 submission.authoredOrder=authoredOrder;
                 current.push_back(std::move(submission));
@@ -5173,7 +5171,6 @@ bool ModelCanvas::queueParticles(float elapsedSeconds,bool sceneAnimating,
             throw std::runtime_error(drawError.empty()
                 ?"Engine emitter RenderFunc failed":drawError);
         }
-        particleQueue_.insert(particleQueue_.end(),current.begin(),current.end());
     };
 
     try {
@@ -5235,7 +5232,8 @@ void ModelCanvas::queueLightsabers() {
         if(!engineOwnerAdmitted(id,ownerAsset.classification))continue;
         const auto& mesh = instance->renderMesh();
         if (!instance->active || mesh.indices.empty()) continue;
-        neomdl::render::MeshDrawParameters parameters;
+        render::MeshSubmission submission;
+        auto& parameters=submission.parameters;
         parameters.material.engineGame=instance->game==model::GameVersion::Kotor1
             ? material::EngineMaterialGame::Kotor1 : material::EngineMaterialGame::Kotor2;
         parameters.modelView = neomdl::model::multiply(cameraView_, instance->world);
@@ -5339,10 +5337,8 @@ void ModelCanvas::queueLightsabers() {
 
         // DoLightSaberBucket iterates its append-only Gob list directly. The
         // renderer receives this same instance order and bypasses depth sorting.
-        render::MeshSubmission submission;
         submission.mesh=&mesh;
         submission.poseRevision=source.scene->revision();
-        submission.parameters=parameters;
         if(source.chunk)submission.ownerLifetime=instance->reference
             ?source.references->animationOwner(*instance->reference).lifetime():SceneOwnerLifetime{source.chunk->lifetime};
         else if(auto* owner=animationOwnerForId(id))submission.ownerLifetime=owner->lifetime();
@@ -5659,7 +5655,8 @@ void ModelCanvas::drawMesh(const neomdl::model::Mesh& mesh,
                            const HitPartTransform* enginePartFrame,std::string* failure,
                            std::optional<float> retainedEyeDepth) {
     if (!meshRenderer_.ready()) return; // Explicit shader failure; no silent immediate-mode fallback.
-    neomdl::render::MeshDrawParameters parameters;
+    render::MeshSubmission submission;
+    auto& parameters=submission.parameters;
     // Camera/helper transforms remain compatibility state in this stage; the
     // mesh program receives explicit matrix uniforms and generic attributes.
     glGetFloatv(GL_MODELVIEW_MATRIX, parameters.modelView.values.data());
@@ -5842,11 +5839,9 @@ void ModelCanvas::drawMesh(const neomdl::model::Mesh& mesh,
         }
     }
     auto& queue = targetQueue ? *targetQueue : renderQueue_;
-    render::MeshSubmission submission;
     submission.mesh=&mesh;
     submission.deformed=deformed;
     submission.poseRevision=poseRevision_;
-    submission.parameters=parameters;
     submission.drawPrimary=!materialOnly;submission.materialOnly=materialOnly;
     submission.prepareTextures=[this](auto& p,auto& error) {return textureCache_.bind(p,error);};
     if (k2Lights_ && !model::engineSceneStageOrder(game).empty())
@@ -5897,19 +5892,20 @@ void ModelCanvas::drawMesh(const neomdl::model::Mesh& mesh,
             return;
         }
     }
-    queue.push_back(submission);
+    queue.push_back(std::move(submission));
 
     const bool engineSkinEffects = allowK2SkinEffects &&
         !model::engineSceneStageOrder(game).empty() && engineSkinVertexProgram;
     if (!engineSkinEffects) return;
 
-    const auto effectSpace=skinEffectSpace(parameters.modelView);
+    const auto& queued=queue.back();
     const auto& skin=options_.skinSettings;
     const float motionLengthSquared=skin.objectMotion.x*skin.objectMotion.x+
         skin.objectMotion.y*skin.objectMotion.y+
         skin.objectMotion.z*skin.objectMotion.z;
     if (skin.motionBlur && motionLengthSquared > 0.0f) {
-        auto blur=submission;
+        const auto effectSpace=skinEffectSpace(queued.parameters.modelView);
+        auto blur=queued;
         // RenderSkinnedVPBlur is a separate PartSkin::Draw(true) branch; it
         // neither samples HoloFP nor consults the hologram exclusion byte.
         // PartSkin still appends its shell after either primary branch.

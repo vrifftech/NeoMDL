@@ -82,11 +82,11 @@ public:
     bool fixedEnvironmentMap{},fixedSecondTexture{};
     // Engine FP enable and bound identity are independent. Commands13/32/37/
     // 74/77 disable without unbinding; command0 also binds program zero.
-    // Shader source is the relocated executable identity, never host GL state.
-    std::string fragmentProgram;
+    // Static shader source is the relocated executable identity, never host GL state.
+    std::string_view fragmentProgram;
     bool fragmentProgramEnabled{};
     void bindFragmentProgram(std::string_view source) { fragmentProgram=source;fragmentProgramEnabled=true; }
-    void disableFragmentProgram(bool unbind=false) { fragmentProgramEnabled=false;if(unbind)fragmentProgram.clear(); }
+    void disableFragmentProgram(bool unbind=false) { fragmentProgramEnabled=false;if(unbind)fragmentProgram={}; }
     // Engine SetFragmentShaderConstant and dispatcher writes use shared env
     // registers; executable ARB translations relocate those to private locals.
     std::array<std::array<float,4>,8> fragmentConstants{};
@@ -111,7 +111,11 @@ private:
 // callback remains the engine virtual texture Bind producer (TXI lifetime).
 bool applyDesktopFixedFragmentCommand(unsigned command,MeshDrawParameters&,EngineMaterialState&,std::string& error);
 void applyDesktopFixedTextureState(gl::Api&,desktop_programs::LegacyApi&,const EngineMaterialState&);
-void applyDesktopFixedVertexInputs(gl::Api&,std::uint32_t program,const EngineMaterialState&,
+struct DesktopFixedVertexUniforms {
+    std::int32_t coordinates{},texgenEnabled{},texgenModes{},matrices{};
+};
+DesktopFixedVertexUniforms desktopFixedVertexUniformLocations(gl::Api&,std::uint32_t program);
+void applyDesktopFixedVertexInputs(gl::Api&,const DesktopFixedVertexUniforms&,const EngineMaterialState&,
                                const model::Mat4* textureMatrix0=nullptr);
 // GLRender::MakeNormalizationCubeMap: six 256-square RGB faces, encoded with
 // trunc(128 + 127*unitComponent), not the preview normal encoding.

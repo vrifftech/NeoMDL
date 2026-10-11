@@ -633,21 +633,21 @@ GpuTexture TextureCache::selected(ProcedureRecord& r,std::string& error) {
 bool TextureCache::uploadProcedure(ProcedureRecord& r,std::string& error) {
     if(r.pixelStorage)return uploadPixelTids(r,error);
     const auto& image=r.controller.image();const bool volume=r.controller.definition().volumeTexture;
+    if(!volume && r.uploadedRevision==r.controller.revision())return true;
+    auto found=entries_[r.source].find(0);bool created=found==entries_[r.source].end();
+    if(!created&&r.uploadedRevision==r.controller.revision())return true;
     std::vector<material::ProcedureImage> normal;
     if(r.normalUpload) {
         try {normal=material::procedureNormalLevels(image,r.metadata.txi.properties.bumpMapScaling.value_or(1.0f),
             r.metadata.txi.properties.bumpMapKind==neoshared::material::BumpMapKind::AuthoredNormal);}
         catch(const std::exception& exception){error=exception.what();return false;}
     }
-    if(!volume && r.uploadedRevision==r.controller.revision())return true;
     if(api_.GetError()!=gl::NoError){error="Pending OpenGL error before procedural upload";return false;}
     gl::Int maximum{};api_.GetIntegerv(volume?0x8073u:0x0D33u,&maximum);
     if(maximum<=0||image.width>unsigned(maximum)||image.height>unsigned(maximum)||image.depth>unsigned(maximum)) {
         error="Procedural image exceeds current GL texture limits";return false;
     }
     if(volume&&!texImage3D_){error="Dirty volume requires glTexImage3D";return false;}
-    auto found=entries_[r.source].find(0);bool created=found==entries_[r.source].end();
-    if(!created&&r.uploadedRevision==r.controller.revision())return true;
     GpuTexture target;
     if(!created)target=found->second;
     else {target.width=image.width;target.height=image.height;target.volume=volume;target.order=orderFor(*r.source);}

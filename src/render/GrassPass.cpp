@@ -169,6 +169,21 @@ bool GrassPass::prepareDesktop(gl::Api& a,bool fixedFragment,std::string& error)
         v=compile(a,gl::VertexShader,vertex.c_str());if(!fixedFragment)f=compile(a,gl::FragmentShader,desktopFragment);p=a.CreateProgram();require(p!=0,"cannot allocate program");a.AttachShader(p,v);if(f)a.AttachShader(p,f);
         const char* names[]={"a_position","a_normal","a_color","a_texCoord0","a_texCoord1"};for(unsigned i=0;i<5;++i)a.BindAttribLocation(p,i,names[i]);a.LinkProgram(p);
         gl::Int ok=0;a.GetProgramiv(p,gl::LinkStatus,&ok);if(!ok){char log[4096]{};a.GetProgramInfoLog(p,4095,nullptr,log);throw std::runtime_error(std::string("Grass link: ")+log);}
+        auto& u=fixedFragment?desktopFixedUniforms_:desktopUniforms_;
+#define LOC(name) u.name=a.GetUniformLocation(p,#name)
+        LOC(mv);LOC(mvp);LOC(textureMatrix);LOC(fixedPath);LOC(lighting);LOC(normalizeNormals);
+        LOC(k1);LOC(nvCombiners);LOC(alphaTest);LOC(lightmapped);LOC(forceSight);LOC(texture0);LOC(texture1);
+        LOC(diffuse);LOC(ambient);LOC(emission);LOC(alphaCutoff);LOC(desaturation);LOC(lightCount);
+        LOC(fogMode);LOC(fogData);LOC(fogColor);LOC(fixedUv1Array);
+#undef LOC
+        for(std::size_t l=0;l<u.lightPosition.size();++l) {
+            const auto suffix="["+std::to_string(l)+"]";
+            u.lightPosition[l]=a.GetUniformLocation(p,("lightPosition"+suffix).c_str());
+            u.lightDiffuse[l]=a.GetUniformLocation(p,("lightDiffuse"+suffix).c_str());
+            u.lightAmbient[l]=a.GetUniformLocation(p,("lightAmbient"+suffix).c_str());
+            u.lightAttenuation[l]=a.GetUniformLocation(p,("lightAttenuation"+suffix).c_str());
+        }
+        if(fixedFragment)u.fixedInputs=desktopFixedVertexUniformLocations(a,p);
         a.DeleteShader(v);if(f)a.DeleteShader(f);program=p;return true;
     }catch(const std::exception& e){if(v)a.DeleteShader(v);if(f)a.DeleteShader(f);if(p)a.DeleteProgram(p);error=e.what();return false;}
 }
@@ -272,19 +287,18 @@ bool GrassPass::draw(gl::Api& a,const GrassScene& scene,const EngineGrassRenderS
                     if(const auto* fragment=desktop_programs::k2FragmentProgram(d.programId))desktopTextures.bindFragmentProgram(fragment);
                 }
                 const auto desktopProgram=fixedForce?desktopFixedProgram_:desktopProgram_;
+                const auto& uniforms=fixedForce?desktopFixedUniforms_:desktopUniforms_;
                 a.UseProgram(desktopProgram);
-                const auto location=[&](const char* n){return a.GetUniformLocation(desktopProgram,n);};
-                const auto integer=[&](const char* n,int x){a.Uniform1i(location(n),x);};const auto scalar=[&](const char* n,float x){a.Uniform1f(location(n),x);};
-                auto mvp=model::multiply(cfg.projection,cfg.view);a.UniformMatrix4fv(location("mv"),1,0,cfg.view.values.data());a.UniformMatrix4fv(location("mvp"),1,0,mvp.values.data());
-                a.UniformMatrix4fv(location("textureMatrix"),1,0,desktopTextures.textureMatrix(0).values.data());
-                integer("fixedPath",d.fixed);integer("lighting",raster.lighting);integer("normalizeNormals",desktopTextures.normalizeNormals());integer("k1",k1);integer("nvCombiners",k1&&!cfg.hardware.atiValidation);integer("alphaTest",raster.alphaTest);integer("lightmapped",d.lightmapped);integer("forceSight",forceSight);integer("texture0",0);integer("texture1",1);
+                auto mvp=model::multiply(cfg.projection,cfg.view);a.UniformMatrix4fv(uniforms.mv,1,0,cfg.view.values.data());a.UniformMatrix4fv(uniforms.mvp,1,0,mvp.values.data());
+                a.UniformMatrix4fv(uniforms.textureMatrix,1,0,desktopTextures.textureMatrix(0).values.data());
+                a.Uniform1i(uniforms.fixedPath,d.fixed);a.Uniform1i(uniforms.lighting,raster.lighting);a.Uniform1i(uniforms.normalizeNormals,desktopTextures.normalizeNormals());a.Uniform1i(uniforms.k1,k1);a.Uniform1i(uniforms.nvCombiners,k1&&!cfg.hardware.atiValidation);a.Uniform1i(uniforms.alphaTest,raster.alphaTest);a.Uniform1i(uniforms.lightmapped,d.lightmapped);a.Uniform1i(uniforms.forceSight,forceSight);a.Uniform1i(uniforms.texture0,0);a.Uniform1i(uniforms.texture1,1);
                 auto diffuse=vector4(material.diffuse,bin.opacity),ambient=vector4(material.ambient,1);
-                a.Uniform4fv(location("diffuse"),1,diffuse.data());a.Uniform4fv(location("ambient"),1,ambient.data());a.Uniform4fv(location("emission"),1,d.emission.data());
-                scalar("alphaCutoff",s.alphaCutoff);scalar("desaturation",cfg.desaturation);
+                a.Uniform4fv(uniforms.diffuse,1,diffuse.data());a.Uniform4fv(uniforms.ambient,1,ambient.data());a.Uniform4fv(uniforms.emission,1,d.emission.data());
+                a.Uniform1f(uniforms.alphaCutoff,s.alphaCutoff);a.Uniform1f(uniforms.desaturation,cfg.desaturation);
                 const auto lightCount=d.fixed&&k1?std::min<std::size_t>(8,cfg.fixedLights.size()):desktop.lightCount;
-                integer("lightCount",int(lightCount));
-                for(std::size_t l=0;l<lightCount;++l){const auto suffix="["+std::to_string(l)+"]";const auto& light=d.fixed&&k1?cfg.fixedLights[l]:desktop.lights[l];a.Uniform4fv(location(("lightPosition"+suffix).c_str()),1,light.position.data());a.Uniform3fv(location(("lightDiffuse"+suffix).c_str()),1,light.diffuse.data());a.Uniform3fv(location(("lightAmbient"+suffix).c_str()),1,light.ambient.data());a.Uniform3fv(location(("lightAttenuation"+suffix).c_str()),1,light.attenuation.data());}
-                integer("fogMode",raster.fog?static_cast<int>(cfg.fog.mode):0);float fog[]={cfg.fog.start,cfg.fog.end,cfg.fog.density,0};a.Uniform4fv(location("fogData"),1,fog);float color[]={cfg.fog.color.x,cfg.fog.color.y,cfg.fog.color.z};a.Uniform3fv(location("fogColor"),1,color);
+                a.Uniform1i(uniforms.lightCount,int(lightCount));
+                for(std::size_t l=0;l<lightCount;++l){const auto& light=d.fixed&&k1?cfg.fixedLights[l]:desktop.lights[l];a.Uniform4fv(uniforms.lightPosition[l],1,light.position.data());a.Uniform3fv(uniforms.lightDiffuse[l],1,light.diffuse.data());a.Uniform3fv(uniforms.lightAmbient[l],1,light.ambient.data());a.Uniform3fv(uniforms.lightAttenuation[l],1,light.attenuation.data());}
+                a.Uniform1i(uniforms.fogMode,raster.fog?static_cast<int>(cfg.fog.mode):0);float fog[]={cfg.fog.start,cfg.fog.end,cfg.fog.density,0};a.Uniform4fv(uniforms.fogData,1,fog);float color[]={cfg.fog.color.x,cfg.fog.color.y,cfg.fog.color.z};a.Uniform3fv(uniforms.fogColor,1,color);
                 for(unsigned u=0;u<2;++u){a.ActiveTexture(gl::Texture0+u);a.BindTexture(gl::Texture2D,desktopTextures.binding(u,false));}
                 if(fixedForce) {
                     MeshDrawParameters parameters;parameters.material.engineHardware=cfg.hardware;
@@ -294,8 +308,8 @@ bool GrassPass::draw(gl::Api& a,const GrassScene& scene,const EngineGrassRenderS
                     // command56 only enables unit0 and performs no Bind.
                     require(applyDesktopFixedFragmentCommand(d.programId,parameters,desktopTextures,error),error);
                     applyDesktopFixedTextureState(a,legacy_,desktopTextures);
-                    applyDesktopFixedVertexInputs(a,desktopProgram,desktopTextures);
-                    integer("fixedUv1Array",d.lightmapped);
+                    applyDesktopFixedVertexInputs(a,uniforms.fixedInputs,desktopTextures);
+                    a.Uniform1i(uniforms.fixedUv1Array,d.lightmapped);
                     a.Disable(desktop_programs::VP);a.Disable(desktop_programs::FP);
                     if(raster.alphaTest)a.Enable(gl::AlphaTest);else a.Disable(gl::AlphaTest);
                     a.AlphaFunc(gl::Greater,s.alphaCutoff);
@@ -311,5 +325,5 @@ bool GrassPass::draw(gl::Api& a,const GrassScene& scene,const EngineGrassRenderS
         return true;
     }catch(const std::exception& e){error=e.what();return false;}
 }
-void GrassPass::shutdown(gl::Api& a) noexcept {if(vbo_)a.DeleteBuffers(1,&vbo_);if(ibo_)a.DeleteBuffers(1,&ibo_);if(desktopProgram_)a.DeleteProgram(desktopProgram_);if(desktopFixedProgram_)a.DeleteProgram(desktopFixedProgram_);vbo_=ibo_=desktopProgram_=desktopFixedProgram_=0;legacyReady_=false;k1StandardCreated_={};}
+void GrassPass::shutdown(gl::Api& a) noexcept {if(vbo_)a.DeleteBuffers(1,&vbo_);if(ibo_)a.DeleteBuffers(1,&ibo_);if(desktopProgram_)a.DeleteProgram(desktopProgram_);if(desktopFixedProgram_)a.DeleteProgram(desktopFixedProgram_);vbo_=ibo_=desktopProgram_=desktopFixedProgram_=0;desktopUniforms_={};desktopFixedUniforms_={};legacyReady_=false;k1StandardCreated_={};}
 } // namespace neomdl::render

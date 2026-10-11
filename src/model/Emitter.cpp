@@ -1277,7 +1277,9 @@ static void buildEmitterMeshWithScale(const EmitterNodeData& data,const NodeEmit
     output.vertices.clear();output.indices.clear();output.castsShadow=false;
     output.hasVertexColors=true;output.render=true;output.diffuse={1,1,1};
     const auto support=emitterPreviewSupport(data);
-    if(!support.supported||!data.chunkName.empty()||pass>4 || (pass && !data.frameBlending)) return;
+    if(!support.supported||!data.chunkName.empty()||pass>4 ||
+       (pass && (!data.frameBlending || support.render==EmitterRender::Linked ||
+                 support.render==EmitterRender::MotionBlur))) return;
     const bool lightning=support.update==EmitterUpdate::Lightning;
     const bool linked=support.render==EmitterRender::Linked;
     const auto count=lightning&&!linked?sim.lightningMainCount:sim.particles.size();

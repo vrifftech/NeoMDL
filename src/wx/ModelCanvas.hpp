@@ -654,7 +654,6 @@ private:
     std::vector<neomdl::render::MeshSubmission> staticMeshQueue_;
     std::vector<neomdl::render::MeshSubmission> dynamicGobQueue_;
     std::map<LightOwnerId,SceneAnimationOwner*> renderAnimationOwners_;
-    std::vector<neomdl::render::MeshSubmission> particleQueue_;
     SceneEmitterPrewarmTrace emitterPrewarmTrace_;
     SceneEmitterFrameTrace emitterFrameTrace_;
     std::string particleError_;

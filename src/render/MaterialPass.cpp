@@ -131,7 +131,7 @@ void EngineMaterialState::reset() noexcept {
     fixedEnvironmentMap=fixedSecondTexture=false;
     fixedTextureUnits[0].enabled[0]=true; // SetupOpenGL0x4a0c9e enables2D0
     bindings_={};normalizeNormals_=false;fragmentConstants={};bumpVertexConstants={};
-    partMaterials={};fragmentProgram.clear();fragmentProgramEnabled=false;
+    partMaterials={};fragmentProgram={};fragmentProgramEnabled=false;
     alphaTestEnabled=true;alphaReference=0;forceSightFragmentCommand=0;
     for(auto& matrix:matrices_) matrix=model::identityMatrix();
 }
@@ -370,7 +370,13 @@ void applyDesktopFixedTextureState(gl::Api& a,desktop_programs::LegacyApi& x,con
     }
     a.ActiveTexture(gl::Texture0+state.fixedActiveTextureUnit);
 }
-void applyDesktopFixedVertexInputs(gl::Api& a,std::uint32_t program,const EngineMaterialState& state,const model::Mat4* textureMatrix0) {
+DesktopFixedVertexUniforms desktopFixedVertexUniformLocations(gl::Api& a,std::uint32_t program) {
+    return {a.GetUniformLocation(program,"uFixedCoordinates[0]"),
+        a.GetUniformLocation(program,"uFixedTexgenEnabled[0]"),
+        a.GetUniformLocation(program,"uFixedTexgenModes[0]"),
+        a.GetUniformLocation(program,"uFixedMatrices[0]")};
+}
+void applyDesktopFixedVertexInputs(gl::Api& a,const DesktopFixedVertexUniforms& u,const EngineMaterialState& state,const model::Mat4* textureMatrix0) {
     std::array<float,24> coordinates{},texgenEnabled{},texgenModes{};
     std::array<float,96> matrices{};
     for(unsigned unit=0;unit<6;++unit) {
@@ -383,10 +389,10 @@ void applyDesktopFixedVertexInputs(gl::Api& a,std::uint32_t program,const Engine
         const auto& matrix=unit==0&&textureMatrix0?*textureMatrix0:state.textureMatrix(unit);
         std::copy(matrix.values.begin(),matrix.values.end(),matrices.begin()+unit*16);
     }
-    a.Uniform4fv(a.GetUniformLocation(program,"uFixedCoordinates[0]"),6,coordinates.data());
-    a.Uniform4fv(a.GetUniformLocation(program,"uFixedTexgenEnabled[0]"),6,texgenEnabled.data());
-    a.Uniform4fv(a.GetUniformLocation(program,"uFixedTexgenModes[0]"),6,texgenModes.data());
-    a.UniformMatrix4fv(a.GetUniformLocation(program,"uFixedMatrices[0]"),6,0,matrices.data());
+    a.Uniform4fv(u.coordinates,6,coordinates.data());
+    a.Uniform4fv(u.texgenEnabled,6,texgenEnabled.data());
+    a.Uniform4fv(u.texgenModes,6,texgenModes.data());
+    a.UniformMatrix4fv(u.matrices,6,0,matrices.data());
 }
 model::Mat4 engineTextureRotation(float degrees) {
     if(!std::isfinite(degrees))throw std::invalid_argument("Non-finite engine texture angle");

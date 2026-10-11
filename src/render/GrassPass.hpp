@@ -33,6 +33,14 @@ public:
         std::uint64_t& drawCalls,std::string& error);
     void shutdown(gl::Api&) noexcept;
 private:
+    struct Uniforms {
+        gl::Int mv{},mvp{},textureMatrix{},fixedPath{},lighting{},normalizeNormals{};
+        gl::Int k1{},nvCombiners{},alphaTest{},lightmapped{},forceSight{},texture0{},texture1{};
+        gl::Int diffuse{},ambient{},emission{},alphaCutoff{},desaturation{},lightCount{};
+        gl::Int fogMode{},fogData{},fogColor{},fixedUv1Array{};
+        std::array<gl::Int,8> lightPosition{},lightDiffuse{},lightAmbient{},lightAttenuation{};
+        DesktopFixedVertexUniforms fixedInputs;
+    } desktopUniforms_,desktopFixedUniforms_;
     bool prepareDesktop(gl::Api&,bool fixedFragment,std::string&);
     gl::Loader loader_;
     desktop_programs::LegacyApi legacy_;
