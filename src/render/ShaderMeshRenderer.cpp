@@ -54,8 +54,8 @@ struct StateGuard {
     g::Int stencilClear{}, stencilState[2][7]{};
     std::array<AttributeState,15> attributes{};
     g::Int attributeCount{}, textureCount{};
-    explicit StateGuard(g::Api& a):api(a) {
-        api.GetIntegerv(g::MaxVertexAttribs,&attributeCount);attributeCount=std::min(attributeCount,15);
+    explicit StateGuard(g::Api& a,g::Int attributeLimit=15):api(a) {
+        api.GetIntegerv(g::MaxVertexAttribs,&attributeCount);attributeCount=std::min(attributeCount,attributeLimit);
         api.GetIntegerv(g::MaxTextureUnits,&textureCount);textureCount=std::min(textureCount,6);
         stencil=api.IsEnabled(g::StencilTest);
         api.GetBooleanv(g::ColorWriteMask,colorMask);
@@ -678,7 +678,10 @@ bool ShaderMeshRenderer::draw(const neomdl::model::Mesh& mesh,
         return true;
     }
     if(desktopFixedFragment && !i.prepareFixed(error))return false;
-    StateGuard restore(a);
+    const bool engineSkin=engineProgram==MaterialProgram::SkinBump || engineProgram==MaterialProgram::SkinBumpyShiny ||
+            engineProgram==MaterialProgram::SkinFlat || engineProgram==MaterialProgram::SkinEnvironment;
+    const bool k1Rigid=engineProgram==MaterialProgram::K1Rigid;
+    StateGuard restore(a,engineSkin || k1Rigid ? 15 : 9);
     if(enginePartMat&&p.enginePartMaterial) {
         i.desktopStandard.emission=p.enginePartMaterial->vertex[0];
         i.desktopStandard.diffuse=p.enginePartMaterial->vertex[1];
@@ -718,9 +721,6 @@ bool ShaderMeshRenderer::draw(const neomdl::model::Mesh& mesh,
         dirtyCleanup.active=true;
         if(!prepareDirtyBindings(a,p,dirtyPlan,nextMaterialState,error))return false;
     }
-    const bool engineSkin=engineProgram==MaterialProgram::SkinBump || engineProgram==MaterialProgram::SkinBumpyShiny ||
-            engineProgram==MaterialProgram::SkinFlat || engineProgram==MaterialProgram::SkinEnvironment;
-    const bool k1Rigid=engineProgram==MaterialProgram::K1Rigid;
     const bool generatedColorArray=!engineSkin&&!p.engineCpuSkin&&!p.engineOnlyGob&&p.lighting;
     // Flat::SetupArrays binds generated colors first, then SetInterleavedBuffer
     // replaces that pointer when the animmesh MDX bitmap contains authored

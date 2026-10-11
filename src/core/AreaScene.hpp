@@ -2,6 +2,7 @@
 
 #include "core/LightScene.hpp"
 #include "core/AreaObject.hpp"
+#include "core/SceneQueries.hpp"
 #include "core/GrassScene.hpp"
 #include "core/AreaLoad.hpp"
 #include "core/WeatherScene.hpp"
@@ -32,6 +33,9 @@ struct AreaRoom {
     // Engine room endpoints; a room without a static AABB Part retains the
     // inverted +100000/-100000 sentinel, not an invented geometry bound.
     model::Bounds bounds;
+    std::vector<model::Bounds> meshBounds;
+    std::vector<HitStaticPart> hitMeshes;
+    std::optional<HitStaticPart> hitAabb;
     bool background{};
     std::vector<LightRoomId> influencingRooms;
     std::optional<neoshared::bwm::BwmFile> walkmesh;
@@ -238,7 +242,8 @@ public:
     const std::vector<AreaRoom>& rooms() const noexcept { return rooms_; }
     const std::filesystem::path& path() const noexcept { return path_; }
     model::Bounds bounds() const noexcept;
-    std::vector<AreaMeshInstance> meshInstances(bool includeReferences = true, bool dangly = true) const;
+    std::vector<AreaMeshInstance> meshInstances(bool includeReferences = true, bool dangly = true,
+        const std::vector<model::TriggerPlane>& planes = {}) const;
 
     // CSWSArea::GetRoomIndex queries scoped WOK triangles in LYT order.
     // The position comes from the engine caller/host, never from an MDL box.

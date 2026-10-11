@@ -179,6 +179,8 @@ float engineOwnerCameraDistance(HitSphere sphere,model::Vec3 ownerPosition,
 // ComputePartBBox (Desktop 0xc6aa7): unscaled MDX positions, rigid frame,
 // Round(x,.001) = .001*floor(x/.001+.5). This is not the CPU hit pool.
 model::Bounds engineStaticHitBounds(const model::Mesh&, const HitPartTransform&);
+std::vector<HitStaticPart> engineStaticHitParts(const model::Model&, const model::Pose&,
+    const model::EngineFrame&, const neoshared::bif::JobControl& job = {});
 
 class SceneQueries final {
 public:

@@ -383,10 +383,6 @@ void AreaScene::loadResource(neoshared::ResourceDocument layout, const ResourceR
             }
             const auto& asset=room.document->model();
             const auto collapsed=engineCollapsedHitPose(asset,room.pose(),room.runtime->frame());
-
-
-
-
             bool hasStaticAabb=false;
             // Both SpawnRoom implementations preserve these inverted engine
             // endpoints when no static AABB Part survives the collapse.
@@ -407,6 +403,12 @@ void AreaScene::loadResource(neoshared::ResourceDocument layout, const ResourceR
             }
             if(!hasStaticAabb)room.bounds={{100000.0f,100000.0f,100000.0f},
                                          {-100000.0f,-100000.0f,-100000.0f},true};
+            room.meshBounds.resize(asset.meshes.size());
+            for(auto& part:engineStaticHitParts(asset,room.pose(),room.runtime->frame(),job)) {
+                room.meshBounds[*asset.nodes[part.node].mesh]=part.worldBounds;
+                if(asset.nodes[part.node].aabb)room.hitAabb=std::move(part);
+                else room.hitMeshes.push_back(std::move(part));
+            }
             pending.rooms_.push_back(std::move(room));
         }
     }
@@ -1149,7 +1151,8 @@ model::Bounds AreaScene::bounds() const noexcept {
     }
     return result;
 }
-std::vector<AreaMeshInstance> AreaScene::meshInstances(bool includeReferences,bool dangly) const {
+std::vector<AreaMeshInstance> AreaScene::meshInstances(bool includeReferences,bool dangly,
+        const std::vector<model::TriggerPlane>& planes) const {
     std::vector<AreaMeshInstance> result;
     for(const auto& object:objects_) {
         const auto& document=*object->document();
@@ -1159,6 +1162,7 @@ std::vector<AreaMeshInstance> AreaScene::meshInstances(bool includeReferences,bo
             if(isStatic) {
                 if(object->room()&&!roomActive(static_cast<LightRoomId>(*object->room()))) return;
             }
+            const auto* staticRoom=isStatic&&object->room()?room(static_cast<LightRoomId>(*object->room())):nullptr;
             const bool transparent=model::ownerTreeHasTransparency(asset,
                 asset.game==model::GameVersion::Kotor1?nullptr:&pose);
             for(std::size_t i=0;i<asset.meshes.size();++i) {
@@ -1170,6 +1174,8 @@ std::vector<AreaMeshInstance> AreaScene::meshInstances(bool includeReferences,bo
                 // of the ordinary part's MDX/index drawing stream.
                 if(asset.nodes[mesh.nodeIndex].aabb ? mesh.faces.empty() : indices.empty()) continue;
                 if(!asset.sceneNodeAdmission.empty()&&!asset.sceneNodeAdmission[mesh.nodeIndex]) continue;
+                if(staticRoom&&asset.game==model::GameVersion::Kotor2&&!asset.nodes[mesh.nodeIndex].aabb&&
+                   std::any_of(planes.begin(),planes.end(),[&](const auto& plane){return above(staticRoom->meshBounds[i],plane)>0.0f;}))continue;
                 AreaMeshInstance draw;
                 draw.document=&document;draw.asset=&asset;draw.pose=&pose;draw.mesh=&mesh;
                 draw.material=reference?&document.referenceMaterial(*reference,i):&document.material(i);

@@ -591,6 +591,28 @@ AnimMeshHitPools engineAnimMeshHitPools(const model::Model& model,const model::P
     return result;
 }
 
+std::vector<HitStaticPart> engineStaticHitParts(const Model& asset,const Pose& pose,
+        const model::EngineFrame& frame,const neoshared::bif::JobControl& job) {
+    std::vector<HitStaticPart> result;
+    const auto collapsed=engineCollapsedHitPose(asset,pose,frame);
+    const auto animated=engineAnimMeshHitPools(asset,pose);
+    auto queue=rootsOf(asset,asset.collapsedRoomParts);std::vector<bool> seen(asset.nodes.size());
+    // CollapsePartTree appends children to its growing list: breadth first.
+    for(std::size_t i=0;i<queue.size();++i) {
+        job.check();
+        const auto index=queue[i];require(index<asset.nodes.size()&&!seen[index],"invalid collapsed room tree");seen[index]=true;
+        const auto& node=asset.nodes[index];queue.insert(queue.end(),node.children.begin(),node.children.end());
+        if(!node.mesh)continue;
+        require(*node.mesh<asset.meshes.size()&&index<pose.worldTransforms.size(),"invalid room mesh");
+        HitStaticPart part;part.model=&asset;part.node=index;
+        part.transform=collapsed[index];
+        if(*node.mesh<animated.size())part.animmeshPositions=animated[*node.mesh];
+        part.worldBounds=engineStaticHitBounds(asset.meshes[*node.mesh],part.transform);
+        result.push_back(std::move(part));
+    }
+    return result;
+}
+
 void SceneQueries::synchronize(const ModelDocument& document,const model::Pose& pose,
         const ReferenceScene& references,const AreaScene& area,const TriggerScene& triggers,
         const ParticleScene* inspectionParticles) {
@@ -663,23 +685,7 @@ void SceneQueries::synchronize(const ModelDocument& document,const model::Pose& 
     std::vector<HitRoom> rooms;
     for(const auto& source:area.rooms()) {
         HitRoom room;room.id=source.id;room.bounds=source.bounds;
-        const auto& asset=source.document->model();
-        const auto collapsed=engineCollapsedHitPose(asset,source.pose(),source.runtime->frame());
-        const auto animated=engineAnimMeshHitPools(asset,source.pose());
-        auto queue=rootsOf(asset,asset.collapsedRoomParts);std::vector<bool> seen(asset.nodes.size());
-        // CollapsePartTree appends children to its growing list: breadth first.
-        for(std::size_t i=0;i<queue.size();++i) {
-            const auto index=queue[i];require(index<asset.nodes.size()&&!seen[index],"invalid collapsed room tree");seen[index]=true;
-            const auto& node=asset.nodes[index];queue.insert(queue.end(),node.children.begin(),node.children.end());
-            if(!node.mesh)continue;
-            require(*node.mesh<asset.meshes.size()&&index<source.pose().worldTransforms.size(),"invalid room mesh");
-            HitStaticPart part;part.model=&asset;part.node=index;
-            part.transform=collapsed[index];
-            if(*node.mesh<animated.size())part.animmeshPositions=animated[*node.mesh];
-            part.worldBounds=engineStaticHitBounds(asset.meshes[*node.mesh],part.transform);
-            if(node.aabb)room.aabb=part; // engine single slot: last assignment wins
-            else room.meshes.push_back(part);
-        }
+        room.meshes=source.hitMeshes;room.aabb=source.hitAabb;
         for(const auto& volume:triggers.volumes()) {
             const Vec3 center{(volume.bounds.minimum.x+volume.bounds.maximum.x)*0.5f,
                 (volume.bounds.minimum.y+volume.bounds.maximum.y)*0.5f,

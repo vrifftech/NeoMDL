@@ -4509,7 +4509,7 @@ void ModelCanvas::queueAreaRooms() {
                     reference.pose,reference.world,reference.frame,object->ownerVisualEffects(i));
         }
     }
-    for(const auto& draw:areaScene_.meshInstances(options_.showReferences,options_.danglySimulation)) {
+    for(const auto& draw:areaScene_.meshInstances(options_.showReferences,options_.danglySimulation,lastScenePlanes_)) {
         if(!draw.staticPart&&!engineOwnerAdmitted(draw.owner,draw.asset->classification))continue;
         const auto& mesh=*draw.mesh;
         const auto& node=draw.asset->nodes[mesh.nodeIndex];
