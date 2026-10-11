@@ -42,6 +42,7 @@ struct AttributeState {
 // attribute buffer associations, which remain attached after a VBO unbind.
 struct StateGuard {
     g::Api& api;
+    bool captureBindings;
     g::Int program{}, arrayBuffer{}, indexBuffer{}, active{}, textures[6]{}, cubes[6]{}, volumes[6]{};
     g::Int srcRgb{}, dstRgb{}, srcAlpha{}, dstAlpha{}, eqRgb{}, eqAlpha{};
     g::Int depthFunction{}, polygon[2]{}, cullMode{}, winding{};
@@ -54,7 +55,7 @@ struct StateGuard {
     g::Int stencilClear{}, stencilState[2][7]{};
     std::array<AttributeState,15> attributes{};
     g::Int attributeCount{}, textureCount{};
-    explicit StateGuard(g::Api& a,g::Int attributeLimit=15):api(a) {
+    explicit StateGuard(g::Api& a,g::Int attributeLimit=15,bool preserveBindings=true):api(a),captureBindings(preserveBindings) {
         api.GetIntegerv(g::MaxVertexAttribs,&attributeCount);attributeCount=std::min(attributeCount,attributeLimit);
         api.GetIntegerv(g::MaxTextureUnits,&textureCount);textureCount=std::min(textureCount,6);
         stencil=api.IsEnabled(g::StencilTest);
@@ -65,15 +66,20 @@ struct StateGuard {
             {g::StencilBackFunc,g::StencilBackRef,g::StencilBackValueMask,g::StencilBackWriteMask,g::StencilBackFail,g::StencilBackDepthFail,g::StencilBackDepthPass}};
         for (unsigned face=0;face<2;++face) for (unsigned field=0;field<7;++field)
             api.GetIntegerv(stencilKeys[face][field],&stencilState[face][field]);
-        api.GetIntegerv(g::CurrentProgram,&program);
-        api.GetIntegerv(g::ArrayBufferBinding,&arrayBuffer);
-        api.GetIntegerv(g::ElementArrayBufferBinding,&indexBuffer);
+        if(captureBindings) {
+            api.GetIntegerv(g::CurrentProgram,&program);
+            api.GetIntegerv(g::ArrayBufferBinding,&arrayBuffer);
+            api.GetIntegerv(g::ElementArrayBufferBinding,&indexBuffer);
+        }
         api.GetIntegerv(g::ActiveTexture,&active);
         for (g::UInt i=0;i<static_cast<g::UInt>(textureCount);++i) {
-            api.ActiveTexture(g::Texture0+i); api.GetIntegerv(g::TextureBinding2D,&textures[i]);
+            api.ActiveTexture(g::Texture0+i);
+            if(captureBindings) {
+                api.GetIntegerv(g::TextureBinding2D,&textures[i]);
+                api.GetIntegerv(g::TextureBindingCube,&cubes[i]);
+                api.GetIntegerv(0x806a,&volumes[i]);
+            }
             textureEnabled[i]=api.IsEnabled(g::Texture2D);
-            api.GetIntegerv(g::TextureBindingCube,&cubes[i]);
-            api.GetIntegerv(0x806a,&volumes[i]);
         }
         api.ActiveTexture(static_cast<g::Enum>(active));
         api.GetIntegerv(g::BlendSrcRgb,&srcRgb); api.GetIntegerv(g::BlendDstRgb,&dstRgb);
@@ -122,17 +128,21 @@ struct StateGuard {
             if (s.enabled) api.EnableVertexAttribArray(i); else api.DisableVertexAttribArray(i);
             if(i!=0)api.VertexAttrib4fv(i,s.current.data());
         }
-        api.BindBuffer(g::ArrayBuffer,static_cast<g::UInt>(arrayBuffer));
-        api.BindBuffer(g::ElementArrayBuffer,static_cast<g::UInt>(indexBuffer));
+        if(captureBindings) {
+            api.BindBuffer(g::ArrayBuffer,static_cast<g::UInt>(arrayBuffer));
+            api.BindBuffer(g::ElementArrayBuffer,static_cast<g::UInt>(indexBuffer));
+        }
         for (g::UInt i=0;i<static_cast<g::UInt>(textureCount);++i) {
             api.ActiveTexture(g::Texture0+i);
-            api.BindTexture(g::Texture2D,static_cast<g::UInt>(textures[i]));
-            api.BindTexture(g::TextureCube,static_cast<g::UInt>(cubes[i]));
-            api.BindTexture(0x806f,static_cast<g::UInt>(volumes[i]));
+            if(captureBindings) {
+                api.BindTexture(g::Texture2D,static_cast<g::UInt>(textures[i]));
+                api.BindTexture(g::TextureCube,static_cast<g::UInt>(cubes[i]));
+                api.BindTexture(0x806f,static_cast<g::UInt>(volumes[i]));
+            }
             enabled(api,g::Texture2D,textureEnabled[i]!=0);
         }
         api.ActiveTexture(static_cast<g::Enum>(active));
-        api.UseProgram(static_cast<g::UInt>(program));
+        if(captureBindings)api.UseProgram(static_cast<g::UInt>(program));
         api.BlendFuncSeparate(static_cast<g::Enum>(srcRgb),static_cast<g::Enum>(dstRgb),
                               static_cast<g::Enum>(srcAlpha),static_cast<g::Enum>(dstAlpha));
         api.BlendEquationSeparate(static_cast<g::Enum>(eqRgb),static_cast<g::Enum>(eqAlpha));
@@ -447,6 +457,12 @@ bool ShaderMeshRenderer::draw(const neomdl::model::Mesh& mesh,
     const neomdl::model::DeformedMesh* deformed,std::uint64_t revision,
     const MeshDrawParameters& parameters,std::string& error) {
     MeshDrawParameters p=parameters;
+    return drawPrepared(mesh,deformed,revision,p,error);
+}
+
+bool ShaderMeshRenderer::drawPrepared(const neomdl::model::Mesh& mesh,
+    const neomdl::model::DeformedMesh* deformed,std::uint64_t revision,
+    MeshDrawParameters& p,std::string& error) {
     const bool k1DesktopScene=impl_->sceneActive &&
         impl_->sceneGame==model::GameVersion::Kotor1;
     if(k1DesktopScene && (p.particlePass || p.lightsaberPass ||
@@ -675,7 +691,7 @@ bool ShaderMeshRenderer::draw(const neomdl::model::Mesh& mesh,
     const bool engineSkin=engineProgram==MaterialProgram::SkinBump || engineProgram==MaterialProgram::SkinBumpyShiny ||
             engineProgram==MaterialProgram::SkinFlat || engineProgram==MaterialProgram::SkinEnvironment;
     const bool k1Rigid=engineProgram==MaterialProgram::K1Rigid;
-    StateGuard restore(a,i.sceneActive ? 0 : (engineSkin || k1Rigid ? 15 : 9));
+    StateGuard restore(a,i.sceneActive ? 0 : (engineSkin || k1Rigid ? 15 : 9),!i.sceneActive);
     if(enginePartMat&&p.enginePartMaterial) {
         i.desktopStandard.emission=p.enginePartMaterial->vertex[0];
         i.desktopStandard.diffuse=p.enginePartMaterial->vertex[1];
@@ -1226,7 +1242,7 @@ bool ShaderMeshRenderer::draw(const neomdl::model::Mesh& mesh,
                 programs.ready=true;
             }
             auto& x=programs.x;
-            desktop_programs::LegacyGuard engineRestore(a,x,&p);
+            desktop_programs::LegacyGuard engineRestore(a,x,p.projection.values.data(),p.modelView.values.data());
             const auto vertex=programs.program(a,desktop_programs::VP,skin_programs::PosedMotionBlur,error);
             if(!vertex)return false;
             a.UseProgram(0);x.BindProgramARB(desktop_programs::VP,vertex);a.Enable(desktop_programs::VP);
@@ -1679,21 +1695,12 @@ bool ShaderMeshRenderer::drawQueue(const std::vector<MeshSubmission>& input,std:
     // from SetScene. Late emitter/saber/blur buckets retain borrowed pointers.
     if(gobBucket)submissions.erase(std::remove_if(submissions.begin(),submissions.end(),expired),submissions.end());
     try {
-        for(auto& s:submissions)resolveSceneSubmission(s);
+        if(!gobBucket)for(auto& s:submissions)resolveSceneSubmission(s);
     } catch(const std::exception& e) {error=e.what();return false;}
-    std::vector<neomdl::material::QueueKey> keys;
-    keys.reserve(submissions.size());
     for(const auto& submission:submissions) {
         if(!submission.mesh && !(submission.ownerOnly && submission.sceneOwner && !submission.drawPrimary && !submission.trailingShell && ordering!=QueueOrdering::K2StaticMeshes && !submission.parameters.selected)) {
             error="Null mesh in scene render queue";return false;
         }
-        // Keep a particle emitter's base and four neighboring-frame passes
-        // adjacent. Their blend states differ but their sorting key does not.
-        keys.push_back({submission.parameters.particlePass
-                ? neomdl::material::RenderPass::Translucent
-                : submission.parameters.material.pass,
-            submission.eyeDepth, submission.authoredOrderGroup,
-            submission.authoredOrder});
     }
     std::vector<std::size_t> order;
     std::vector<std::vector<std::size_t>> gobGroups;
@@ -1765,6 +1772,17 @@ bool ShaderMeshRenderer::drawQueue(const std::vector<MeshSubmission>& input,std:
         liveGobOrder.assign(groupOrder.rbegin(),groupOrder.rend());
         for(auto& group:groups)gobGroups.push_back(std::move(group.submissions));
     } else {
+        std::vector<neomdl::material::QueueKey> keys;
+        keys.reserve(submissions.size());
+        for(const auto& submission:submissions) {
+            // Keep a particle emitter's base and four neighboring-frame passes
+            // adjacent. Their blend states differ but their sorting key does not.
+            keys.push_back({submission.parameters.particlePass
+                    ? neomdl::material::RenderPass::Translucent
+                    : submission.parameters.material.pass,
+                submission.eyeDepth, submission.authoredOrderGroup,
+                submission.authoredOrder});
+        }
         order=neomdl::material::renderQueueOrder(keys);
     }
     std::vector<bool> admitted(submissions.size(),false);
@@ -1773,7 +1791,7 @@ bool ShaderMeshRenderer::drawQueue(const std::vector<MeshSubmission>& input,std:
         try {
             // Keep the sort's pre-animation keys. Gob::Animate has now run;
             // each Part borrows its current deformation/material/transform.
-            if(beginOwner||animateOwner)for(const auto index:indices)resolveSceneSubmission(submissions[index]);
+            if(gobBucket||beginOwner||animateOwner)for(const auto index:indices)resolveSceneSubmission(submissions[index]);
             // VisibilityCheck's enablevisibilitytest global is zero and has
             // no internal producer in the supplied builds: its active return
             // is true. Coarse BSP admission already formed this Gob bucket.
@@ -1786,7 +1804,7 @@ bool ShaderMeshRenderer::drawQueue(const std::vector<MeshSubmission>& input,std:
             if(s.drawPrimary||s.materialOnly) {
                 if(s.prepareTextures && !s.prepareTextures(parameters,error)) return false;
                 if(s.materialOnly) {if(!consumeEnginePartMaterial(*s.mesh,parameters,error))return false;}
-                else if(!draw(*s.mesh,s.deformed,s.poseRevision,parameters,error)) return false;
+                else if(!drawPrepared(*s.mesh,s.deformed,s.poseRevision,parameters,error)) return false;
             }
             if(s.trailingShell) {
                 auto shell=*s.trailingShell;
@@ -1801,7 +1819,7 @@ bool ShaderMeshRenderer::drawQueue(const std::vector<MeshSubmission>& input,std:
                     shell.sceneAmbient=parameters.sceneAmbient;
                 }
                 if(s.prepareTextures && !s.prepareTextures(shell,error)) return false;
-                if(!draw(*s.mesh,s.deformed,s.poseRevision,shell,error)) return false;
+                if(!drawPrepared(*s.mesh,s.deformed,s.poseRevision,shell,error)) return false;
             }
         }
         return !completedOwner||!first.sceneOwner||completedOwner(submissions,indices,error);
@@ -1850,7 +1868,7 @@ bool ShaderMeshRenderer::drawQueue(const std::vector<MeshSubmission>& input,std:
         const auto& s=submissions[index];
         if(!admitted[index]||impl_->distortionActive||!s.parameters.selected||s.parameters.wireframe)continue;
         auto parameters=s.parameters; parameters.outlineOnly=true;
-        if(!draw(*s.mesh,s.deformed,s.poseRevision,parameters,error)) return false;
+        if(!drawPrepared(*s.mesh,s.deformed,s.poseRevision,parameters,error)) return false;
     }
     return true;
 }

@@ -154,7 +154,7 @@ bool K1MaterialPass::prepare(g::Api& a,const MeshDrawParameters& p,std::string& 
 }
 bool K1MaterialPass::draw(g::Api& a,const model::Mesh& mesh,const MeshDrawParameters& p,
     EngineMaterialState& state,g::UInt normalization,g::UInt vbo,g::Size,const std::vector<model::EngineMeshDraw>& batches,std::uint64_t& calls,std::string& error) {
-    auto& i=*impl_;auto& x=i.x;auto& f=i.fixed;LegacyGuard restore(a,x,&p);
+    auto& i=*impl_;auto& x=i.x;auto& f=i.fixed;LegacyGuard restore(a,x,p.projection.values.data(),p.modelView.values.data());
     f.PushClientAttrib(0x2);
     struct ClientState { FixedApi& f; ~ClientState(){f.PopClientAttrib();} } client{f};
     a.UseProgram(0);a.Disable(VP);a.Disable(FP);a.Disable(g::ColorMaterial);
@@ -198,7 +198,7 @@ bool K1MaterialPass::draw(g::Api& a,const model::Mesh& mesh,const MeshDrawParame
         if(p.material.engineHardware.cubeMap)target.enabled[1]=cube;
         target.enabled[2]=false;target.enabled[cube?1:0]=texture!=0;
         a.ActiveTexture(g::Texture0+unit);a.BindTexture(cube?g::TextureCube:g::Texture2D,texture);enabled(a,cube?g::TextureCube:g::Texture2D,texture!=0);a.ActiveTexture(g::Texture0);return true;};
-    const auto fp=[&](const std::string& program){const auto id=i.program(a,FP,program,error);if(!id)return false;x.BindProgramARB(FP,id);i.setLocalParameters(FP,id,0,state.fragmentConstants.data(),state.fragmentConstants.size());a.Enable(FP);if(selectedPath(p)!=Path::NV1xEMLM||p.material.engineAtiValidation)state.bindFragmentProgram(program);return true;};
+    const auto fp=[&](std::string_view program){const auto id=i.program(a,FP,program,error);if(!id)return false;x.BindProgramARB(FP,id);i.setLocalParameters(FP,id,0,state.fragmentConstants.data(),state.fragmentConstants.size());a.Enable(FP);if(selectedPath(p)!=Path::NV1xEMLM||p.material.engineAtiValidation)state.bindFragmentProgram(program);return true;};
     const auto draw=[&](){
         static constexpr g::Enum modes[]={0,1,3,4,5,6,7,8,9,2};
         for(const auto& batch:batches){a.DrawElements(modes[batch.primitive],static_cast<g::Size>(batch.indexCount),g::UnsignedInt,reinterpret_cast<const void*>(batch.firstIndex*sizeof(std::uint32_t)));++calls;}
@@ -267,7 +267,7 @@ bool K1MaterialPass::draw(g::Api& a,const model::Mesh& mesh,const MeshDrawParame
         for(unsigned row=0;row<3;++row)constants[92-row]={{p.worldFromEye.values[row],p.worldFromEye.values[4+row],p.worldFromEye.values[8+row],p.worldFromEye.values[12+row]}};
         for(unsigned row=0;row<3;++row)constants[93+row]=p.enginePartMaterial->vertex[row];
         for(unsigned n=0;n<std::min(p.lightCount,p.lights.size());++n){const auto& light=p.lights[n];auto& pos=constants[70+4*n];for(unsigned row=0;row<3;++row)pos[row]=p.worldFromEye.values[row]*light.position[0]+p.worldFromEye.values[4+row]*light.position[1]+p.worldFromEye.values[8+row]*light.position[2]+p.worldFromEye.values[12+row]*light.position[3];pos[3]=light.position[3];constants[71+4*n]={{light.attenuation[0],light.attenuation[1],light.attenuation[2],0}};constants[72+4*n]={{light.ambient[0],light.ambient[1],light.ambient[2],1}};constants[73+4*n]={{light.diffuse[0],light.diffuse[1],light.diffuse[2],1}};}
-        const auto vp=[&](const std::string& program){const auto id=i.program(a,VP,program,error);if(!id)return false;x.BindProgramARB(VP,id);i.setLocalParameters(VP,id,0,constants.data(),constants.size());a.Enable(VP);return true;};
+        const auto vp=[&](std::string_view program){const auto id=i.program(a,VP,program,error);if(!id)return false;x.BindProgramARB(VP,id);i.setLocalParameters(VP,id,0,constants.data(),constants.size());a.Enable(VP);return true;};
         const g::UInt slots[]={0,2,8,9,12,13,14};const g::Int sizes[]={3,3,2,2,3,3,3};const std::size_t offsets[]={offsetof(EngineRigidVertex,position),offsetof(EngineRigidVertex,normal),offsetof(EngineRigidVertex,uv0),offsetof(EngineRigidVertex,uv1),offsetof(EngineRigidVertex,basis4),offsetof(EngineRigidVertex,basis5),offsetof(EngineRigidVertex,basis6)};
         const auto attributes=[&](){for(unsigned n=0;n<7;++n){a.EnableVertexAttribArray(slots[n]);a.VertexAttribPointer(slots[n],sizes[n],g::Float,0,sizeof(EngineRigidVertex),reinterpret_cast<const void*>(offsets[n]));}const float current[]={0,0,0,1};a.VertexAttrib4fv(10,current);a.VertexAttrib4fv(11,current);};
         const auto cleanup=[&](){state.finishFragmentCommand(0,true);a.Disable(FP);x.BindProgramARB(FP,0);for(unsigned unit=0;unit<4;++unit){state.bind(unit,false,0);a.ActiveTexture(g::Texture0+unit);a.BindTexture(g::Texture2D,0);}a.ActiveTexture(g::Texture0);};

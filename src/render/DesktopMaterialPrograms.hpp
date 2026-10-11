@@ -5,7 +5,7 @@
 #include <string>
 #include <string_view>
 #include <vector>
-namespace neomdl::render { struct MeshDrawParameters; struct PreviewLight; }
+namespace neomdl::render { struct PreviewLight; }
 namespace neomdl::render::desktop_programs {
 namespace g=gl;
 constexpr g::Enum VP=0x8620, FP=0x8804, ProgramBinding=0x8677;
@@ -40,18 +40,19 @@ struct LegacyApi {
 #undef DESKTOP_PROGRAM_GL
 struct LegacyGuard {
     g::Api& a; LegacyApi& x; g::Int mode{},vp{},fp{}; bool matrices{};
-    LegacyGuard(g::Api&,LegacyApi&,const MeshDrawParameters* = nullptr);
+    LegacyGuard(g::Api&,LegacyApi&,const float* projection=nullptr,
+                const float* modelView=nullptr);
     ~LegacyGuard();
 };
 const char* standardFogFragment(bool kotor1);
 struct ProgramCache {
     g::Loader loader; LegacyApi x; bool ready{};
-    std::map<std::string,g::UInt> programs;
+    std::map<std::string,g::UInt,std::less<>> programs;
     std::map<std::string,std::map<std::string,std::string>,std::less<>> lightSources;
     struct LocalParameter {std::array<float,4> value{};bool initialized{};};
     std::map<std::pair<g::Enum,g::UInt>,std::vector<LocalParameter>> localParameters;
     const std::string& lightProgram(std::string_view,const std::vector<PreviewLight>&);
-    g::UInt program(g::Api&,g::Enum,const std::string&,std::string&);
+    g::UInt program(g::Api&,g::Enum,std::string_view,std::string&);
     void setLocalParameters(g::Enum,g::UInt,g::UInt,const std::array<float,4>*,std::size_t);
     void shutdown();
 };

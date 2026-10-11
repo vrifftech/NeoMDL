@@ -4,6 +4,7 @@
 #include <vector>
 #include <model/Model.hpp>
 #include <string>
+#include <string_view>
 
 namespace neomdl::render {
 struct MeshDrawParameters;
@@ -84,7 +85,7 @@ public:
     // Shader source is the relocated executable identity, never host GL state.
     std::string fragmentProgram;
     bool fragmentProgramEnabled{};
-    void bindFragmentProgram(const std::string& source) { fragmentProgram=source;fragmentProgramEnabled=true; }
+    void bindFragmentProgram(std::string_view source) { fragmentProgram=source;fragmentProgramEnabled=true; }
     void disableFragmentProgram(bool unbind=false) { fragmentProgramEnabled=false;if(unbind)fragmentProgram.clear(); }
     // Engine SetFragmentShaderConstant and dispatcher writes use shared env
     // registers; executable ARB translations relocate those to private locals.

@@ -39,12 +39,13 @@ const std::string& ProgramCache::lightProgram(std::string_view source,const std:
     result+=Light529ab0;result+=Light529ae2;result+=Light529b08;result+="END\n";
     return variants.emplace(std::move(pattern),std::move(result)).first->second;
 }
-LegacyGuard::LegacyGuard(g::Api& a_,LegacyApi& x_,const MeshDrawParameters* p):a(a_),x(x_) {
+LegacyGuard::LegacyGuard(g::Api& a_,LegacyApi& x_,const float* projection,
+    const float* modelView):a(a_),x(x_) {
     a.GetIntegerv(MatrixMode,&mode);x.GetProgramivARB(VP,ProgramBinding,&vp);x.GetProgramivARB(FP,ProgramBinding,&fp);
     x.PushAttrib(0x000fffff);
-    if(p) {
-        x.MatrixMode(Projection);x.PushMatrix();x.LoadMatrixf(p->projection.values.data());
-        x.MatrixMode(ModelView);x.PushMatrix();x.LoadMatrixf(p->modelView.values.data());
+    if(projection) {
+        x.MatrixMode(Projection);x.PushMatrix();x.LoadMatrixf(projection);
+        x.MatrixMode(ModelView);x.PushMatrix();x.LoadMatrixf(modelView);
         matrices=true;
     }
 }
@@ -53,7 +54,7 @@ LegacyGuard::~LegacyGuard(){
     x.PopAttrib();x.BindProgramARB(VP,static_cast<g::UInt>(vp));x.BindProgramARB(FP,static_cast<g::UInt>(fp));
     x.MatrixMode(static_cast<g::Enum>(mode));
 }
-g::UInt ProgramCache::program(g::Api& a,g::Enum target,const std::string& text,std::string& error) {
+g::UInt ProgramCache::program(g::Api& a,g::Enum target,std::string_view text,std::string& error) {
         const auto old=programs.find(text);if(old!=programs.end())return old->second;
         g::UInt id{};x.GenProgramsARB(1,&id);if(!id){error="Could not allocate engine Desktop material program";return 0;}
         g::Int previous{};x.GetProgramivARB(target,ProgramBinding,&previous);
@@ -67,7 +68,7 @@ g::UInt ProgramCache::program(g::Api& a,g::Enum target,const std::string& text,s
             const auto* log=a.GetString(0x8874);error="Engine Desktop ARB program rejected at "+std::to_string(location)+": "+(log?reinterpret_cast<const char*>(log):"no driver log");
             x.DeleteProgramsARB(1,&id);return 0;
         }
-        programs.emplace(text,id);return id;
+        programs.emplace(std::string(text),id);return id;
     }
 
 void ProgramCache::setLocalParameters(g::Enum target,g::UInt program,g::UInt first,

@@ -2411,7 +2411,25 @@ void calculatePoseTransformsAndBounds(const Model& model, Pose& pose,
     // Keep PartAnimMesh's local pools across controller/recalculate passes.
     pose.deformedMeshes.resize(model.meshes.size());
     for (std::size_t i=0;i<model.meshes.size();++i)
-        if (!model.meshes[i].animated) pose.deformedMeshes[i] = DeformedMesh{};
+        if (!model.meshes[i].animated) {
+            auto& deformed = pose.deformedMeshes[i];
+            deformed.valid = false;
+            deformed.animmesh.reset();
+            deformed.animMeshPartFrame = identityMatrix();
+            deformed.danglyPartFrame = identityMatrix();
+            deformed.preserveTangentBasis = false;
+            deformed.positions.clear();
+            deformed.normals.clear();
+            deformed.rawSkinNormals.clear();
+            deformed.tangents.clear();
+            deformed.bitangents.clear();
+            deformed.basisNormals.clear();
+            deformed.exactTangentBasis.clear();
+            deformed.skinPartFrame = identityMatrix();
+            deformed.skinPalette = {};
+            deformed.skinPaletteSize = 0u;
+            deformed.rejectedInfluences = 0u;
+        }
     for (std::size_t meshIndex = 0u; meshIndex < model.meshes.size(); ++meshIndex) {
         job.check();
         const auto& mesh = model.meshes[meshIndex];

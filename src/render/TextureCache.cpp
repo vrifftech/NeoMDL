@@ -240,6 +240,11 @@ GpuTexture TextureCache::upload(const neoshared::texture::TextureData& texture,
                             std::size_t layer,std::string& error,bool engineProcedure) {
     error.clear();
     if(!ready_) {error="Texture upload context is not initialized";return {};}
+    if(const auto found=entries_.find(&texture);found!=entries_.end()) {
+        const auto first=found->second.find(0u);
+        if(first!=found->second.end()&&first->second.cube)return first->second;
+        if(const auto cached=found->second.find(layer);cached!=found->second.end())return cached->second;
+    }
     if(texture.processedPayload)return uploadProcessed(texture,metadata,layer,error,engineProcedure);
     if(engineRuntime_) {
         // GLRender::CreateTexture and CreateCubeTexture consume the engine
@@ -248,9 +253,6 @@ GpuTexture TextureCache::upload(const neoshared::texture::TextureData& texture,
         const auto txi=metadata?metadata->txi:neoshared::material::parseMaterialTxi(texture.txi);
         const bool cube=texture.cubeMap||txi.properties.cube.value_or(false);
         if(cube)layer=0;
-        if(const auto found=entries_.find(&texture);found!=entries_.end()) {
-            if(const auto cached=found->second.find(layer);cached!=found->second.end())return cached->second;
-        }
         if(layer>=texture.layers.size()){error="Texture frame is outside decoded layers";return {};}
         if(api_.GetError()!=g::NoError){error="Pending OpenGL error before texture upload";return {};}
         g::Int maximum{},gluMaximum{};
@@ -332,10 +334,6 @@ GpuTexture TextureCache::upload(const neoshared::texture::TextureData& texture,
         entries_[&texture].emplace(layer,result);return result;
     }
     if(texture.cubeMap) layer=0;
-    const auto found=entries_.find(&texture);
-    if(found!=entries_.end()) {
-        const auto cached=found->second.find(layer);if(cached!=found->second.end()) return cached->second;
-    }
     if(layer>=texture.layers.size()) {error="Texture frame is outside decoded layers";return {};}
     auto& a=api_;
     if(a.GetError()!=g::NoError) {error="Pending OpenGL error before texture upload";return {};}
@@ -721,8 +719,17 @@ bool TextureCache::setProcedureGluPath(ProcedureGluPath path,std::string& error)
 bool TextureCache::uploadPixelTids(ProcedureRecord& r,std::string& error) {
     error.clear();
     if(r.uploadedRevision==r.controller.revision())return true;
-    struct FacePlan {std::vector<material::ProcedureImage> levels;bool glu{};};
+    struct FacePlan {
+        std::vector<material::ProcedureImage> levels;
+        const material::ProcedureImage* source{};
+        bool glu{};
+        const material::ProcedureImage& image(std::size_t level) const {
+            return source?*source:levels[level];
+        }
+        std::size_t size() const {return source?1u:levels.size();}
+    };
     std::vector<std::vector<FacePlan>> plans;
+    std::vector<std::vector<material::ProcedureImage>> tids;
     const bool updating=r.uploadedRevision!=std::numeric_limits<std::uint64_t>::max();
     const bool mip=r.metadata.txi.properties.mipmap.value_or(true);
     const bool runtimeMips=r.storage.mipOwnership==material::ProcedureMipOwnership::RuntimeGenerated;
@@ -733,9 +740,7 @@ bool TextureCache::uploadPixelTids(ProcedureRecord& r,std::string& error) {
         api_.GetIntegerv(0x0d33u,&gluMaximum);
     try {
         const auto& d=r.controller.definition();
-        auto tids=material::procedureTidImages(r.controller.image(),unsigned(d.numX),unsigned(d.numY),r.cube,r.cubeLayout);
-        plans.resize(tids.size());
-        for(std::size_t tid=0;tid<tids.size();++tid)for(auto& face:tids[tid]) {
+        const auto prepare=[&](const material::ProcedureImage& face) {
             FacePlan p;
             p.glu=explicitMips&&(r.cube||(!updating&&face.bytesPerPixel!=2));
             if(r.normalUpload)p.levels=material::procedureNormalLevels(face,
@@ -744,8 +749,17 @@ bool TextureCache::uploadPixelTids(ProcedureRecord& r,std::string& error) {
             else if(explicitMips) p.levels=material::procedureMipLevels(face,
                 r.cube||(!updating&&face.bytesPerPixel!=2)?material::ProcedureMipKernel::GluByte:material::ProcedureMipKernel::AurUpdate,
                 unsigned(gluMaximum));
-            else p.levels.push_back(std::move(face));
-            plans[tid].push_back(std::move(p));
+            else p.source=&face;
+            return p;
+        };
+        if(!r.cube&&d.numX==1&&d.numY==1) {
+            plans.resize(1);
+            plans[0].push_back(prepare(r.controller.image()));
+        } else {
+            tids=material::procedureTidImages(r.controller.image(),unsigned(d.numX),unsigned(d.numY),r.cube,r.cubeLayout);
+            plans.resize(tids.size());
+            for(std::size_t tid=0;tid<tids.size();++tid)for(const auto& face:tids[tid])
+                plans[tid].push_back(prepare(face));
         }
     } catch(const std::exception& e) {error=e.what();return false;}
     auto& targets=entries_[r.source];
@@ -759,7 +773,7 @@ bool TextureCache::uploadPixelTids(ProcedureRecord& r,std::string& error) {
             procedureIds_[target.id]=&r;
         }
         target.cube=r.cube;target.engineNormal=r.normalUpload;
-        target.width=plans[tid][0].levels[0].width;target.height=plans[tid][0].levels[0].height;
+        target.width=plans[tid][0].image(0).width;target.height=plans[tid][0].image(0).height;
         const auto binding=r.cube?gl::TextureCube:gl::Texture2D;
         api_.BindTexture(binding,target.id);
         const bool filter=r.metadata.txi.properties.filter.value_or(true);
@@ -775,8 +789,8 @@ bool TextureCache::uploadPixelTids(ProcedureRecord& r,std::string& error) {
             api_.TexParameteri(binding,0x2801,mip?(filter?0x2703:0x2700):(filter?0x2601:0x2600));
             api_.TexParameteri(binding,0x2800,filter?0x2601:0x2600);
         }
-        for(std::size_t face=0;face<plans[tid].size();++face)for(std::size_t l=0;l<plans[tid][face].levels.size();++l) {
-            const auto& p=plans[tid][face].levels[l];
+        for(std::size_t face=0;face<plans[tid].size();++face)for(std::size_t l=0;l<plans[tid][face].size();++l) {
+            const auto& p=plans[tid][face].image(l);
             const auto imageTarget=r.cube?0x8515u+gl::Enum(face):gl::Texture2D;
             const auto format=r.normalUpload?0x80e1u:p.bytesPerPixel==4?0x1908u:p.bytesPerPixel==3?0x1907u:
                 p.bytesPerPixel==2?(r.cube?0x190au:0x1908u):0x1909u;

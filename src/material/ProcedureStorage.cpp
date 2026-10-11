@@ -311,12 +311,10 @@ std::vector<ProcedureImage> procedureMipLevels(const ProcedureImage& p,Procedure
         }
         return levels;
     }
-    ProcedureImage base=p;
-    if(p.width!=p.height) {
-        const auto extent=std::max(p.width,p.height);
-        base=aurImageScale(p,extent,extent);
-    }
-    std::vector<ProcedureImage> levels{std::move(base)};
+    const auto extent=std::max(p.width,p.height);
+    ProcedureImage base=p.width!=p.height?aurImageScale(p,extent,extent):p;
+    std::vector<ProcedureImage> levels;
+    levels.push_back(std::move(base));
     while(levels.back().width>1||levels.back().height>1) {
         const auto& s=levels.back();ProcedureImage d;
         d.width=std::max(1u,s.width/2);d.height=std::max(1u,s.height/2);d.bytesPerPixel=s.bytesPerPixel;

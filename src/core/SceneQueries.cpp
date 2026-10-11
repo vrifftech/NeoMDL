@@ -3,7 +3,7 @@
 #include "core/ReferenceScene.hpp"
 #include "core/AreaScene.hpp"
 #include "core/TriggerScene.hpp"
-#include "core/SceneOwners.hpp"
+#include "core/ParticleScene.hpp"
 #include "core/RoomSurfaceMesh.hpp"
 
 #include <algorithm>
@@ -684,21 +684,40 @@ void SceneQueries::synchronize(const ModelDocument& document,const model::Pose& 
             visualInputs(i);
         }
     }
-    const auto registeredChunks=collectParticleChunkOwners(inspectionParticles,area);
-    const auto appendChunk=[&](const SceneOwnerView& chunk,bool registered) {
-        const auto* old=owner(chunk.id);
-        const bool constructed=!old||old->model!=chunk.asset;
-        append(chunk.id,*chunk.asset,*chunk.pose,chunk.frame,registered);
-        // SetObjectScale on pool reuse changes the hit transform, not the
-        // constructed Gob +0x164 radius retained by ChunkyParticle.
-        if(constructed)pending.back().value.sphere.radius=chunk.lightSphere.radius;
-    };
     std::unordered_set<HitOwnerId> registeredChunkIds;
-    for(const auto& chunk:registeredChunks) {
-        registeredChunkIds.insert(chunk.id);appendChunk(chunk,true);
-    }
-    for(const auto& chunk:collectParticleChunkOwners(inspectionParticles,area,true,false))
-        if(registeredChunkIds.find(chunk.id)==registeredChunkIds.end())appendChunk(chunk,false);
+    const auto appendChunks=[&](bool registered) {
+        std::vector<const ParticleScene*> scenes;
+        const auto collect=[&](const ParticleScene& source) {
+            if(registered)source.appendActiveChunkScenes(scenes);
+            else source.appendAllocatedChunkScenes(scenes);
+        };
+        if(inspectionParticles)collect(*inspectionParticles);
+        for(const auto* root:area.particleSceneRoots())collect(*root);
+        if(registered)std::stable_sort(scenes.begin(),scenes.end(),[](const auto* left,const auto* right) {
+            return left->chunkOwner()->sceneRegistration<right->chunkOwner()->sceneRegistration;
+        });
+        for(const auto* scene:scenes) {
+            const auto& chunk=*scene->chunkOwner();
+            const auto appendChunk=[&](HitOwnerId id,const Model& asset,const Pose& current,
+                                      const model::EngineFrame& frame,bool primary) {
+                if(!registered&&registeredChunkIds.find(id)!=registeredChunkIds.end())return;
+                if(registered)registeredChunkIds.insert(id);
+                const auto* old=owner(id);
+                const bool constructed=!old||old->model!=&asset;
+                append(id,asset,current,frame,registered);
+                // Pool reuse retains the constructed Gob +0x164 radius.
+                if(primary&&constructed)pending.back().value.sphere.radius=chunk.engineOwnerRadius;
+            };
+            appendChunk(chunk.ownerIdentity,chunk.asset->model(),chunk.pose,chunk.frame,true);
+            for(std::size_t i=0;i<chunk.references->instances().size();++i) {
+                const auto& reference=chunk.references->instances()[i];
+                if(registered&&(!reference.active||!reference.sceneMember))continue;
+                appendChunk(chunk.ownerIdentity+i+1u,chunk.asset->references()[i].model,
+                    reference.pose,reference.frame,false);
+            }
+        }
+    };
+    appendChunks(true);appendChunks(false);
     std::vector<HitRoom> rooms;
     for(const auto& source:area.rooms()) {
         HitRoom room;room.id=source.id;room.bounds=source.bounds;
@@ -708,8 +727,11 @@ void SceneQueries::synchronize(const ModelDocument& document,const model::Pose& 
                 (volume.bounds.minimum.y+volume.bounds.maximum.y)*0.5f,
                 (volume.bounds.minimum.z+volume.bounds.maximum.z)*0.5f};
             if(center.x>=room.bounds.minimum.x&&center.x<=room.bounds.maximum.x&&
-               center.y>=room.bounds.minimum.y&&center.y<=room.bounds.maximum.y)
-                room.triggers.push_back(volume); // no light-style all-room fallback
+               center.y>=room.bounds.minimum.y&&center.y<=room.bounds.maximum.y) {
+                auto& hit=room.triggers.emplace_back();
+                hit.bounds=volume.bounds;hit.triangles=volume.triangles;
+                hit.owner=volume.owner;hit.valid=volume.valid;
+            }
         }
         rooms.push_back(std::move(room));
     }

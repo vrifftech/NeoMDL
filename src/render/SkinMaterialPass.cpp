@@ -91,13 +91,13 @@ bool SkinMaterialPass::prepare(g::Api& a,const MeshDrawParameters& p,MaterialPro
         i.ready=true;
     }
     if(p.skinBumpLights.size()>3){error="Engine skin bump list exceeds the manager's three illumination slots";return false;}
-    if(baseLights(p,type).size()>4){error="Engine skin base supports three authored lights plus the explicit inspection headlight";return false;}
+    const auto lights=baseLights(p,type);
+    if(lights.size()>4){error="Engine skin base supports three authored lights plus the explicit inspection headlight";return false;}
     // The object position/quaternion conversion is rigid, not a scale-bearing
     // inverse model matrix. No mesh-derived bounding sphere enters this pass.
     if(!p.hasSkinOwnerFrame) {
         error="Engine skin requires its owner frame";return false;
     }
-    const auto lights=baseLights(p,type);
     const bool force=skinForceSight(p,type);
     if(force) {
         if(!i.program(a,VP,litSkin(i,lights,type==MaterialProgram::SkinEnvironment),error))return false;
@@ -134,10 +134,9 @@ bool SkinMaterialPass::draw(g::Api& a,const model::Mesh& mesh,const model::Defor
     // RenderSkinnedVP explicitly removes the part position/orientation from
     // its bone palette. The draw matrix puts that frame back; raw basis and
     // source-position operations still see the original part coordinates.
-    auto engine=p;
-    engine.modelView=model::multiply(p.modelView,pose.skinPartFrame);
+    const auto modelView=model::multiply(p.modelView,pose.skinPartFrame);
     const auto partWorld=model::multiply(p.skinOwnerFrame,pose.skinPartFrame);
-    auto& i=*impl_;auto& x=i.x;LegacyGuard restore(a,x,&engine);
+    auto& i=*impl_;auto& x=i.x;LegacyGuard restore(a,x,p.projection.values.data(),modelView.values.data());
     a.UseProgram(0);a.Disable(0x0b50);a.Disable(0x0b57); // lighting/color material
     a.Enable(VP);a.Disable(FP);
     a.BindBuffer(g::ArrayBuffer,vbo);
@@ -182,7 +181,7 @@ bool SkinMaterialPass::draw(g::Api& a,const model::Mesh& mesh,const model::Defor
         constants[71+4*n]={{light.attenuation[0],light.attenuation[1],light.attenuation[2],0}};
         constants[72+4*n]={{light.ambient[0],light.ambient[1],light.ambient[2],1}};
         constants[73+4*n]={{light.diffuse[0],light.diffuse[1],light.diffuse[2],1}};}
-    const auto vp=[&](const std::string& program){const auto id=i.program(a,VP,program,error);if(!id)return false;x.BindProgramARB(VP,id);i.setLocalParameters(VP,id,0,constants.data(),constants.size());a.Enable(VP);return true;};
+    const auto vp=[&](std::string_view program){const auto id=i.program(a,VP,program,error);if(!id)return false;x.BindProgramARB(VP,id);i.setLocalParameters(VP,id,0,constants.data(),constants.size());a.Enable(VP);return true;};
     g::UInt fragmentProgram{};
     const auto fp=[&](const char* program){const auto id=i.program(a,FP,program,error);if(!id)return false;x.BindProgramARB(FP,id);fragmentProgram=id;i.setLocalParameters(FP,id,0,state.fragmentConstants.data(),state.fragmentConstants.size());a.Enable(FP);if(p.material.engineGame==material::EngineMaterialGame::Kotor1||p.material.engineHardware.arbFragmentPrograms)state.bindFragmentProgram(program);return true;};
     const bool force=skinForceSight(p,type);
@@ -219,6 +218,8 @@ bool SkinMaterialPass::draw(g::Api& a,const model::Mesh& mesh,const model::Defor
         const auto plan=skinForcePlan(p,type);
         if(plan.replaceBlend)blend(plan.oneSource?g::One:g::SrcAlpha,g::OneMinusSrcAlpha);
         if(fixedForce) {
+            auto engine=p;
+            engine.modelView=modelView;
             a.Disable(FP);
             if(!applyDesktopFixedFragmentCommand(plan.command,engine,state,error))return false;
             applyDesktopFixedTextureState(a,x,state);

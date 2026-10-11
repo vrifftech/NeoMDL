@@ -390,6 +390,9 @@ public:
     bool ready() const noexcept;
     RendererStatistics statistics() const noexcept;
 private:
+    bool drawPrepared(const neomdl::model::Mesh&,
+                      const neomdl::model::DeformedMesh*,std::uint64_t,
+                      MeshDrawParameters&,std::string&);
     struct Impl;
     std::unique_ptr<Impl> impl_;
 };
