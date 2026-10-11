@@ -49,6 +49,11 @@ LegacyGuard::~LegacyGuard(){
 g::UInt ProgramCache::program(g::Api& a,g::Enum target,const std::string& text,std::string& error) {
         const auto old=programs.find(text);if(old!=programs.end())return old->second;
         g::UInt id{};x.GenProgramsARB(1,&id);if(!id){error="Could not allocate engine Desktop material program";return 0;}
+        g::Int previous{};x.GetProgramivARB(target,ProgramBinding,&previous);
+        struct RestoreBinding {
+            LegacyApi& api;g::Enum target;g::UInt program;
+            ~RestoreBinding(){api.BindProgramARB(target,program);}
+        } restore{x,target,static_cast<g::UInt>(previous)};
         x.BindProgramARB(target,id);x.ProgramStringARB(target,0x8875,static_cast<g::Size>(text.size()),text.data());
         const auto code=a.GetError();g::Int location=-1;a.GetIntegerv(0x864b,&location);
         if(code!=g::NoError || location!=-1){

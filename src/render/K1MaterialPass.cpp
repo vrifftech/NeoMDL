@@ -135,7 +135,6 @@ bool K1MaterialPass::prepare(g::Api& a,const MeshDrawParameters& p,std::string& 
     auto& i=*impl_;
     if(!i.ready){if(!i.loader||!i.x.load(i.loader,error)||!i.fixed.load(i.loader,error))return false;
     i.ready=true;}
-    LegacyGuard restore(a,i.x);
     switch(selectedPath(p)) {
     case Path::LightMapped: return i.program(a,FP,fixedFogFragment(lightmapFragment,p.fog.mode),error)!=0;
     case Path::EnvironmentMapped: return i.program(a,FP,fixedFogFragment(environmentFragment(p.environmentCube,false),p.fog.mode),error)!=0;

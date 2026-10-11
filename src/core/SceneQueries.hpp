@@ -232,7 +232,7 @@ public:
     bool hitOwner(HitOwnerId id, model::Vec3 start, model::Vec3 end,
                   SceneHitInfo& info, std::optional<std::size_t> root = {}) const;
 private:
-    void updateOwnerRegistration(HitOwner owner, bool registered);
+    void storeOwnerRegistration(HitOwner owner, bool registered);
     bool hitContents(const HitRoom& room, model::Vec3 start, model::Vec3& end,
                      SceneHitInfo& info, bool leaf,bool staticAabb) const;
     bool hitVisual(model::Vec3 start,model::Vec3 end,SceneHitInfo& info,

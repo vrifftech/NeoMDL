@@ -3547,7 +3547,7 @@ void ModelCanvas::drawScene() {
             textureCache_.orderFor(*image);
             try {
                 // Nonprocedural images keep their existing lazy GPU upload.
-                const auto definition=material::procedureDefinition(metadata->txi,engineMaterialGame(resource.model().game));
+                const auto& definition=textureCache_.definitionFor(*image,metadata,engineMaterialGame(resource.model().game));
                 if(!definition.type && !definition.volumeTexture)return;
                 // Dormant Dirty images are not ordinary material inputs. Only
                 // an explicit Desktop diagnostic constructs their 3D storage.

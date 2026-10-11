@@ -41,6 +41,9 @@ public:
     // construct their controllers in reverse. Repeated resource identities do
     // not add another pending entry or initialize an existing controller again.
     bool makeCurrent(const std::vector<ProcedureRegistration>&,std::string& error);
+    const material::ProcedureDefinition& definitionFor(
+        const neoshared::texture::TextureData&,
+        const neoshared::material::TextureMetadataPtr&,material::EngineMaterialGame);
     std::uint64_t orderFor(const neoshared::texture::TextureData& texture,
                            std::size_t layer = 0u);
     // Scene::Render -> AurTextureForceControllerUpdate, before bucket drawing.
@@ -82,6 +85,11 @@ public:
     std::size_t size() const noexcept;
     bool hasProcedures() const noexcept { return !procedures_.empty(); }
 private:
+    struct DefinitionRecord {
+        neoshared::material::TextureMetadataPtr metadata;
+        material::EngineMaterialGame game;
+        material::ProcedureDefinition definition;
+    };
     struct ProcedureRecord {
         const neoshared::texture::TextureData* source{};
         neoshared::material::TextureMetadata metadata;
@@ -123,6 +131,7 @@ private:
         std::unordered_map<std::size_t,GpuTexture>> entries_;
     std::unordered_map<const neoshared::texture::TextureData*,std::uint64_t> orders_;
     std::unordered_map<const neoshared::texture::TextureData*,std::unique_ptr<ProcedureRecord>> procedures_;
+    std::unordered_map<const neoshared::texture::TextureData*,DefinitionRecord> definitions_;
     std::unordered_map<const neoshared::texture::TextureData*,std::string> failures_;
     std::unordered_map<gl::UInt,ProcedureRecord*> procedureIds_;
     material::ProcedureContext procedureContext_;

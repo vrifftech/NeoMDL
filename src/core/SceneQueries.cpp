@@ -300,6 +300,18 @@ std::vector<std::size_t> rootsOf(const Model& model, bool allowForest = false) {
     require(allowForest || roots.size()<=1,"engine Gob requires one root part");
     return roots;
 }
+void validateOwner(const HitOwner& value) {
+    require(value.model&&value.parts.size()==value.model->nodes.size(),"invalid owner registration");
+    validateFrame({value.position,value.orientation,value.scale});
+    require(finite(value.sphere.center)&&std::isfinite(value.sphere.radius)&&
+        std::isfinite(value.alpha)&&std::isfinite(value.doorAlpha),"invalid owner query state");
+    for (const auto& frame:value.parts) validateFrame(frame);
+    rootsOf(*value.model);
+}
+void validateRooms(const std::vector<HitRoom>& rooms) {
+    std::unordered_set<HitRoomId> ids;
+    for (const auto& room:rooms) {validateRoom(room);require(ids.insert(room.id).second,"duplicate room ID");}
+}
 } // namespace
 
 void SceneHitInfo::clearOutput() noexcept {
@@ -625,7 +637,10 @@ void SceneQueries::synchronize(const ModelDocument& document,const model::Pose& 
         if(old) {
             require(std::find(hostOwners_.begin(),hostOwners_.end(),id)!=hostOwners_.end(),
                     "host owner identity collides with external registration");
-            if(old->model==&asset)value=*old;
+            if(old->model==&asset) {
+                value.sphere=old->sphere;value.alpha=old->alpha;value.doorAlpha=old->doorAlpha;
+                value.ignoreHitCheck=old->ignoreHitCheck;value.runtimeExclusionFlag=old->runtimeExclusionFlag;
+            }
         }
         value.id=id;value.model=&asset;value.parts=engineHitPose(asset,&current);
         value.animmeshPositions=engineAnimMeshHitPools(asset,current);
@@ -699,27 +714,23 @@ void SceneQueries::synchronize(const ModelDocument& document,const model::Pose& 
     // SetScene(null) unlists a Gob without destroying its sphere or hit flags.
     // Keep allocated detached references/chunks separately; only an absent
     // allocation is destroyed. Explicit external owners remain untouched.
-    SceneQueries next=*this;
+    for(const auto& item:pending)validateOwner(item.value);
+    validateRooms(rooms);
     for(const auto id:hostOwners_)if(std::none_of(pending.begin(),pending.end(),
-        [id](const auto& v){return v.value.id==id;}))next.removeOwner(id);
-    next.hostOwners_.clear();
+        [id](const auto& v){return v.value.id==id;}))removeOwner(id);
+    hostOwners_.clear();
     for(auto& item:pending) {
-        next.hostOwners_.push_back(item.value.id);
-        next.updateOwnerRegistration(std::move(item.value),item.registered);
+        hostOwners_.push_back(item.value.id);
+        storeOwnerRegistration(std::move(item.value),item.registered);
     }
-    next.setRooms(std::move(rooms));*this=std::move(next);
+    rooms_=std::move(rooms);++revision_;
 }
 
 void SceneQueries::registerOwner(HitOwner value) {
-    updateOwnerRegistration(std::move(value),true);
+    validateOwner(value);
+    storeOwnerRegistration(std::move(value),true);
 }
-void SceneQueries::updateOwnerRegistration(HitOwner value,bool registered) {
-    require(value.model&&value.parts.size()==value.model->nodes.size(),"invalid owner registration");
-    validateFrame({value.position,value.orientation,value.scale});
-    require(finite(value.sphere.center)&&std::isfinite(value.sphere.radius)&&
-        std::isfinite(value.alpha)&&std::isfinite(value.doorAlpha),"invalid owner query state");
-    for (const auto& frame:value.parts) validateFrame(frame);
-    rootsOf(*value.model);
+void SceneQueries::storeOwnerRegistration(HitOwner value,bool registered) {
     auto& target=registered?owners_:detachedOwners_;
     auto& previousList=registered?detachedOwners_:owners_;
     previousList.erase(std::remove_if(previousList.begin(),previousList.end(),
@@ -750,8 +761,7 @@ HitOwner* SceneQueries::owner(HitOwnerId id) noexcept {
     return const_cast<HitOwner*>(static_cast<const SceneQueries*>(this)->owner(id));
 }
 void SceneQueries::setRooms(std::vector<HitRoom> rooms) {
-    std::unordered_set<HitRoomId> ids;
-    for (const auto& room:rooms) {validateRoom(room);require(ids.insert(room.id).second,"duplicate room ID");}
+    validateRooms(rooms);
     rooms_=std::move(rooms);++revision_;
 }
 void SceneQueries::setBsp(std::vector<HitBspNode> nodes,std::optional<std::size_t> root) {

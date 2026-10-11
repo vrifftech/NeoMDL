@@ -410,6 +410,15 @@ void TextureCache::setEngineRuntime(material::EngineMaterialGame game) noexcept 
     engineGame_=game;
     engineRuntime_=true;
 }
+const material::ProcedureDefinition& TextureCache::definitionFor(
+        const neoshared::texture::TextureData& texture,
+        const neoshared::material::TextureMetadataPtr& metadata,material::EngineMaterialGame game) {
+    const auto found=definitions_.find(&texture);
+    if(found!=definitions_.end()&&found->second.metadata==metadata&&found->second.game==game)
+        return found->second.definition;
+    DefinitionRecord record{metadata,game,material::procedureDefinition(metadata->txi,game)};
+    return definitions_.insert_or_assign(&texture,std::move(record)).first->second.definition;
+}
 bool TextureCache::makeCurrent(const std::vector<ProcedureRegistration>& requests,
                                std::string& error) {
     error.clear();
@@ -1002,7 +1011,7 @@ void TextureCache::release(const void* owner) {
             for(const auto id:procedure->second->registrationIds)retire(id);
             procedures_.erase(procedure);
         }
-        failures_.erase(source);orders_.erase(source);dirtySources_.erase(source);
+        failures_.erase(source);orders_.erase(source);dirtySources_.erase(source);definitions_.erase(source);
     }
     borrowers_.erase(borrower);
 }
@@ -1024,7 +1033,7 @@ void TextureCache::clear() {
             if(textureDeleted_)textureDeleted_(id);api_.DeleteTextures(1,&id);
         }
     entries_.clear();dirtySources_.clear();dirtyScope_.clear();
-    procedures_.clear();failures_.clear();procedureIds_.clear();
+    procedures_.clear();failures_.clear();procedureIds_.clear();definitions_.clear();
     procedureContext_=material::ProcedureContext{};
     orders_.clear();
     nextOrder_=1u;borrowers_.clear();borrowCounts_.clear();

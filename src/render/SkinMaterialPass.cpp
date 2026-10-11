@@ -97,7 +97,6 @@ bool SkinMaterialPass::prepare(g::Api& a,const MeshDrawParameters& p,MaterialPro
     if(!p.hasSkinOwnerFrame) {
         error="Engine skin requires its owner frame";return false;
     }
-    LegacyGuard restore(a,i.x);
     const auto lights=baseLights(p,type);
     const bool force=skinForceSight(p,type);
     if(force) {
