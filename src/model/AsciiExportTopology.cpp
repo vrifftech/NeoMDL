@@ -1,0 +1,220 @@
+#include <model/AsciiExportTopology.hpp>
+
+#include <algorithm>
+#include <cstring>
+#include <map>
+#include <numeric>
+#include <utility>
+
+namespace neomdl::model::ascii_export {
+namespace {
+
+bool same(Vec3 a,Vec3 b) {
+    return a.x==b.x && a.y==b.y && a.z==b.z;
+}
+std::uint32_t bits(float value) {
+    if(value==0.0f) return 0u;
+    std::uint32_t result;
+    std::memcpy(&result,&value,sizeof(result));
+    return result;
+}
+
+class CornerGroups {
+public:
+    explicit CornerGroups(std::size_t size):parents_(size) {
+        std::iota(parents_.begin(),parents_.end(),std::size_t{});
+    }
+    std::size_t find(std::size_t corner) {
+        while(parents_[corner]!=corner) {
+            parents_[corner]=parents_[parents_[corner]];
+            corner=parents_[corner];
+        }
+        return corner;
+    }
+    void join(std::size_t a,std::size_t b) {
+        a=find(a);b=find(b);
+        parents_[std::max(a,b)]=std::min(a,b);
+    }
+private:
+    std::vector<std::size_t> parents_;
+};
+
+using Edge=std::array<std::uint32_t,2>;
+Edge edge(std::uint32_t a,std::uint32_t b) {
+    return {{std::min(a,b),std::max(a,b)}};
+}
+
+std::size_t changedAdjacency(const Mesh& mesh,
+                            const std::vector<std::array<std::uint32_t,3>>& faces,
+                            const neoshared::bif::JobControl& job) {
+    std::map<Edge,std::vector<std::size_t>> incident;
+    for(std::size_t i=0;i<faces.size();++i) {
+        job.check();
+        for(std::size_t corner=0;corner<3u;++corner) {
+            auto& list=incident[edge(faces[i][corner],faces[i][(corner+1u)%3u])];
+            if(list.empty() || list.back()!=i) list.push_back(i);
+        }
+    }
+    std::size_t changed{};
+    for(std::size_t i=0;i<faces.size();++i) {
+        job.check();
+        for(std::size_t corner=0;corner<3u;++corner) {
+            std::int16_t neighbor=-1;
+            const auto& list=incident.at(edge(faces[i][corner],faces[i][(corner+1u)%3u]));
+            for(const auto candidate:list) {
+                if(candidate==i) continue;
+                const auto narrowed=static_cast<std::int16_t>(candidate);
+                // BuildNeighborLists: K1 0x5c3274, K2 0x6e1330. A negative
+                // narrowed KOTOR match continues; animmesh tests only -1.
+                if(mesh.animated?narrowed!=-1:narrowed>=0) {
+                    neighbor=narrowed;
+                    break;
+                }
+                // Each subsequent other face resets the pending result.
+                // Retain a negative match only at the last visited face.
+                if(candidate+1u==faces.size() ||
+                   (candidate+2u==faces.size() && i+1u==faces.size()))
+                    neighbor=narrowed;
+            }
+            changed+=neighbor!=mesh.faces[i].adjacentFaces[corner];
+        }
+    }
+    return changed;
+}
+
+} // namespace
+
+std::vector<ReconstructedTopology> reconstructTopologies(
+    const Mesh& mesh,
+    const std::vector<Vertex>& compiledVertices,
+    const std::vector<std::vector<std::uint32_t>>& sourceAttributes,
+    const neoshared::bif::JobControl& job) {
+    CornerGroups groups(mesh.faces.size()*3u);
+    const auto compiled=[&](std::size_t face,std::size_t corner) {
+        return static_cast<std::size_t>(mesh.faces.at(face).indices[corner]);
+    };
+    const auto compatible=[&](std::size_t a,std::size_t b) {
+        return same(compiledVertices.at(a).position,compiledVertices.at(b).position) &&
+               sourceAttributes.at(a)==sourceAttributes.at(b);
+    };
+    for(std::size_t i=0;i<mesh.faces.size();++i) {
+        job.check();
+        for(std::size_t corner=0;corner<3u;++corner) {
+            const auto neighbor=mesh.faces[i].adjacentFaces[corner];
+            if(neighbor==-1) continue;
+            const auto other=static_cast<std::size_t>(static_cast<std::uint16_t>(neighbor));
+            const auto next=(corner+1u)%3u;
+            const auto a=compiled(i,corner),b=compiled(i,next);
+            std::vector<std::array<std::size_t,2>> matches;
+            for(std::size_t x=0;x<3u;++x)
+                for(std::size_t y=0;y<3u;++y) {
+                    if(x==y || !compatible(a,compiled(other,x)) ||
+                       !compatible(b,compiled(other,y))) continue;
+                    const std::array<std::size_t,2> match{{
+                        groups.find(other*3u+x),groups.find(other*3u+y)}};
+                    if(std::find(matches.begin(),matches.end(),match)==matches.end())
+                        matches.push_back(match);
+                }
+            // A compiled index can merge disconnected source vertices. Only
+            // the retained edge and its identifiable endpoints establish a
+            // source join; coincident positions alone do not establish one.
+            if(matches.size()==1u) {
+                groups.join(i*3u+corner,matches.front()[0]);
+                groups.join(i*3u+next,matches.front()[1]);
+            }
+        }
+    }
+
+    std::vector<ReconstructedTopology> result;
+    const auto appendCandidate=[&] {
+        ReconstructedTopology candidate;
+        candidate.sourceFaces.resize(mesh.faces.size());
+        std::map<std::size_t,std::uint32_t> sourceIndex;
+        std::vector<bool> referenced(compiledVertices.size());
+        for(std::size_t i=0;i<mesh.faces.size();++i) {
+            job.check();
+            for(std::size_t corner=0;corner<3u;++corner) {
+                const auto index=compiled(i,corner);
+                referenced.at(index)=true;
+                const auto inserted=sourceIndex.emplace(groups.find(i*3u+corner),
+                    static_cast<std::uint32_t>(candidate.sourceVertices.size()));
+                if(inserted.second) candidate.sourceVertices.push_back(index);
+                candidate.sourceFaces[i][corner]=inserted.first->second;
+            }
+        }
+        // Unreferenced compiled rows have no adjacency evidence. Preserve
+        // each row and its payload, including meshes with no faces.
+        for(std::size_t i=0;i<compiledVertices.size();++i) {
+            job.check();
+            if(!referenced[i]) candidate.sourceVertices.push_back(i);
+        }
+        const auto repeated=std::any_of(result.begin(),result.end(),[&](const auto& previous) {
+            return previous.sourceFaces==candidate.sourceFaces &&
+                   previous.sourceVertices==candidate.sourceVertices;
+        });
+        if(!repeated) {
+            candidate.changedAdjacency=changedAdjacency(mesh,candidate.sourceFaces,job);
+            result.push_back(std::move(candidate));
+        }
+    };
+    appendCandidate();
+
+    const auto proposeJoins=[&](const std::vector<std::size_t>& corners) {
+        job.check();
+        std::vector<std::size_t> candidates;
+        for(const auto corner:corners) {
+            const auto group=groups.find(corner);
+            if(std::find(candidates.begin(),candidates.end(),group)==candidates.end())
+                candidates.push_back(group);
+        }
+        for(std::size_t i=0;i<candidates.size();++i)
+            for(std::size_t j=i+1u;j<candidates.size();++j) {
+                if(groups.find(candidates[i])==groups.find(candidates[j])) continue;
+                // A point join is a reconstruction candidate, not proof of
+                // original source identity. Retain it only when every
+                // directed neighbor survives, including boundary entries.
+                auto proposed=groups;
+                proposed.join(candidates[i],candidates[j]);
+                std::vector<std::array<std::uint32_t,3>> faces(mesh.faces.size());
+                for(std::size_t face=0;face<faces.size();++face) {
+                    job.check();
+                    for(std::size_t corner=0;corner<3u;++corner)
+                        faces[face][corner]=static_cast<std::uint32_t>(proposed.find(face*3u+corner));
+                }
+                if(changedAdjacency(mesh,faces,job)==0u) groups=std::move(proposed);
+            }
+    };
+    std::vector<std::vector<std::size_t>> compiledCorners(compiledVertices.size());
+    for(std::size_t i=0;i<mesh.faces.size();++i) {
+        job.check();
+        for(std::size_t corner=0;corner<3u;++corner)
+            compiledCorners.at(compiled(i,corner)).push_back(i*3u+corner);
+    }
+    // InternalGenVertices can merge source rows at a single point, outside
+    // any shared edge. A shared compiled row retains equal source payloads.
+    for(const auto& corners:compiledCorners) proposeJoins(corners);
+    appendCandidate();
+
+    if(!mesh.enginePrelightInput || (mesh.mdxBitmap&0x20u)!=0u) {
+        // UV seams can give the same source point distinct compiled rows.
+        // Retained normals and source-indexed payloads constrain these joins;
+        // equal positions on their own never generate a candidate.
+        std::map<std::vector<std::uint32_t>,std::vector<std::size_t>> normalCorners;
+        for(std::size_t i=0;i<compiledVertices.size();++i) {
+            job.check();
+            if(compiledCorners[i].empty()) continue;
+            const auto& vertex=compiledVertices[i];
+            auto key=sourceAttributes.at(i);
+            for(const auto value:{vertex.position.x,vertex.position.y,vertex.position.z,
+                                  vertex.normal.x,vertex.normal.y,vertex.normal.z})
+                key.push_back(bits(value));
+            auto& corners=normalCorners[std::move(key)];
+            corners.insert(corners.end(),compiledCorners[i].begin(),compiledCorners[i].end());
+        }
+        for(const auto& entry:normalCorners) proposeJoins(entry.second);
+        appendCandidate();
+    }
+    return result;
+}
+
+} // namespace neomdl::model::ascii_export

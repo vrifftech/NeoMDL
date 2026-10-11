@@ -13,6 +13,8 @@ add_library(neomdl_model
     AsciiExportControllers.cpp
     AsciiExportFields.cpp
     AsciiExportMesh.cpp
+    AsciiExportTopology.cpp
+    AsciiExportSmoothing.cpp
     AsciiExportSkin.cpp
     PackedExport.cpp
     PackedExportAnimation.cpp

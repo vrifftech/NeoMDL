@@ -1,8 +1,11 @@
 #include <model/AsciiExportInternal.hpp>
+#include <model/AsciiExportSmoothing.hpp>
+#include <model/AsciiExportTopology.hpp>
 #include <model/EngineCpuSkin.hpp>
 #include <model/UvAnimation.hpp>
 
 #include <algorithm>
+#include <cmath>
 #include <cstring>
 #include <map>
 
@@ -11,6 +14,32 @@ namespace {
 
 bool same(Vec3 a,Vec3 b) {
     return a.x==b.x && a.y==b.y && a.z==b.z;
+}
+double sphereError(const Mesh& mesh,const std::vector<Vertex>& vertices,
+                   const ReconstructedTopology& topology) {
+    if(!mesh.engineBounds) return 0.0;
+    Vec3 center{};
+    for(const auto index:topology.sourceVertices) {
+        const auto p=vertices[index].position;
+        center={center.x+p.x,center.y+p.y,center.z+p.z};
+    }
+    if(!topology.sourceVertices.empty()) {
+        const float scale=1.0f/static_cast<float>(topology.sourceVertices.size());
+        center={center.x*scale,center.y*scale,center.z*scale};
+    }
+    float radius{};
+    for(const auto index:topology.sourceVertices) {
+        const auto p=vertices[index].position;
+        const Vec3 delta{p.x-center.x,p.y-center.y,p.z-center.z};
+        const float distance=std::sqrt((delta.x*delta.x+delta.y*delta.y)+delta.z*delta.z);
+        if(distance>radius) radius=distance;
+    }
+    const auto& original=*mesh.engineBounds;
+    const double x=static_cast<double>(center.x)-original.sphereCenter.x;
+    const double y=static_cast<double>(center.y)-original.sphereCenter.y;
+    const double z=static_cast<double>(center.z)-original.sphereCenter.z;
+    const double r=static_cast<double>(radius)-original.sphereRadius;
+    return ((x*x+y*y)+z*z)+r*r;
 }
 std::uint32_t rawBits(float value) {
     std::uint32_t result;
@@ -219,8 +248,6 @@ ReconstructedMesh writeMesh(Writer& out,const Model& model,const Node& node,cons
     const bool hasNormals=!mesh.enginePrelightInput || (mesh.mdxBitmap&0x20u)!=0u;
     const bool hasColors=mesh.hasVertexColors || (mesh.enginePrelightInput && (mesh.mdxBitmap&0x40u)!=0u);
     ReconstructedMesh result;
-    std::vector<std::uint32_t> sourceIndex(vertices.size(),0xffffffffu);
-    std::map<std::vector<std::uint32_t>,std::uint32_t> canonical;
     if(mesh.skinned) {
         // Engine NodeVertex equality deliberately excludes skin influences.
         // Splitting a source vertex on weights alone cannot preserve two
@@ -246,14 +273,13 @@ ReconstructedMesh writeMesh(Writer& out,const Model& model,const Node& node,cons
             }
         }
     }
-    const auto source=[&](std::size_t index) {
-        if(sourceIndex.at(index)!=0xffffffffu) return sourceIndex[index];
+    std::vector<std::vector<std::uint32_t>> sourceAttributes(vertices.size());
+    for(std::size_t index=0;index<vertices.size();++index) {
+        out.job().check();
         const auto& vertex=vertices.at(index);
-        std::vector<std::uint32_t> key;
+        auto& key=sourceAttributes[index];
         const auto append=[&](Vec3 v){key.push_back(bits(v.x));key.push_back(bits(v.y));key.push_back(bits(v.z));};
-        append(vertex.position);
-        if(hasNormals) append(vertex.normal);
-        else key.push_back(static_cast<std::uint32_t>(index));
+        if(animation && hasNormals) append(vertex.normal);
         if(animation) {
             // InternalGenVertices reads frame * rawVertexCount + sourceIndex.
             // Final pools transpose this to vertex * sampleCount + frame.
@@ -264,12 +290,7 @@ ReconstructedMesh writeMesh(Writer& out,const Model& model,const Node& node,cons
             if(!animation->staticTangents.empty())
                 for(const auto value:animation->staticTangents.at(index)) key.push_back(bits(value));
         }
-        if(node.lightsaber)
-            for(std::size_t channel=0;channel<4u;++channel) {
-                const auto value=uv(vertex,channel);
-                key.push_back(bits(value.x));key.push_back(bits(value.y));
-            }
-        if(hasColors || node.lightsaber) {
+        if(hasColors) {
             std::uint32_t color{};
             for(std::size_t channel=0;channel<4u;++channel)
                 color|=std::uint32_t(vertex.color[channel])<<(channel*8u);
@@ -286,27 +307,46 @@ ReconstructedMesh writeMesh(Writer& out,const Model& model,const Node& node,cons
             for(const auto value:skin.at(index).weights) key.push_back(bits(value));
             for(const auto value:skin.at(index).indices) key.push_back(bits(value));
         }
-        const auto inserted=canonical.emplace(std::move(key),static_cast<std::uint32_t>(result.sourceVertices.size()));
-        if(inserted.second) result.sourceVertices.push_back(index);
-        sourceIndex[index]=inserted.first->second;
-        return sourceIndex[index];
-    };
-    for(const auto& face:mesh.faces) {
-        out.job().check();
-        Triangle indices{};
-        for(std::size_t corner=0;corner<3u;++corner) {
-            if(face.indices[corner]<0)
-                throw ModelError("Cannot export mesh "+node.name+": a engine face has a negative vertex index");
-            indices[corner]=source(static_cast<std::size_t>(face.indices[corner]));
-        }
-        result.sourceFaces.push_back(indices);
     }
-    for(std::size_t i=0;i<vertices.size();++i) {out.job().check();source(i);}
-
-    if(!animation)
-        out.warning("Mesh "+node.name+": source topology and smoothing groups are generated from compiled positions and normals; smoothing group 1 is used within the generated vertex splits, and identical rebuilt normals are not guaranteed");
+    for(const auto& face:mesh.faces)
+        for(const auto index:face.indices)
+            if(index<0)
+                throw ModelError("Cannot export mesh "+node.name+": an engine face has a negative vertex index");
+    auto topologies=reconstructTopologies(mesh,vertices,sourceAttributes,out.job());
+    std::size_t selected{};
+    ReconstructedSmoothing reconstructed;
+    double selectedSphereError{};
+    for(std::size_t i=0;i<topologies.size();++i) {
+        const auto& topology=topologies[i];
+        ReconstructedSmoothing candidate;
+        if(!animation && hasNormals)
+            candidate=reconstructSmoothing(mesh,vertices,topology.sourceVertices,topology.sourceFaces,out.job());
+        else candidate.masks.assign(mesh.faces.size(),animation?1u:0u);
+        const auto candidateSphereError=sphereError(mesh,vertices,topology);
+        // Source identity is not retained uniquely. A point-join candidate
+        // must improve a stored result without worsening the other one.
+        if(i==0u || (candidate.squaredNormalError<=reconstructed.squaredNormalError &&
+                     candidateSphereError<=selectedSphereError &&
+                     (candidate.squaredNormalError<reconstructed.squaredNormalError ||
+                      candidateSphereError<selectedSphereError))) {
+            selected=i;
+            selectedSphereError=candidateSphereError;
+            reconstructed=std::move(candidate);
+        }
+    }
+    auto& topology=topologies[selected];
+    result.sourceVertices=std::move(topology.sourceVertices);
+    result.sourceFaces=std::move(topology.sourceFaces);
+    if(topology.changedAdjacency)
+        out.warning("Mesh "+node.name+": source edge connectivity cannot reproduce "+
+            std::to_string(topology.changedAdjacency)+" stored face-neighbour entries");
+    auto smoothing=std::move(reconstructed.masks);
+    if(reconstructed.changedCornerNormals)
+        out.warning("Mesh "+node.name+": reconstructed smoothing changes "+
+            std::to_string(reconstructed.changedCornerNormals)+" corner normals; maximum component difference "+
+            out.scalar(reconstructed.maxNormalComponentDifference));
     if(!hasNormals && !vertices.empty())
-        out.warning("Mesh "+node.name+": no compiled normal channel exists; compiled vertex identities are kept distinct instead of inferring smooth joins");
+        out.warning("Mesh "+node.name+": no compiled normal channel exists; source connectivity is retained and face normals are generated");
     if(mesh.cpuPositions) {
         bool different=mesh.cpuPositions->size()!=vertices.size();
         for(std::size_t i=0;i<vertices.size() && !different;++i)
@@ -332,22 +372,19 @@ ReconstructedMesh writeMesh(Writer& out,const Model& model,const Node& node,cons
     }
     for(std::size_t channel=0;channel<4u;++channel) {
         if((mesh.mdxBitmap&(2u<<channel))==0u) continue;
-        const auto count=node.lightsaber?result.sourceVertices.size():vertices.size();
+        const auto count=vertices.size();
         out.line(std::string("tverts")+(channel?std::to_string(channel):std::string{})+" "+std::to_string(count));
         for(std::size_t i=0;i<count;++i) {
-            // Saber PostProcess reads raw UVs by source-vertex index, not by
-            // a face's UV index. Keep its coordinate pool in canonical order.
-            const auto value=uv(vertices[node.lightsaber?result.sourceVertices[i]:i],channel);
+            const auto value=uv(vertices[i],channel);
             out.line(out.scalar(value.x)+" "+out.scalar(value.y)+" 0");
         }
         if(channel) {
             out.line("texindices"+std::to_string(channel)+" "+std::to_string(mesh.faces.size()));
             for(std::size_t i=0;i<mesh.faces.size();++i) {
                 const auto& face=mesh.faces[i];
-                const auto& remapped=result.sourceFaces[i];
-                out.line(std::to_string(node.lightsaber?remapped[0]:static_cast<std::uint32_t>(face.indices[0]))+" "+
-                    std::to_string(node.lightsaber?remapped[1]:static_cast<std::uint32_t>(face.indices[1]))+" "+
-                    std::to_string(node.lightsaber?remapped[2]:static_cast<std::uint32_t>(face.indices[2])));
+                out.line(std::to_string(static_cast<std::uint32_t>(face.indices[0]))+" "+
+                    std::to_string(static_cast<std::uint32_t>(face.indices[1]))+" "+
+                    std::to_string(static_cast<std::uint32_t>(face.indices[2])));
             }
         }
     }
@@ -369,7 +406,7 @@ ReconstructedMesh writeMesh(Writer& out,const Model& model,const Node& node,cons
     }
     if(!textureName(mesh,1u).empty() && (mesh.mdxBitmap&4u))
         out.warning("Mesh "+node.name+": secondary UVs contain any compiled lightmap transform; original .lmt data is unavailable and an active .lmt sidecar would be applied again during ASCII load");
-    if(hasColors && !node.lightsaber) {
+    if(hasColors) {
         out.line("colors "+std::to_string(result.sourceVertices.size()));
         bool alpha=false;
         for(const auto index:result.sourceVertices) {
@@ -385,10 +422,11 @@ ReconstructedMesh writeMesh(Writer& out,const Model& model,const Node& node,cons
     for(std::size_t i=0;i<mesh.faces.size();++i) {
         const auto& sourceFace=result.sourceFaces[i];
         const auto& compiled=mesh.faces[i];
-        out.line(std::to_string(sourceFace[0])+" "+std::to_string(sourceFace[1])+" "+std::to_string(sourceFace[2])+" 1 "+
-            std::to_string(node.lightsaber?sourceFace[0]:static_cast<std::uint32_t>(compiled.indices[0]))+" "+
-            std::to_string(node.lightsaber?sourceFace[1]:static_cast<std::uint32_t>(compiled.indices[1]))+" "+
-            std::to_string(node.lightsaber?sourceFace[2]:static_cast<std::uint32_t>(compiled.indices[2]))+" "+
+        out.line(std::to_string(sourceFace[0])+" "+std::to_string(sourceFace[1])+" "+std::to_string(sourceFace[2])+" "+
+            std::to_string(static_cast<std::int32_t>(smoothing[i]))+" "+
+            std::to_string(static_cast<std::uint32_t>(compiled.indices[0]))+" "+
+            std::to_string(static_cast<std::uint32_t>(compiled.indices[1]))+" "+
+            std::to_string(static_cast<std::uint32_t>(compiled.indices[2]))+" "+
             std::to_string(static_cast<std::int32_t>(compiled.surfaceMaterial)));
     }
     if(mesh.dangly) {

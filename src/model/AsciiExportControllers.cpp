@@ -1,7 +1,12 @@
 #include <model/AsciiExportInternal.hpp>
 #include <model/AsciiControllerFields.hpp>
+#include <model/AsciiModelInternal.hpp>
 
+#include <algorithm>
+#include <array>
+#include <cmath>
 #include <cstring>
+#include <optional>
 
 namespace neomdl::model::ascii_export {
 namespace {
@@ -10,6 +15,108 @@ float wordFloat(std::uint32_t word) noexcept {
     float value;
     std::memcpy(&value,&word,sizeof(value));
     return value;
+}
+
+std::uint32_t orderedFloat(float value) noexcept {
+    std::uint32_t word;
+    std::memcpy(&word,&value,sizeof(word));
+    return word^((word&0x80000000u)!=0u?0xffffffffu:0x80000000u);
+}
+
+float orderedValue(std::uint32_t ordered) noexcept {
+    return wordFloat(ordered^((ordered&0x80000000u)!=0u?0x80000000u:0xffffffffu));
+}
+
+std::uint32_t quantizedComponent(float component,float maximum) noexcept {
+    const float value=((component+1.0f)*maximum)*0.5f;
+    return static_cast<std::uint32_t>(std::max(0.0f,std::min(maximum,value)));
+}
+
+std::uint32_t packedQuaternion(Quaternion value) noexcept {
+    if(value.w<0.0f) {value.x=-value.x;value.y=-value.y;value.z=-value.z;}
+    return quantizedComponent(value.x,2046.0f) |
+        (quantizedComponent(value.y,2046.0f)<<11u) |
+        (quantizedComponent(value.z,1022.0f)<<22u);
+}
+
+struct ComponentInterval {float lower,upper;};
+
+ComponentInterval componentInterval(std::uint32_t bin,float maximum) noexcept {
+    const auto boundary=[&](bool after) {
+        auto first=orderedFloat(-1.0f),last=orderedFloat(1.0f)+1u;
+        while(first<last) {
+            const auto middle=first+(last-first)/2u;
+            const auto value=quantizedComponent(orderedValue(middle),maximum);
+            if(value<bin || (after && value==bin))first=middle+1u;
+            else last=middle;
+        }
+        return first;
+    };
+    return {orderedValue(boundary(false)),orderedValue(boundary(true)-1u)};
+}
+
+std::optional<std::string> packedAxisAngle(Writer& writer,std::uint32_t word) {
+    const std::array<std::uint32_t,3> bins{{word&0x7ffu,(word>>11u)&0x7ffu,word>>22u}};
+    if(bins[0]>2046u || bins[1]>2046u || bins[2]>1022u)return {};
+
+    const auto encode=[&](Quaternion value)->std::optional<std::string> {
+        const double length=std::sqrt(double(value.x)*value.x+
+            double(value.y)*value.y+double(value.z)*value.z);
+        const Vec3 axis=length==0.0?Vec3{1.0f,0.0f,0.0f}:
+            Vec3{float(value.x/length),float(value.y/length),float(value.z/length)};
+        float angle=static_cast<float>(2.0*std::atan2(length,double(value.w)));
+        auto reconstructed=ascii::engineAxisAngle(axis,angle);
+        if(packedQuaternion(reconstructed)==word)
+            return writer.vector(axis)+" "+writer.scalar(angle);
+        // Rounding pi upward changes the sign used by CompressQuaternionKey.
+        if(reconstructed.w<0.0f) {
+            angle=std::nextafter(angle,0.0f);
+            reconstructed=ascii::engineAxisAngle(axis,angle);
+            if(packedQuaternion(reconstructed)==word)
+                return writer.vector(axis)+" "+writer.scalar(angle);
+        }
+        return {};
+    };
+    if(auto text=encode(unpackEngineControllerQuaternion(word,writer.game())))return text;
+
+    const std::array<ComponentInterval,3> intervals{{componentInterval(bins[0],2046.0f),
+        componentInterval(bins[1],2046.0f),componentInterval(bins[2],1022.0f)}};
+    std::array<double,3> middle{},nearest{};
+    double middleLength=0.0,nearestLength=0.0;
+    for(std::size_t i=0;i<intervals.size();++i) {
+        middle[i]=(double(intervals[i].lower)+intervals[i].upper)*0.5;
+        nearest[i]=intervals[i].lower>0.0f?intervals[i].lower:
+            (intervals[i].upper<0.0f?intervals[i].upper:0.0f);
+        middleLength+=middle[i]*middle[i];
+        nearestLength+=nearest[i]*nearest[i];
+    }
+    const auto point=[&](const std::array<double,3>& components)->std::optional<std::string> {
+        Quaternion value{float(components[0]),float(components[1]),float(components[2]),0.0f};
+        const double squared=double(value.x)*value.x+double(value.y)*value.y+
+            double(value.z)*value.z;
+        if(squared>1.0)return {};
+        value.w=static_cast<float>(std::sqrt(1.0-squared));
+        return encode(value);
+    };
+    if(middleLength<=1.0) {
+        if(auto text=point(middle))return text;
+    } else if(nearestLength<1.0) {
+        // Intersect the cell's nearest-to-zero point and midpoint with the
+        // unit sphere, then select the interior of the feasible segment.
+        double a=0.0,b=0.0;
+        for(std::size_t i=0;i<middle.size();++i) {
+            const double direction=middle[i]-nearest[i];
+            a+=direction*direction;
+            b+=2.0*nearest[i]*direction;
+        }
+        const double c=nearestLength-1.0;
+        const double fraction=-c/(b+std::sqrt(b*b-4.0*a*c));
+        std::array<double,3> interior{};
+        for(std::size_t i=0;i<interior.size();++i)
+            interior[i]=nearest[i]+fraction*(middle[i]-nearest[i]);
+        if(auto text=point(interior))return text;
+    }
+    return point(nearest);
 }
 
 std::string controllerDescription(const Node& node,const Controller& controller) {
@@ -39,11 +146,17 @@ std::size_t wordsPerRow(const Node& node,const Controller& controller) {
 }
 
 std::string rowValues(Writer& writer,const Node& node,const Controller& controller,
-                      std::size_t row,std::size_t width) {
+                      std::size_t row,std::size_t width,bool keyed=false) {
     const auto start=static_cast<std::size_t>(controller.dataIndex)+row*width;
-    if(controller.rawFlags==0x02u)
+    if(controller.rawFlags==0x02u) {
+        if(keyed) {
+            if(auto text=packedAxisAngle(writer,node.controllerDataWords[start]))return *text;
+            writer.warning("Some packed rotation keys could not be reproduced by the ASCII "
+                "axis-angle constructor; their exported rotations can change stored words.");
+        }
         return writer.quaternion(unpackEngineControllerQuaternion(
             node.controllerDataWords[start],writer.game()));
+    }
     if(controller.rawFlags==0x04u)
         return writer.quaternion({wordFloat(node.controllerDataWords[start]),
             wordFloat(node.controllerDataWords[start+1u]),
@@ -112,8 +225,7 @@ void writeControllers(Writer& writer,const Node& node,std::uint16_t fieldFlags) 
         // absolute compiled position key as positionkey would add the static
         // header to every sample. A direct field cannot retain multiple rows
         // or a time other than +0, so do not silently change that meaning.
-        // Quaternion kinds have a different consumer that ignores this
-        // offset; their existing warned axis-angle conversion is unchanged.
+        // Quaternion kinds have a different consumer that ignores this offset.
         if((controller.rawFlags==0x01u || controller.rawFlags==0x03u ||
             controller.rawFlags==0x11u || controller.rawFlags==0x13u) &&
            controller.sourceOffset!=field.keyedSourceOffset)
@@ -124,7 +236,7 @@ void writeControllers(Writer& writer,const Node& node,std::uint16_t fieldFlags) 
         for(std::size_t row=0;row<rows;++row) {
             writer.job().check();
             writer.line(writer.scalar(wordFloat(node.controllerDataWords[times+row]))+
-                " "+rowValues(writer,node,controller,row,width));
+                " "+rowValues(writer,node,controller,row,width,true));
         }
     }
 }
