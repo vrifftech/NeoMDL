@@ -2,6 +2,7 @@
 #include "render/ShaderMeshRenderer.hpp"
 #include "render/SkinMaterialPrograms.hpp"
 #include <cstdio>
+#include <cstring>
 #include <stdexcept>
 namespace neomdl::render::desktop_programs {
 const char* standardFogFragment(bool kotor1) {
@@ -15,9 +16,15 @@ std::string format(const char* text,unsigned a,unsigned b=0) {
     if(count<0 || static_cast<std::size_t>(count)>=bytes.size())throw std::runtime_error("Engine light snippet overflow");
     return std::string(bytes.data(),static_cast<std::size_t>(count));
 }
-std::string lightProgram(const std::string& source,const std::vector<PreviewLight>& lights) {
+const std::string& ProgramCache::lightProgram(std::string_view source,const std::vector<PreviewLight>& lights) {
+    std::string pattern;pattern.reserve(lights.size());
+    for(const auto& light:lights)pattern+=light.position[3]==0?'d':'p';
+    auto body=lightSources.find(source);
+    if(body==lightSources.end())body=lightSources.emplace(std::string(source),std::map<std::string,std::string>{}).first;
+    auto& variants=body->second;
+    const auto old=variants.find(pattern);if(old!=variants.end())return old->second;
     using namespace skin_programs;
-    std::string result=source;result+=Light529592;
+    std::string result(source);result+=Light529592;
     for(unsigned n=0;n<lights.size();++n) {
         const unsigned slot=70+n*4;
         if(lights[n].position[3]==0) {
@@ -30,7 +37,7 @@ std::string lightProgram(const std::string& source,const std::vector<PreviewLigh
         result+=format(Light5298e0,slot+2);result+=format(Light529943,slot+3);
     }
     result+=Light529ab0;result+=Light529ae2;result+=Light529b08;result+="END\n";
-    return result;
+    return variants.emplace(std::move(pattern),std::move(result)).first->second;
 }
 LegacyGuard::LegacyGuard(g::Api& a_,LegacyApi& x_,const MeshDrawParameters* p):a(a_),x(x_) {
     a.GetIntegerv(MatrixMode,&mode);x.GetProgramivARB(VP,ProgramBinding,&vp);x.GetProgramivARB(FP,ProgramBinding,&fp);
@@ -63,5 +70,16 @@ g::UInt ProgramCache::program(g::Api& a,g::Enum target,const std::string& text,s
         programs.emplace(text,id);return id;
     }
 
-void ProgramCache::shutdown(){if(ready)for(const auto& entry:programs)x.DeleteProgramsARB(1,&entry.second);programs.clear();ready=false;}
+void ProgramCache::setLocalParameters(g::Enum target,g::UInt program,g::UInt first,
+        const std::array<float,4>* values,std::size_t count) {
+    auto& cached=localParameters[{target,program}];
+    if(cached.size()<first+count)cached.resize(first+count);
+    for(std::size_t n=0;n<count;++n) {
+        auto& slot=cached[first+n];
+        if(slot.initialized&&std::memcmp(slot.value.data(),values[n].data(),sizeof(slot.value))==0)continue;
+        x.ProgramLocalParameter4fvARB(target,static_cast<g::UInt>(first+n),values[n].data());
+        std::memcpy(slot.value.data(),values[n].data(),sizeof(slot.value));slot.initialized=true;
+    }
+}
+void ProgramCache::shutdown(){if(ready)for(const auto& entry:programs)x.DeleteProgramsARB(1,&entry.second);programs.clear();lightSources.clear();localParameters.clear();ready=false;}
 } // namespace neomdl::render::desktop_programs

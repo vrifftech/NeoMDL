@@ -404,11 +404,13 @@ void AreaScene::loadResource(neoshared::ResourceDocument layout, const ResourceR
             if(!hasStaticAabb)room.bounds={{100000.0f,100000.0f,100000.0f},
                                          {-100000.0f,-100000.0f,-100000.0f},true};
             room.meshBounds.resize(asset.meshes.size());
+            auto hitGeometry=std::make_shared<HitRoomGeometry>();
             for(auto& part:engineStaticHitParts(asset,room.pose(),room.runtime->frame(),job)) {
                 room.meshBounds[*asset.nodes[part.node].mesh]=part.worldBounds;
-                if(asset.nodes[part.node].aabb)room.hitAabb=std::move(part);
-                else room.hitMeshes.push_back(std::move(part));
+                if(asset.nodes[part.node].aabb)hitGeometry->aabb=std::move(part);
+                else hitGeometry->meshes.push_back(std::move(part));
             }
+            room.hitGeometry=std::move(hitGeometry);
             pending.rooms_.push_back(std::move(room));
         }
     }

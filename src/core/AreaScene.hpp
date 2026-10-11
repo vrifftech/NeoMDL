@@ -34,8 +34,7 @@ struct AreaRoom {
     // inverted +100000/-100000 sentinel, not an invented geometry bound.
     model::Bounds bounds;
     std::vector<model::Bounds> meshBounds;
-    std::vector<HitStaticPart> hitMeshes;
-    std::optional<HitStaticPart> hitAabb;
+    std::shared_ptr<const HitRoomGeometry> hitGeometry;
     bool background{};
     std::vector<LightRoomId> influencingRooms;
     std::optional<neoshared::bwm::BwmFile> walkmesh;

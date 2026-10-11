@@ -773,7 +773,8 @@ bool ShaderMeshRenderer::draw(const neomdl::model::Mesh& mesh,
                         vertices[vertex].color[channel]=static_cast<float>(prelight->colors[vertex][channel])/255.0f;
         };
         const bool refresh=p.engineCpuSkin || newGeometry || normalsChanged || prelightChanged || uvChanged || cache.posed!=posed || cache.streamed!=p.streamedGeometry ||
-            ((posed || p.streamedGeometry) && (cache.revision!=revision || cache.pose!=deformed));
+            ((p.streamedGeometry || (posed&&(!engineSkin||p.selected))) &&
+             (cache.revision!=revision || cache.pose!=deformed));
         if(refresh) {
             auto geometry=p.engineCpuSkin?std::move(*cpuGeometry):
                 neomdl::model::prepareRenderGeometry(mesh,posed ? deformed : nullptr,true);
@@ -894,6 +895,7 @@ bool ShaderMeshRenderer::draw(const neomdl::model::Mesh& mesh,
             if(!i.skinMaterials.draw(a,mesh,*deformed,p,engineProgram,nextMaterialState,i.normalizationCube,cache.skinVbo,cache.count,drawBatches,i.stats.drawCalls,error))return false;
             enginePrimary=true;
         }
+        if(!enginePrimary || p.selected) {
         a.BindBuffer(g::ArrayBuffer,cache.vbo); a.BindBuffer(g::ElementArrayBuffer,cache.ebo);
         const g::Int sizes[]={3,3,2,2,4,3,4,4,3};
         const std::size_t offsets[]={offsetof(RenderVertex,position),offsetof(RenderVertex,normal),
@@ -1299,6 +1301,7 @@ bool ShaderMeshRenderer::draw(const neomdl::model::Mesh& mesh,
             }
             a.ActiveTexture(g::Texture0);a.BindTexture(g::Texture2D,texture);
             nextMaterialState.bind(0,false,texture);
+        }
         }
         const auto drawError=a.GetError();
         if(drawError!=g::NoError) {

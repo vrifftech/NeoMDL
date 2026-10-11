@@ -258,8 +258,10 @@ void validatePart(const HitStaticPart& p) {
 }
 void validateRoom(const HitRoom& room) {
     validateBox(room.bounds);
-    for (const auto& p:room.meshes) validatePart(p);
-    if (room.aabb) validatePart(*room.aabb);
+    if(room.geometry) {
+        for (const auto& p:room.geometry->meshes) validatePart(p);
+        if (room.geometry->aabb) validatePart(*room.geometry->aabb);
+    }
     for (const auto& t:room.triggers) require(t.valid,"invalid registered trigger");
 }
 bool staticPart(const HitStaticPart& p,Vec3 start,Vec3& end,SceneHitInfo& info,
@@ -700,7 +702,7 @@ void SceneQueries::synchronize(const ModelDocument& document,const model::Pose& 
     std::vector<HitRoom> rooms;
     for(const auto& source:area.rooms()) {
         HitRoom room;room.id=source.id;room.bounds=source.bounds;
-        room.meshes=source.hitMeshes;room.aabb=source.hitAabb;
+        room.geometry=source.hitGeometry;
         for(const auto& volume:triggers.volumes()) {
             const Vec3 center{(volume.bounds.minimum.x+volume.bounds.maximum.x)*0.5f,
                 (volume.bounds.minimum.y+volume.bounds.maximum.y)*0.5f,
@@ -797,13 +799,15 @@ bool SceneQueries::hitContents(const HitRoom& room,Vec3 start,Vec3& end,
             info.surface=0x40000000u;info.triggerOwner=hit->owner;found=true;
         }
     }
-    if (settings_.staticTriMeshes) for (const auto& mesh:room.meshes) {
+    const auto* geometry=room.geometry.get();
+    if (settings_.staticTriMeshes&&geometry) for (const auto& mesh:geometry->meshes) {
         validateBox(mesh.worldBounds);
         if (engineHitBox(start,end,mesh.worldBounds)&&staticPart(mesh,start,end,info,settings_)) found=true;
     }
-    if (staticAabb&&room.aabb)
-        if (staticPart(*room.aabb,start,end,info,settings_)) found=true;
-    if (staticAabb&&!room.aabb&&settings_.floorFallback&&leaf&&start.z>0&&end.z<0) {
+    const auto* aabb=geometry&&geometry->aabb?&*geometry->aabb:nullptr;
+    if (staticAabb&&aabb)
+        if (staticPart(*aabb,start,end,info,settings_)) found=true;
+    if (staticAabb&&!aabb&&settings_.floorFallback&&leaf&&start.z>0&&end.z<0) {
         // Engine optional debug floor changes ONLY the endpoint. In particular
         // it supplies no invented unit normal, surface, face, or ClearOutput.
         const auto delta=sub(end,start);

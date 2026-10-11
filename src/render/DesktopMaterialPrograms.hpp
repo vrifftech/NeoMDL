@@ -1,7 +1,9 @@
 #pragma once
 #include "render/GlApi.hpp"
+#include <array>
 #include <map>
 #include <string>
+#include <string_view>
 #include <vector>
 namespace neomdl::render { struct MeshDrawParameters; struct PreviewLight; }
 namespace neomdl::render::desktop_programs {
@@ -42,11 +44,15 @@ struct LegacyGuard {
     ~LegacyGuard();
 };
 const char* standardFogFragment(bool kotor1);
-std::string lightProgram(const std::string&,const std::vector<PreviewLight>&);
 struct ProgramCache {
     g::Loader loader; LegacyApi x; bool ready{};
     std::map<std::string,g::UInt> programs;
+    std::map<std::string,std::map<std::string,std::string>,std::less<>> lightSources;
+    struct LocalParameter {std::array<float,4> value{};bool initialized{};};
+    std::map<std::pair<g::Enum,g::UInt>,std::vector<LocalParameter>> localParameters;
+    const std::string& lightProgram(std::string_view,const std::vector<PreviewLight>&);
     g::UInt program(g::Api&,g::Enum,const std::string&,std::string&);
+    void setLocalParameters(g::Enum,g::UInt,g::UInt,const std::array<float,4>*,std::size_t);
     void shutdown();
 };
 } // namespace neomdl::render::desktop_programs

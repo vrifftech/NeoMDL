@@ -2846,11 +2846,10 @@ bool ModelCanvas::engineOwnerAdmitted(LightOwnerId id,std::uint16_t classificati
 
 void ModelCanvas::animateRenderOwner(LightOwnerId id) {
     const auto scene=particleScene_.sceneAnimation();
-    if(!scene->interleaved())return;
     const auto found=renderAnimationOwners_.find(id);
     if(found!=renderAnimationOwners_.end()) {
         auto* owner=found->second;
-        scene->animateForRender(*owner);
+        if(!scene->animateForRender(*owner))return;
         // Engine Parts expose their updated transforms immediately to Mat,
         // light selection and hit queries in this owner's render callback.
         synchronizeEngineQueries();

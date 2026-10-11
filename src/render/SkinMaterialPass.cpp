@@ -48,8 +48,8 @@ std::vector<PreviewLight> baseLights(const MeshDrawParameters& p,MaterialProgram
     }
     return lights;
 }
-std::string litSkin(const std::vector<PreviewLight>& lights,bool environment=false) {
-    return desktop_programs::lightProgram(environment?skin_programs::SkinEnvironment:skin_programs::Skin,lights);
+const std::string& litSkin(ProgramCache& programs,const std::vector<PreviewLight>& lights,bool environment=false) {
+    return programs.lightProgram(environment?skin_programs::SkinEnvironment:skin_programs::Skin,lights);
 }
 model::Vec3 localPoint(const model::Mat4& frame,model::Vec3 p) {
     const auto& m=frame.values;p={p.x-m[12],p.y-m[13],p.z-m[14]};
@@ -100,7 +100,7 @@ bool SkinMaterialPass::prepare(g::Api& a,const MeshDrawParameters& p,MaterialPro
     const auto lights=baseLights(p,type);
     const bool force=skinForceSight(p,type);
     if(force) {
-        if(!i.program(a,VP,litSkin(lights,type==MaterialProgram::SkinEnvironment),error))return false;
+        if(!i.program(a,VP,litSkin(i,lights,type==MaterialProgram::SkinEnvironment),error))return false;
         // Only the ARB dispatcher selects these fragments. The legacy
         // dispatcher retains and changes the actual fixed texture pipeline.
         if(p.material.engineHardware.arbFragmentPrograms)
@@ -109,7 +109,7 @@ bool SkinMaterialPass::prepare(g::Api& a,const MeshDrawParameters& p,MaterialPro
         if(type==MaterialProgram::SkinBump && p.fog.mode!=model::FogMode::Disabled &&
            (!i.program(a,VP,skin_programs::Fog,error)||!i.program(a,FP,skin_programs::FogFragment,error)))return false;
     } else if(type==MaterialProgram::SkinFlat || type==MaterialProgram::SkinEnvironment) {
-        if(!i.program(a,VP,litSkin(lights,type==MaterialProgram::SkinEnvironment),error))return false;
+        if(!i.program(a,VP,litSkin(i,lights,type==MaterialProgram::SkinEnvironment),error))return false;
         if(type==MaterialProgram::SkinEnvironment) {
             const auto fragment=p.material.engineAtiValidation
                 ? (p.environmentCube?skin_programs::CubeEnvironmentFogFragment:skin_programs::EnvironmentFogFragment)
@@ -122,7 +122,7 @@ bool SkinMaterialPass::prepare(g::Api& a,const MeshDrawParameters& p,MaterialPro
             p.material.engineNewSkinBump?skin_programs::Bump:skin_programs::OldBump;
         if(!i.program(a,VP,first,error) || !i.program(a,FP,type==MaterialProgram::SkinBumpyShiny?
             skin_programs::ShinyFragment:skin_programs::BumpFragment,error) ||
-           !i.program(a,VP,litSkin(lights),error))return false;
+           !i.program(a,VP,litSkin(i,lights),error))return false;
         if(type==MaterialProgram::SkinBump && p.fog.mode!=model::FogMode::Disabled &&
            (!i.program(a,VP,skin_programs::Fog,error)||!i.program(a,FP,skin_programs::FogFragment,error)))return false;
     }
@@ -182,8 +182,9 @@ bool SkinMaterialPass::draw(g::Api& a,const model::Mesh& mesh,const model::Defor
         constants[71+4*n]={{light.attenuation[0],light.attenuation[1],light.attenuation[2],0}};
         constants[72+4*n]={{light.ambient[0],light.ambient[1],light.ambient[2],1}};
         constants[73+4*n]={{light.diffuse[0],light.diffuse[1],light.diffuse[2],1}};}
-    const auto vp=[&](const std::string& program){const auto id=i.program(a,VP,program,error);if(!id)return false;x.BindProgramARB(VP,id);for(unsigned k=0;k<96;++k)x.ProgramLocalParameter4fvARB(VP,k,constants[k].data());a.Enable(VP);return true;};
-    const auto fp=[&](const char* program){const auto id=i.program(a,FP,program,error);if(!id)return false;x.BindProgramARB(FP,id);for(unsigned k=0;k<state.fragmentConstants.size();++k)x.ProgramLocalParameter4fvARB(FP,k,state.fragmentConstants[k].data());a.Enable(FP);if(p.material.engineGame==material::EngineMaterialGame::Kotor1||p.material.engineHardware.arbFragmentPrograms)state.bindFragmentProgram(program);return true;};
+    const auto vp=[&](const std::string& program){const auto id=i.program(a,VP,program,error);if(!id)return false;x.BindProgramARB(VP,id);i.setLocalParameters(VP,id,0,constants.data(),constants.size());a.Enable(VP);return true;};
+    g::UInt fragmentProgram{};
+    const auto fp=[&](const char* program){const auto id=i.program(a,FP,program,error);if(!id)return false;x.BindProgramARB(FP,id);fragmentProgram=id;i.setLocalParameters(FP,id,0,state.fragmentConstants.data(),state.fragmentConstants.size());a.Enable(FP);if(p.material.engineGame==material::EngineMaterialGame::Kotor1||p.material.engineHardware.arbFragmentPrograms)state.bindFragmentProgram(program);return true;};
     const bool force=skinForceSight(p,type);
     const bool fixedForce=force && !p.material.engineHardware.arbFragmentPrograms;
     const bool engineFragmentDispatch=p.material.engineGame==material::EngineMaterialGame::Kotor1||p.material.engineHardware.arbFragmentPrograms;
@@ -249,7 +250,7 @@ bool SkinMaterialPass::draw(g::Api& a,const model::Mesh& mesh,const model::Defor
             // desaturation programs read the live desaturation parameter.
             const float weights[]={0.3f,0.59f,0.11f,glow?0.8f:p.forceSight.desaturation};
             std::copy(weights,weights+4,state.fragmentConstants[7].begin());
-            x.ProgramLocalParameter4fvARB(FP,7,weights);
+            i.setLocalParameters(FP,fragmentProgram,7,&state.fragmentConstants[7],1);
         } else a.Disable(FP);
         return true;
     };
@@ -267,7 +268,7 @@ bool SkinMaterialPass::draw(g::Api& a,const model::Mesh& mesh,const model::Defor
     };
     a.Disable(g::AlphaTest);a.Enable(g::Blend);
     if(type==MaterialProgram::SkinFlat || type==MaterialProgram::SkinEnvironment) {
-        if(!vp(litSkin(base,type==MaterialProgram::SkinEnvironment)))return false;
+        if(!vp(litSkin(i,base,type==MaterialProgram::SkinEnvironment)))return false;
         enabled(a,g::Blend,p.material.blending);
         const auto mode=p.material.blendFunction;
         blend(mode==material::BlendFunction::Replace?g::One:g::SrcAlpha,
@@ -328,7 +329,7 @@ bool SkinMaterialPass::draw(g::Api& a,const model::Mesh& mesh,const model::Defor
             blend(g::One,g::Zero);draw();cleanup();
         }
         constants[15]={{1,1,1,1}};
-        if(!vp(litSkin(base)))return false;
+        if(!vp(litSkin(i,base)))return false;
         a.Disable(FP);for(unsigned u=1;u<6;++u){a.ActiveTexture(g::Texture0+u);a.Disable(g::TextureCube);a.Disable(g::Texture2D);}a.ActiveTexture(g::Texture0);
         enabled(a,g::Blend,p.material.blending); // engine PopAttrib before pass2
         blend(g::One,g::OneMinusSrcAlpha);a.Disable(g::AlphaTest);
@@ -362,7 +363,7 @@ bool SkinMaterialPass::draw(g::Api& a,const model::Mesh& mesh,const model::Defor
         }
         if(engineFragmentDispatch)state.finishFragmentCommand(13,p.material.engineGame==material::EngineMaterialGame::Kotor1);
         cleanup();blend(g::One,g::One);constants[15]={{1,1,1,1}};
-        if(!vp(litSkin(base))||!bind(0,false,p.diffuseTexture,true))return false;
+        if(!vp(litSkin(i,base))||!bind(0,false,p.diffuseTexture,true))return false;
         x.TexEnvi(0x2300,0x2200,0x2100);a.Disable(Fog);a.Disable(g::AlphaTest);
         if(force&&!forceSetup())return false;
         draw();if(force) {

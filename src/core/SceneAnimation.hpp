@@ -120,8 +120,13 @@ public:
     void beginRender() noexcept {current_=this;if(!interleaved_)++token_;}
     void beginRender(float seconds) noexcept {elapsed_=seconds;beginRender();}
     void endRender() noexcept {if(interleaved_)++token_;current_=nullptr;}
-    void animateForRender(SceneAnimationOwner& owner) {
-        if(interleaved_)dispatch(owner.state_,elapsed_);
+    bool animateForRender(SceneAnimationOwner& owner) {
+        if(!interleaved_)return false;
+        const auto state=owner.state_;
+        const bool mayHaveUpdated=state->preamble || !state->scene ||
+            state->frame!=state->scene->token_;
+        dispatch(state,elapsed_);
+        return mayHaveUpdated;
     }
     static bool dependenciesAnimating() noexcept {return !current_||current_->animating_;}
     static SceneAnimation* currentScene() noexcept {return current_;}

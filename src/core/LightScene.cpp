@@ -350,22 +350,22 @@ bool LightScene::removeLight(std::uint64_t id) {
 }
 
 void LightScene::pruneRemovedLights() {
+    std::unordered_set<std::uint64_t> registered,live;
+    registered.reserve(lights_.size());live.reserve(lights_.size()+pooledLights_.size());
+    for(const auto& light:lights_) {registered.insert(light.id);live.insert(light.id);}
+    for(const auto& light:pooledLights_)live.insert(light.id);
+    const auto removed = [&](std::uint64_t id) { return !live.count(id); };
+    const auto unregistered = [&](std::uint64_t id) { return !registered.count(id); };
     for (auto& entry : owners_) {
         auto& owner = entry.second;
         owner.illumination.erase(std::remove_if(owner.illumination.begin(), owner.illumination.end(),
-            [this](const OwnerLightSlot& slot) { return !find(slot.id); }), owner.illumination.end());
+            [&](const OwnerLightSlot& slot) { return removed(slot.id); }), owner.illumination.end());
         owner.vertexIllumination.erase(std::remove_if(owner.vertexIllumination.begin(), owner.vertexIllumination.end(),
-            [this](const OwnerLightSlot& slot) { return !find(slot.id); }), owner.vertexIllumination.end());
-        if (owner.shadow && !find(owner.shadow->id)) owner.shadow.reset();
+            [&](const OwnerLightSlot& slot) { return removed(slot.id); }), owner.vertexIllumination.end());
+        if (owner.shadow && removed(owner.shadow->id)) owner.shadow.reset();
         auto& ranked = owner.rankedIllumination;
-        ranked.erase(std::remove_if(ranked.begin(), ranked.end(),
-            [this](std::uint64_t id) { return !find(id); }), ranked.end());
+        ranked.erase(std::remove_if(ranked.begin(), ranked.end(),removed), ranked.end());
     }
-    const auto removed = [this](std::uint64_t id) { return !find(id); };
-    const auto unregistered = [this](std::uint64_t id) {
-        return std::none_of(lights_.begin(),lights_.end(),
-            [id](const RuntimeLight& light){return light.id==id;});
-    };
     if(engineBumpLight_ && removed(*engineBumpLight_)) engineBumpLight_.reset();
     for (auto& room : rooms_) {
         auto& primary = room.primaryLights;
@@ -441,10 +441,16 @@ void LightScene::refreshRoomCollection() {
     collectedFlares_.clear();
     roomDiagnostic_.clear();
     if (!roomCollectionEnabled_) return;
-    const auto roomById = [this](LightRoomId id) -> const LightRoomRegistration* {
-        const auto it = std::find_if(rooms_.begin(), rooms_.end(),
-            [id](const LightRoomRegistration& room) { return room.id == id; });
-        return it == rooms_.end() ? nullptr : &*it;
+    std::unordered_map<LightRoomId,const LightRoomRegistration*> roomLookup;
+    roomLookup.reserve(rooms_.size());
+    for(const auto& room:rooms_)roomLookup.emplace(room.id,&room);
+    std::unordered_map<std::uint64_t,const RuntimeLight*> lightLookup;
+    lightLookup.reserve(lights_.size()+pooledLights_.size());
+    for(const auto& light:lights_)lightLookup.emplace(light.id,&light);
+    for(const auto& light:pooledLights_)lightLookup.emplace(light.id,&light);
+    const auto roomById = [&](LightRoomId id) -> const LightRoomRegistration* {
+        const auto it=roomLookup.find(id);
+        return it==roomLookup.end()?nullptr:it->second;
     };
     std::vector<LightRoomId> order;
     if (collectedRoom_) {
@@ -458,12 +464,7 @@ void LightScene::refreshRoomCollection() {
     } else {
         for (const auto& room : rooms_) order.push_back(room.id);
     }
-    const auto unique = [](std::vector<std::uint64_t>& ids, std::uint64_t id) {
-        if (std::find(ids.begin(), ids.end(), id) == ids.end()) ids.push_back(id);
-    };
-
-
-
+    std::unordered_set<std::uint64_t> seenLights,seenFlares;
     for (const auto id : order) {
         const auto* room = roomById(id);
         if (!room) {
@@ -474,12 +475,13 @@ void LightScene::refreshRoomCollection() {
         }
         const auto collect = [&](const std::vector<std::uint64_t>& ids, bool deduplicate) {
             for (const auto lightId : ids) {
-                const auto* light = find(lightId);
-                if (!light) continue;
-                if (light->registeredFlare) unique(collectedFlares_, lightId);
+                const auto found=lightLookup.find(lightId);
+                if(found==lightLookup.end())continue;
+                const auto* light=found->second;
+                if (light->registeredFlare&&seenFlares.insert(lightId).second) collectedFlares_.push_back(lightId);
                 if (!black(light->color)) {
-                    if (deduplicate) unique(collectedLights_, lightId);
-                    else collectedLights_.push_back(lightId);
+                    const bool first=seenLights.insert(lightId).second;
+                    if (!deduplicate||first) collectedLights_.push_back(lightId);
                 }
             }
         };

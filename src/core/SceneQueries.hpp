@@ -7,6 +7,7 @@
 #include <array>
 #include <cstdint>
 #include <functional>
+#include <memory>
 #include <optional>
 #include <string>
 #include <vector>
@@ -97,12 +98,15 @@ struct HitStaticPart {
     model::Bounds worldBounds{}; // ComputePartBBox: rounded MDX drawing positions
     std::optional<std::vector<model::Vec3>> animmeshPositions;
 };
+struct HitRoomGeometry {
+    std::vector<HitStaticPart> meshes;
+    std::optional<HitStaticPart> aabb; // engine room node has ONE, last assignment wins
+};
 struct HitRoom {
     HitRoomId id{};
     model::Bounds bounds{};
     std::vector<model::TriggerVolume> triggers;
-    std::vector<HitStaticPart> meshes;
-    std::optional<HitStaticPart> aabb; // engine room node has ONE, last assignment wins
+    std::shared_ptr<const HitRoomGeometry> geometry;
 };
 struct HitBspNode {
     // Optional explicit BSP input. InitBSP is empty in the engine;
