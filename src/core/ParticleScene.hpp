@@ -56,9 +56,6 @@ struct ChunkParticleInstance {
     neomdl::model::DanglySimulationState danglyState;
     bool active{}, everAssigned{}, playImpact{}, danglyEnabled{true};
     neomdl::model::Mat4 orientation=neomdl::model::identityMatrix();
-    // K1 Gob +0x138 / K2 +0x164: NewCAurObject's initial Animate(0), then
-    // retained when ChunkyParticle::initialize recycles the same object.
-    float engineOwnerRadius{1.0f};
     float ownerScale{1.0f};
     float time{};
     model::AnimationRuntime animationRuntime;

@@ -1165,6 +1165,8 @@ std::vector<AreaMeshInstance> AreaScene::meshInstances(bool includeReferences,bo
                 if(object->room()&&!roomActive(static_cast<LightRoomId>(*object->room()))) return;
             }
             const auto* staticRoom=isStatic&&object->room()?room(static_cast<LightRoomId>(*object->room())):nullptr;
+            const auto* animationOwner=isStatic?nullptr:reference
+                ?&object->references().animationOwner(*reference):&object->animationOwner();
             const bool transparent=model::ownerTreeHasTransparency(asset,
                 asset.game==model::GameVersion::Kotor1?nullptr:&pose);
             for(std::size_t i=0;i<asset.meshes.size();++i) {
@@ -1180,6 +1182,7 @@ std::vector<AreaMeshInstance> AreaScene::meshInstances(bool includeReferences,bo
                    std::any_of(planes.begin(),planes.end(),[&](const auto& plane){return above(staticRoom->meshBounds[i],plane)>0.0f;}))continue;
                 AreaMeshInstance draw;
                 draw.document=&document;draw.asset=&asset;draw.pose=&pose;draw.mesh=&mesh;
+                draw.animationOwner=animationOwner;
                 draw.material=reference?&document.referenceMaterial(*reference,i):&document.material(i);
                 draw.state=pose.nodeMaterials[mesh.nodeIndex];draw.ownerWorld=outer;
                 draw.ownerFrame=frame;draw.ownerScale=frame.scale;

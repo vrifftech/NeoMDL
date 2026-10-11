@@ -15,6 +15,7 @@ void bindOwnerHistory(SceneOwnerView& view,const SceneAnimationOwner& source) {
     // guarded by the separately invalidated engine owner lifetime token.
     const auto* owner=&source;
     view.animationOwner=owner;
+    view.lightSphere.radius=owner->sphere().radius;
     view.resolvePreviousRenderedFrame=[owner]{return owner->previousRenderedFrame();};
     view.commitRenderedFrame=[owner](const model::EngineFrame& frame){owner->commitRenderedFrame(frame);};
     view.resolveRangePosition=[owner,asset=view.asset,pose=view.pose,
@@ -150,7 +151,7 @@ std::vector<SceneOwnerView> collectParticleChunkOwners(
         const auto& chunk=*scene->chunkOwner();
         const auto label="Particle chunk "+std::to_string(chunk.ownerIdentity);
         add(chunk.ownerIdentity,label,*chunk.asset,chunk.asset->model(),chunk.pose,
-            chunk.danglyState,chunk.frame,chunk.engineOwnerRadius);
+            chunk.danglyState,chunk.frame,chunk.animationOwner.sphere().radius);
         owners.back().ownerLifetime=chunk.lifetime;
         owners.back().resolveFrame=[source=&chunk] {return source->frame;};
         owners.back().resolveWorld=[source=&chunk] {return source->world;};
@@ -162,7 +163,7 @@ std::vector<SceneOwnerView> collectParticleChunkOwners(
             const auto& asset=chunk.asset->references()[i].model;
             add(chunk.ownerIdentity+i+1u,label+" / reference "+std::to_string(i),
                 *chunk.asset,asset,reference.pose,reference.danglyState,reference.frame,
-                engineConstructedOwnerSphere(asset).radius);
+                reference.animationOwner.sphere().radius);
             owners.back().ownerLifetime=reference.animationOwner.lifetime();
             owners.back().resolveFrame=[source=&reference] {return source->frame;};
             owners.back().resolveWorld=[source=&reference] {return source->world;};

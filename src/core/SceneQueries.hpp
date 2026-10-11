@@ -18,6 +18,7 @@ class ReferenceScene;
 class AreaScene;
 class TriggerScene;
 class ParticleScene;
+class SceneAnimationOwner;
 
 
 
@@ -168,15 +169,12 @@ std::vector<HitPartTransform> engineCollapsedHitPose(const model::Model& model,
 // 1.35 multiplier and engine child-sphere merge, NOT a render-geometry proxy.
 HitSphere engineMinimumHitSphere(const model::Model& model,
     const std::vector<HitPartTransform>& parts, float ownerScale = 1.0f);
-// NewCAurObject -> Animate(0) -> ProcessGob computes the cached sphere before
-// animation controllers run. Classification-one emitters still have their
-// constructor radius 1 at this point; later poses do not rebuild this cache.
-// K1 Desktop shares the construction arithmetic, but its explicit later dirty
-// processing recomputes without K2's radius-equals-one gate.
+// NewCAurObject -> Animate(0) -> ProcessGob computes the initial sphere after
+// CreateInstanceTree's base controls, before attachment scaling and animation.
 HitSphere engineConstructedOwnerSphere(const model::Model& model);
 
 // ProcessParts' Gob ordering input: distance to the rotated/translated cached
-// owner-sphere center. Its construction scale is already present in the sphere.
+// owner-sphere center. Its last GetMinimumSphere scale is already present.
 float engineOwnerCameraDistance(HitSphere sphere,model::Vec3 ownerPosition,
     model::Quaternion ownerOrientation,model::Vec3 cameraPosition) noexcept;
 
@@ -192,13 +190,10 @@ public:
 
 
 
-    // Main/reference/static-room host adapter. Registration uses all live
-    // owners and rooms, independently of renderer visibility. A new ordinary
-    // owner receives its constructed GetMinimumSphere state; later updates
-    // preserve that sphere and externally set Gob query flags/alpha. Allocated
-    // detached Gobs retain those fields until their assets are destroyed.
+    // Registration copies the live owner sphere and preserves externally set
+    // query flags/alpha, including allocated owners detached from the scene.
     void synchronize(const ModelDocument&, const model::Pose&, const ReferenceScene&,
-                     const AreaScene&, const TriggerScene&,
+                     const AreaScene&, const TriggerScene&, const SceneAnimationOwner& mainOwner,
                      const ParticleScene* inspectionParticles = nullptr);
     void registerOwner(HitOwner owner); // stable insertion order on replacement
     bool removeOwner(HitOwnerId id) noexcept;

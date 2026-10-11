@@ -565,7 +565,11 @@ void ParticleScene::chunkBirth(ParticleEmitterInstance& emitter,std::uint64_t se
 
         instance->animationRuntime.setModel(&model,std::move(hierarchy));
         instance->pose=instance->animationRuntime.pose();
-        instance->engineOwnerRadius=engineConstructedOwnerSphere(model).radius;
+        instance->animationOwner.configureSphere(model,[instance] {
+            const auto& asset=instance->asset->model();
+            return engineMinimumHitSphere(asset,
+                engineHitPose(asset,&instance->animationRuntime.pose()),instance->ownerScale);
+        });
         instance->references=std::make_shared<ReferenceScene>();
         instance->references->setSceneAnimation(sceneAnimation_);
         instance->references->setParentAnimationOwner(&instance->animationOwner,&instance->animationRuntime);
@@ -702,7 +706,7 @@ void ParticleScene::synchronizeEmitterSpatialState(
 
 
                 input.attachedObjects.push_back({matrixPosition(chunk->world),
-                                                  chunk->engineOwnerRadius});
+                                                  chunk->animationOwner.sphere().radius});
                 continue;
             }
             if(const auto sphere=transformedBoundsSphere(chunk->pose.bounds,chunk->world))
@@ -1232,7 +1236,11 @@ void ParticleScene::updateEmitterChunks(ParticleEmitterInstance& emitter,
 
 
             if(e->game==m::GameVersion::Kotor2)
-                instance->engineOwnerRadius=engineConstructedOwnerSphere(model).radius;
+                instance->animationOwner.configureSphere(model,[instance] {
+                    const auto& asset=instance->asset->model();
+                    return engineMinimumHitSphere(asset,
+                        engineHitPose(asset,&instance->pose),instance->ownerScale);
+                });
             instance->danglyState={};
             instance->references=std::make_shared<ReferenceScene>();
         instance->references->setSceneAnimation(sceneAnimation_);

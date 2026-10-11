@@ -1,6 +1,7 @@
 #pragma once
 
 #include "core/SceneOwnerLifetime.hpp"
+#include "core/SceneQueries.hpp"
 #include "model/Wind.hpp"
 #include <cmath>
 #include <algorithm>
@@ -27,6 +28,14 @@ public:
         std::function<bool()> hasRuns;
         std::function<void()> lookAt;
         std::function<bool(float,bool)> animate;
+        HitSphere sphere{};
+        model::GameVersion sphereGame{model::GameVersion::Kotor2};
+        bool sphereHasRoot{},sphereDirty{};
+        std::function<HitSphere()> calculateSphere;
+        void refreshSphere() {
+            if(sphereHasRoot&&(sphereGame==model::GameVersion::Kotor1||sphere.radius==1.0f))
+                sphere=calculateSphere();
+        }
         model::EngineFrame previousRenderedFrame{};
         model::WindManager* windManager{};
         std::function<model::Mat4()> resolveWorld;
@@ -46,6 +55,16 @@ public:
                    bool camera=false) {
         state_->classification=classification;state_->animate=std::move(animate);state_->camera=camera;
     }
+    void configureSphere(const model::Model& asset,std::function<HitSphere()> callback) {
+        state_->sphere=engineConstructedOwnerSphere(asset);
+        state_->sphereGame=asset.game;state_->sphereHasRoot=false;state_->sphereDirty=false;
+        for(std::size_t i=0;i<asset.nodes.size();++i)
+            if(!asset.nodes[i].parent&&(asset.sceneNodeAdmission.empty()||
+               (i<asset.sceneNodeAdmission.size()&&asset.sceneNodeAdmission[i])))state_->sphereHasRoot=true;
+        state_->calculateSphere=std::move(callback);
+    }
+    const HitSphere& sphere() const noexcept {return state_->sphere;}
+    void markSphereDirty() noexcept {state_->sphereDirty=true;}
     void bindWind(model::WindManager* manager,std::function<model::Mat4()> world,
                   model::GameVersion game) {
         state_->windManager=manager;state_->resolveWorld=std::move(world);
@@ -123,7 +142,7 @@ public:
     bool animateForRender(SceneAnimationOwner& owner) {
         if(!interleaved_)return false;
         const auto state=owner.state_;
-        const bool mayHaveUpdated=state->preamble || !state->scene ||
+        const bool mayHaveUpdated=state->preamble || state->sphereDirty || !state->scene ||
             state->frame!=state->scene->token_;
         dispatch(state,elapsed_);
         return mayHaveUpdated;
@@ -162,6 +181,9 @@ private:
     static void dispatch(std::shared_ptr<SceneAnimationOwner::State> owner,float seconds) {
         // Camera::Animate performs its interpolation before Gob::Animate.
         if(owner->preamble)owner->preamble(seconds);
+        if(owner->sphereDirty) {
+            owner->refreshSphere();owner->sphereDirty=false;
+        }
         auto scene=owner->scene;
         if(scene) {
             if(owner->frame==scene->token_)return;
@@ -214,7 +236,10 @@ private:
             if(!owner->alive)return;
             owner->hierarchyUpdated=applied||owner->hierarchyUpdated;
         }
-        if(owner->parts&&((owner->scene&&hadRuns)||saber))owner->parts(seconds);
+        if((owner->scene&&hadRuns)||saber) {
+            if(owner->parts)owner->parts(seconds);
+            owner->refreshSphere();
+        }
     }
     inline static thread_local SceneAnimation* current_{};
     std::vector<SceneAnimationOwner::State*> owners_,cameras_;

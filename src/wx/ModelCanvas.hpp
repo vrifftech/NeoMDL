@@ -645,9 +645,6 @@ private:
     // Both games use static PartTriMesh buckets and dynamic Gob buckets;
     // their Gob comparators differ. Remaining inspection draws are separate.
     std::vector<neomdl::render::MeshSubmission> renderQueue_;
-    // NewCAurObject's initial ProcessGob sphere. Animation and SetObjectScale
-    // retain it; replacing the document/assembled owner rebuilds the cache.
-    std::vector<HitSphere> ownerOrderingSpheres_;
     std::vector<bool> ownerOrderingTransparency_;
     std::vector<neomdl::render::MeshSubmission> hologramQueue_;
     std::vector<neomdl::render::MeshSubmission> distortionQueue_;

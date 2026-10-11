@@ -158,6 +158,10 @@ AreaObject::AreaObject(std::size_t firstInstance, AreaObjectKind kind, std::stri
     animationOwner_.configure(document_->model().classification,[this](float seconds,bool evaluate) {
         return advancePrimaryPose(seconds,evaluate);
     });
+    if(!staticPrimary())animationOwner_.configureSphere(document_->model(),[this] {
+        return engineMinimumHitSphere(document_->model(),
+            engineHitPose(document_->model(),&animation_.pose()),this->frame().scale);
+    });
     animationOwner_.setProcedural([this](float seconds) {
         animation_.advanceProceduralUv(particles_.runtimeRandom(),(!paused_&&frameSettings_.animate)?seconds:0.0f);
     });

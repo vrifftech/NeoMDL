@@ -196,20 +196,6 @@ float clampColor(float value) {
     return std::clamp(std::isfinite(value) ? value : 0.0f, 0.0f, 1.0f);
 }
 
-float ownerCameraDistance(const neomdl::model::Bounds& bounds,
-                          const neomdl::model::Mat4& ownerWorld,
-                          const neomdl::model::Mat4& cameraView) noexcept {
-    if (!bounds.valid) return 0.0f;
-    const neomdl::model::Vec3 center{
-        (bounds.minimum.x + bounds.maximum.x) * 0.5f,
-        (bounds.minimum.y + bounds.maximum.y) * 0.5f,
-        (bounds.minimum.z + bounds.maximum.z) * 0.5f};
-    const auto eye = neomdl::model::transformPoint(
-        neomdl::model::multiply(cameraView, ownerWorld), center);
-    const auto distance = std::sqrt(eye.x * eye.x + eye.y * eye.y + eye.z * eye.z);
-    return std::isfinite(distance) ? distance : 0.0f;
-}
-
 float ownerSphereCameraDistance(const neomdl::HitSphere& sphere,
                                const neomdl::model::EngineFrame& frame,
                                const neomdl::model::Vec3& cameraPosition) {
@@ -1076,6 +1062,12 @@ void ModelCanvas::startDialogue(PreparedDialoguePlayback prepared,std::size_t en
             dialogueCameraScene_.synchronize(dialogueCameraAnimation_.pose(),true,false);
             return applied;
         });
+        dialogueCameraAnimationOwner_.configureSphere(document->model(),[this] {
+            const auto& asset=dialogueAssets_.cameraModel->model();
+            return engineMinimumHitSphere(asset,engineHitPose(asset,&dialogueCameraAnimation_.pose()),
+                dialogueCameraReferences_.mainFrame().scale);
+        });
+        dialogueCameraAnimationOwner_.setHasAnimationRuns([this]{return !dialogueCameraAnimation_.empty();});
         dialogueCameraAnimationOwner_.setProcedural([this](float seconds) {
             dialogueCameraAnimation_.advanceProceduralUv(particleScene_.runtimeRandom(),seconds);
         });
@@ -1838,14 +1830,11 @@ void ModelCanvas::setDocument(const ModelDocument* document) {
     // Keeping the IDs until then avoids losing hidden-tab texture/buffer IDs.
     pendingGpuReset_ = true;
     document_ = document;
-    ownerOrderingSpheres_.clear();
     ownerOrderingTransparency_.clear();
     if(document_ && document_->isOpen()) {
-        ownerOrderingSpheres_.resize(document_->references().size()+1u);
         ownerOrderingTransparency_.resize(document_->references().size()+1u);
         const auto constructOrdering=[this](std::size_t owner,const model::Model& asset) {
             if(asset.game==model::GameVersion::Kotor1) {
-                ownerOrderingSpheres_[owner]=engineConstructedOwnerSphere(asset);
                 ownerOrderingTransparency_[owner]=model::ownerTreeHasTransparency(asset,nullptr);
             }
         };
@@ -1914,6 +1903,11 @@ void ModelCanvas::setDocument(const ModelDocument* document) {
     if(document_&&document_->hasModelOwner()) {
         mainAnimationOwner_.configure(document_->model().classification,[this](float seconds,bool evaluate) {
             return advanceMainOwner(seconds,evaluate);
+        });
+        mainAnimationOwner_.configureSphere(document_->model(),[this] {
+            const auto& asset=document_->model();
+            return engineMinimumHitSphere(asset,engineHitPose(asset,&animationRuntime_.pose()),
+                referenceScene_.mainFrame().scale);
         });
         mainAnimationOwner_.bindWind(&particleScene_.windManager(),[this]{return referenceScene_.mainWorld();},
             document_->model().game);
@@ -2560,7 +2554,7 @@ void ModelCanvas::resetParticleHistoryForAnimationSeek() {
             // Main-model inspection seek retains independent reference/area
             // clocks while replaying the selected owner's emitter tree.
             referenceScene_.synchronize(pose);
-            sceneQueries_.synchronize(*document_,pose,referenceScene_,areaScene_,triggerScene_,&particleScene_);
+            sceneQueries_.synchronize(*document_,pose,referenceScene_,areaScene_,triggerScene_,mainAnimationOwner_,&particleScene_);
         };
         context.commitEmitterState=[this](const model::Pose& replayPose) {
             const auto& live=animationRuntime_.pose().nodeEmitters;
@@ -2896,10 +2890,11 @@ void ModelCanvas::refreshAnimatedSubmission(render::MeshSubmission& submission,
 void ModelCanvas::refreshOwnerSubmission(render::MeshSubmission& submission,LightOwnerId id,
         const AreaObject* retainedObject,std::optional<std::size_t> retainedReference) {
     const auto refresh=[&](const model::Model& asset,const model::Pose& pose,const model::Mat4& world,
-            const model::EngineFrame& frame,float time,std::uint64_t revision,const ModelDocument& document,
+            const model::EngineFrame& frame,const SceneAnimationOwner& animationOwner,
+            float time,std::uint64_t revision,const ModelDocument& document,
             std::optional<std::size_t> reference,const OwnerVisualEffects* effects,
             std::optional<float> textureAngle={}) {
-        ownerLightSpheres_[id].position=model::transformPoint(world,{});
+        ownerLightSpheres_[id]={model::transformPoint(world,{}),animationOwner.sphere().radius};
         if(!submission.mesh) {
             submission.parameters.modelView=model::multiply(cameraView_,world);return;
         }
@@ -2908,12 +2903,12 @@ void ModelCanvas::refreshOwnerSubmission(render::MeshSubmission& submission,Ligh
         refreshAnimatedSubmission(submission,asset,pose,world,frame,time,revision,material,&document,effects,textureAngle);
     };
     if(id==mainLightOwner) {
-        refresh(document_->model(),*pose_,referenceScene_.mainWorld(),referenceScene_.mainFrame(),
+        refresh(document_->model(),*pose_,referenceScene_.mainWorld(),referenceScene_.mainFrame(),mainAnimationOwner_,
             materialTime_,poseRevision_,*document_,{},&ownerEffects_[0]);return;
     }
     for(std::size_t i=0;i<referenceScene_.instances().size();++i)if(id==i+1u) {
         const auto& runtime=*referenceScene_.instance(i);
-        refresh(document_->references()[i].model,runtime.pose,runtime.world,runtime.frame,
+        refresh(document_->references()[i].model,runtime.pose,runtime.world,runtime.frame,runtime.animationOwner,
             runtime.animationTime,referenceScene_.revision(),*document_,i,&ownerEffects_[i+1u]);return;
     }
     const auto* object=retainedObject;
@@ -2921,7 +2916,7 @@ void ModelCanvas::refreshOwnerSubmission(render::MeshSubmission& submission,Ligh
     const auto* runtime=reference?object->references().instance(*reference):nullptr;
     const auto& asset=reference?object->document()->references()[*reference].model:object->document()->model();
     refresh(asset,runtime?runtime->pose:object->pose(),runtime?runtime->world:object->world(),
-        runtime?runtime->frame:object->frame(),
+        runtime?runtime->frame:object->frame(),runtime?runtime->animationOwner:object->animationOwner(),
         runtime?runtime->animationTime:static_cast<float>(object->animation().empty()?object->elapsed():object->animation().primaryTime()),
         (id<<32u)^object->revision(),*object->document(),reference,object->ownerVisualEffects(reference),
         submission.mesh?std::optional<float>{object->textureRotationDegrees(*submission.mesh)}:std::nullopt);
@@ -2937,7 +2932,7 @@ void ModelCanvas::updateAnimationVisibility() {
         if(auto* animation=owner.animationOwner)animation->setInViewVolume(false);
     for(const auto& owner:owners) {
         if(!owner.renderVisible)continue;
-        const auto sphere=engineConstructedOwnerSphere(*owner.asset);
+        const auto& sphere=owner.animationOwner->sphere();
         const auto rotated=engineRotate(owner.frame.orientation,sphere.center);
         const model::Vec3 center{owner.frame.position.x+rotated.x,
             owner.frame.position.y+rotated.y,owner.frame.position.z+rotated.z};
@@ -3591,9 +3586,8 @@ void ModelCanvas::drawScene() {
     const auto& mainBase = referenceScene_.mainWorld();
     const auto mainEngineParts = !exactK2Scene && pose_
         ? engineCollapsedHitPose(model,*pose_,referenceScene_.mainFrame()) : std::vector<HitPartTransform>{};
-    const auto mainOwnerDistance = exactK2Scene
-        ? ownerCameraDistance(model.bounds, mainBase, cameraView_)
-        : ownerSphereCameraDistance(ownerOrderingSpheres_.front(),referenceScene_.mainFrame(),sceneCameraFrame().position);
+    const auto mainOwnerDistance=ownerSphereCameraDistance(mainAnimationOwner_.sphere(),
+        referenceScene_.mainFrame(),sceneCameraFrame().position);
     const bool mainOwnerHasTransparency = exactK2Scene
         ? neomdl::model::ownerTreeHasTransparency(model, pose_ ? &*pose_ : nullptr)
         : ownerOrderingTransparency_.front();
@@ -3732,16 +3726,16 @@ void ModelCanvas::drawScene() {
             render::MeshSubmission empty;empty.ownerOnly=true;empty.drawPrimary=false;
             empty.sceneOwner=owner.id+1u;empty.lightOwner=owner.id;
             empty.ownerLifetime=owner.ownerLifetime;
-            if(owner.resolveWorld)empty.resolveOwner=[this,world=owner.resolveWorld,id=owner.id,radius=owner.lightSphere.radius](auto& live) {
+            if(owner.resolveWorld)empty.resolveOwner=[this,world=owner.resolveWorld,id=owner.id,animation=owner.animationOwner](auto& live) {
                 const auto frame=world();live.parameters.modelView=model::multiply(cameraView_,frame);
-                ownerLightSpheres_[id]={model::transformPoint(frame,{}),radius};
+                ownerLightSpheres_[id]={model::transformPoint(frame,{}),animation->sphere().radius};
             };
             empty.ownerModelClassification=owner.asset->classification;
             empty.ownerAlpha=1;
             empty.parameters.material.k2PartTriMeshState=true;
             empty.parameters.modelView=model::multiply(cameraView_,owner.world);
-            const auto eye=model::transformPoint(empty.parameters.modelView,{});
-            empty.ownerCameraDistance=std::sqrt(eye.x*eye.x+eye.y*eye.y+eye.z*eye.z);
+            empty.ownerCameraDistance=ownerSphereCameraDistance(owner.animationOwner->sphere(),
+                owner.frame,sceneCameraFrame().position);
             auto* queue=&dynamicGobQueue_;
             if(owner.id<ownerEffects_.size()) {
                 const auto& fx=ownerEffects_[static_cast<std::size_t>(owner.id)];
@@ -4123,10 +4117,11 @@ void ModelCanvas::configurePreviewLights(const std::vector<neomdl::model::Mat4>&
             particleScene_.setEmitterRooms(rooms);
             for(auto* scene:areaScene_.particleSceneRoots())scene->setEmitterRooms(rooms);
         }
-        const auto registerOwner = [this](LightOwnerId id,const model::Mat4& world) {
+        const auto registerOwner = [this](LightOwnerId id,const model::Mat4& world,
+                const SceneAnimationOwner& animationOwner) {
             // DoGobBuckets queries the Gob origin and its runtime radius
             // (K1 +0x138, K2 +0x164), independently of the rendering AABB.
-            ownerLightSpheres_[id] = {model::transformPoint(world,{}),options_.objectLightRadius};
+            ownerLightSpheres_[id] = {model::transformPoint(world,{}),animationOwner.sphere().radius};
             if (!areaScene_.empty()) {
                 auto query = lightScene_.ownerQuery(id).value_or(LightOwnerQuery{});
                 query.source = LightQuerySource::Gob;
@@ -4136,16 +4131,16 @@ void ModelCanvas::configurePreviewLights(const std::vector<neomdl::model::Mat4>&
             }
         };
         for(const auto& object:areaScene_.objects()) {
-            if(!object->staticPrimary()) registerOwner(object->ownerId(),object->world());
+            if(!object->staticPrimary()) registerOwner(object->ownerId(),object->world(),object->animationOwner());
             if(options_.showReferences) for(std::size_t i=0;i<object->references().instances().size();++i) {
                 const auto& ref=object->references().instances()[i];
-                if(ref.active&&ref.sceneMember)registerOwner(object->ownerId(i),ref.world);
+                if(ref.active&&ref.sceneMember)registerOwner(object->ownerId(i),ref.world,ref.animationOwner);
             }
         }
-        if(document_->hasModelOwner())registerOwner(mainLightOwner,referenceScene_.mainWorld());
+        if(document_->hasModelOwner())registerOwner(mainLightOwner,referenceScene_.mainWorld(),mainAnimationOwner_);
         if (options_.showReferences) for (std::size_t i=0;i<document_->references().size();++i) {
             const auto* reference = referenceScene_.instance(i);
-            if (reference && reference->active && reference->sceneMember) registerOwner(i+1u,reference->world);
+            if (reference && reference->active && reference->sceneMember) registerOwner(i+1u,reference->world,reference->animationOwner);
         }
         for(const auto& owner:collectParticleChunkOwners(&particleScene_,areaScene_,options_.showReferences)) {
             ownerLightSpheres_[owner.id]=owner.lightSphere;
@@ -4177,7 +4172,7 @@ bool ModelCanvas::synchronizeEngineQueries() {
         particleScene_.setSceneQueries(nullptr);areaScene_.setQueries(nullptr);sceneQueries_.clear();sceneQueryError_.clear();return false;
     }
     try {
-        sceneQueries_.synchronize(*document_,inspectionReplayPose_?*inspectionReplayPose_:*pose_,referenceScene_,areaScene_,triggerScene_,&particleScene_);
+        sceneQueries_.synchronize(*document_,inspectionReplayPose_?*inspectionReplayPose_:*pose_,referenceScene_,areaScene_,triggerScene_,mainAnimationOwner_,&particleScene_);
         // Engine SetColorShifting and EnableDistortion write the same Gob
         // fields consumed by HitCheck, independently of the render toggles.
         for(std::size_t i=0;i<ownerEffects_.size();++i)if(auto* owner=sceneQueries_.owner(i)) {
@@ -4479,7 +4474,7 @@ void ModelCanvas::queueAreaRooms() {
     std::map<const model::Pose*,std::vector<HitPartTransform>> engineFrames;
     const auto rememberK1Owner=[&](std::uint64_t owner,const model::Model& asset,
         const model::Pose& pose,const model::Mat4& world,const model::EngineFrame& frame,
-        const OwnerVisualEffects* visual) {
+        const SceneAnimationOwner& animationOwner,const OwnerVisualEffects* visual) {
         if(asset.game!=model::GameVersion::Kotor1||!engineOwnerAdmitted(owner,asset.classification))return;
         const auto& effects=visual?*visual:ordinaryEffects;
         auto* queue=&dynamicGobQueue_;
@@ -4488,7 +4483,7 @@ void ModelCanvas::queueAreaRooms() {
             queue=&distortionQueue_;
             if(distortionOwners.insert(owner).second)++distortionProducerCount_;
         } else if(bucket==EngineOwnerBucket::Lightsaber)queue=&lightsaberQueue_;
-        const auto distance=ownerSphereCameraDistance(engineConstructedOwnerSphere(asset),frame,sceneCameraFrame().position);
+        const auto distance=ownerSphereCameraDistance(animationOwner.sphere(),frame,sceneCameraFrame().position);
         const bool transparent=model::ownerTreeHasTransparency(asset,nullptr);
         // Preserve a complete Gob event even if it only owns special parts.
         queue->push_back(ownerOrderingSubmission(owner+1u,asset,transparent,distance,
@@ -4498,12 +4493,12 @@ void ModelCanvas::queueAreaRooms() {
     };
     for(const auto& object:areaScene_.objects()) {
         if(!object->staticPrimary())rememberK1Owner(object->ownerId(),object->document()->model(),
-            object->pose(),object->world(),object->frame(),object->ownerVisualEffects());
+            object->pose(),object->world(),object->frame(),object->animationOwner(),object->ownerVisualEffects());
         if(options_.showReferences)for(std::size_t i=0;i<object->references().instances().size();++i) {
             const auto& reference=object->references().instances()[i];
             if(reference.active&&reference.sceneMember)
                 rememberK1Owner(object->ownerId(i),object->document()->references()[i].model,
-                    reference.pose,reference.world,reference.frame,object->ownerVisualEffects(i));
+                    reference.pose,reference.world,reference.frame,reference.animationOwner,object->ownerVisualEffects(i));
         }
     }
     for(const auto& draw:areaScene_.meshInstances(options_.showReferences,options_.danglySimulation,lastScenePlanes_)) {
@@ -4526,7 +4521,8 @@ void ModelCanvas::queueAreaRooms() {
                 queue=&distortionQueue_;
                 if(distortionOwners.insert(draw.owner).second)++distortionProducerCount_;
             }
-            distance=ownerCameraDistance(draw.asset->bounds,draw.ownerWorld,cameraView_);
+            distance=ownerSphereCameraDistance(draw.animationOwner->sphere(),
+                draw.ownerFrame,sceneCameraFrame().position);
         }
         const HitPartTransform* partFrame=nullptr;
         if(k1) {
@@ -4576,9 +4572,8 @@ void ModelCanvas::drawReferenceModels() {
                 else if(bucket==EngineOwnerBucket::Lightsaber)targetQueue=&lightsaberQueue_;
             }
         }
-        const auto cameraDistance=reference.model.game==model::GameVersion::Kotor1
-            ? ownerSphereCameraDistance(ownerOrderingSpheres_.at(instanceIndex+1u),runtime->frame,sceneCameraFrame().position)
-            : ownerCameraDistance(reference.model.bounds,runtime->world,cameraView_);
+        const auto cameraDistance=ownerSphereCameraDistance(runtime->animationOwner.sphere(),
+            runtime->frame,sceneCameraFrame().position);
         const bool ownerHasTransparency = reference.model.game==model::GameVersion::Kotor1
             ? ownerOrderingTransparency_.at(instanceIndex+1u)
             : neomdl::model::ownerTreeHasTransparency(reference.model, &sampled);
@@ -4990,9 +4985,8 @@ void ModelCanvas::queueChunkModels() {
             else if(bucket==EngineOwnerBucket::Distortion) {
                 queue=&distortionQueue_;++distortionProducerCount_;
             } else if(bucket==EngineOwnerBucket::Lightsaber) queue=&lightsaberQueue_;
-            const auto distance=asset.game==model::GameVersion::Kotor1
-                ? ownerSphereCameraDistance(engineConstructedOwnerSphere(asset),owner.frame,sceneCameraFrame().position)
-                : ownerCameraDistance(asset.bounds,owner.world,cameraView_);
+            const auto distance=ownerSphereCameraDistance(owner.animationOwner->sphere(),
+                owner.frame,sceneCameraFrame().position);
             const bool transparent=model::ownerTreeHasTransparency(asset,
                 asset.game==model::GameVersion::Kotor1 ? nullptr : &pose);
             const auto sceneOwner=owner.id+1u;
@@ -5000,10 +4994,10 @@ void ModelCanvas::queueChunkModels() {
                 auto marker=ownerOrderingSubmission(sceneOwner,asset,transparent,distance,1.0f,
                     model::multiply(cameraView_,owner.world));
                 marker.ownerLifetime=owner.ownerLifetime;
-                marker.resolveOwner=[this,world=owner.resolveWorld,id=owner.id,radius=owner.lightSphere.radius](auto& live) {
+                marker.resolveOwner=[this,world=owner.resolveWorld,id=owner.id,animation=owner.animationOwner](auto& live) {
                     const auto frame=world();
                     live.parameters.modelView=model::multiply(cameraView_,frame);
-                    ownerLightSpheres_[id]={model::transformPoint(frame,{}),radius};
+                    ownerLightSpheres_[id]={model::transformPoint(frame,{}),animation->sphere().radius};
                 };
                 queue->push_back(std::move(marker));
             }
@@ -5033,7 +5027,7 @@ void ModelCanvas::queueChunkModels() {
                     auto& submission=(*queue)[index];submission.poseRevision=++revision;
                     submission.ownerLifetime=owner.ownerLifetime;
                     submission.resolveOwner=[this,source=&chunk,reference,meshIndex=*node.mesh,
-                        radius=owner.lightSphere.radius](auto& live) {
+                        animation=owner.animationOwner](auto& live) {
                         // The admitted bucket retains a Gob, including one detached
                         // into the particle pool. Resolve its current Parts at Draw.
                         const auto current=chunkParticleMesh(*source,reference,meshIndex);
@@ -5044,7 +5038,7 @@ void ModelCanvas::queueChunkModels() {
                         refreshAnimatedSubmission(live,asset,pose,current.ownerFrame,
                             runtime?runtime->frame:source->references->mainFrame(),current.time,(++particleRevision_)<<32u,
                             *current.material,current.resources,&effects);
-                        ownerLightSpheres_[current.ownerIdentity]={model::transformPoint(current.ownerFrame,{}),radius};
+                        ownerLightSpheres_[current.ownerIdentity]={model::transformPoint(current.ownerFrame,{}),animation->sphere().radius};
                     };
                 }
             }
@@ -5342,20 +5336,15 @@ void ModelCanvas::queueLightsabers() {
         if(source.chunk)submission.ownerLifetime=instance->reference
             ?source.references->animationOwner(*instance->reference).lifetime():SceneOwnerLifetime{source.chunk->lifetime};
         else if(auto* owner=animationOwnerForId(id))submission.ownerLifetime=owner->lifetime();
-        const auto retainedRadius=instance->game==model::GameVersion::Kotor2
-            ?sceneQueries_.owner(id)->sphere.radius:0.0f;
-        submission.resolveOwner=[this,source,saber=instance.get(),id,retainedRadius,prepareSaberMaterial](auto& live) {
+        submission.resolveOwner=[this,source,saber=instance.get(),id,
+            animation=animationOwnerForId(id),prepareSaberMaterial](auto& live) {
             live.mesh=&saber->renderMesh();live.poseRevision=source.scene->revision();
             live.parameters.modelView=model::multiply(cameraView_,saber->world);
             live.parameters.streamedGeometry=saber->streamsMovingGeometry();
             const auto* reference=saber->reference ? source.references->instance(*saber->reference) : nullptr;
             const auto& world=reference ? reference->world : source.chunk ? source.chunk->world
                 : source.object ? source.object->world() : source.references->mainWorld();
-            const auto& asset=saber->reference ? source.document->references()[*saber->reference].model : source.document->model();
-            const auto radius=saber->game==model::GameVersion::Kotor2 ? retainedRadius
-                : source.chunk&&!reference ? source.chunk->engineOwnerRadius
-                : engineConstructedOwnerSphere(asset).radius;
-            ownerLightSpheres_[id]={model::transformPoint(world,{}),radius};
+            ownerLightSpheres_[id]={model::transformPoint(world,{}),animation->sphere().radius};
             prepareSaberMaterial(live.parameters);
         };
         if(parameters.engineLightsaberMaterial)

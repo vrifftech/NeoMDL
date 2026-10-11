@@ -470,8 +470,7 @@ std::vector<HitPartTransform> engineCollapsedHitPose(const model::Model& model,
     return result;
 }
 static HitSphere minimumHitSphere(const model::Model& model,
-    const std::vector<HitPartTransform>& parts,float ownerScale,
-    std::optional<float> constructedEmitterRadius) {
+    const std::vector<HitPartTransform>& parts,float ownerScale) {
     require(parts.size()==model.nodes.size()&&std::isfinite(ownerScale),"invalid minimum-sphere inputs");
     const auto roots=rootsOf(model);if (roots.empty()) return {};
     struct Visit {std::size_t n;bool exit;};
@@ -501,11 +500,10 @@ static HitSphere minimumHitSphere(const model::Model& model,
             containsMesh[item.n]=containsMesh[item.n]||containsMesh[child];
 
 
-        if (n.emitter&&(model.classification&1u)) {
-            if(!constructedEmitterRadius)
-                throw ModelError("Engine minimum sphere: classification-one emitter bounds need runtime input");
-            result.radius=*constructedEmitterRadius;
-        }
+        // Part's sphere consumes emitter radius only for classification one.
+        // InternalControl's CalculateRadius stores 10000 for that owner before
+        // any target/wind branch, including CreateInstanceTree control.
+        if (n.emitter&&(model.classification&1u)) result.radius=10000.0f;
         if(containsMesh[item.n])
         for (const auto child:n.children) {
             const auto& p=parts.at(child);auto next=spheres.at(child);
@@ -548,24 +546,14 @@ static HitSphere minimumHitSphere(const model::Model& model,
 }
 HitSphere engineMinimumHitSphere(const model::Model& model,
     const std::vector<HitPartTransform>& parts,float ownerScale) {
-    return minimumHitSphere(model,parts,ownerScale,{});
+    return minimumHitSphere(model,parts,ownerScale);
 }
 HitSphere engineConstructedOwnerSphere(const model::Model& model) {
-
-
-
-
-
-
-
-
-
-
     auto parts=engineHitPose(model,nullptr);
     for(std::size_t i=0;i<model.nodes.size();++i)
         model::constructedNodeFrame(model.nodes[i],parts[i].position,parts[i].orientation,
                                     model.game);
-    return minimumHitSphere(model,parts,1.0f,1.0f);
+    return minimumHitSphere(model,parts,1.0f);
 }
 
 float engineOwnerCameraDistance(HitSphere sphere,model::Vec3 ownerPosition,
@@ -633,7 +621,7 @@ std::vector<HitStaticPart> engineStaticHitParts(const Model& asset,const Pose& p
 
 void SceneQueries::synchronize(const ModelDocument& document,const model::Pose& pose,
         const ReferenceScene& references,const AreaScene& area,const TriggerScene& triggers,
-        const ParticleScene* inspectionParticles) {
+        const SceneAnimationOwner& mainOwner,const ParticleScene* inspectionParticles) {
     struct PendingOwner { HitOwner value; bool registered; };
     std::vector<PendingOwner> pending;
     std::unordered_map<HitOwnerId,const HitOwner*> previousOwners;
@@ -647,14 +635,14 @@ void SceneQueries::synchronize(const ModelDocument& document,const model::Pose& 
         return found==previousOwners.end()?nullptr:found->second;
     };
     const auto append=[&](HitOwnerId id,const Model& asset,const Pose& current,const model::EngineFrame& frame,
-                          bool registered=true) {
+                          const SceneAnimationOwner& animationOwner,bool registered=true) {
         HitOwner value;
         const auto* old=previousOwner(id);
         if(old) {
             require(hostIds.count(id)!=0,
                     "host owner identity collides with external registration");
             if(old->model==&asset) {
-                value.sphere=old->sphere;value.alpha=old->alpha;value.doorAlpha=old->doorAlpha;
+                value.alpha=old->alpha;value.doorAlpha=old->doorAlpha;
                 value.ignoreHitCheck=old->ignoreHitCheck;value.runtimeExclusionFlag=old->runtimeExclusionFlag;
             }
         }
@@ -664,18 +652,16 @@ void SceneQueries::synchronize(const ModelDocument& document,const model::Pose& 
 
 
         value.scale=frame.scale;
-        if(!old||old->model!=&asset) {
-            value.sphere=engineConstructedOwnerSphere(asset);
-        }
+        value.sphere=animationOwner.sphere();
         pending.push_back({std::move(value),registered});
         pendingIds.insert(id);
     };
-    if(document.hasModelOwner())append(0,document.model(),pose,references.mainFrame());
+    if(document.hasModelOwner())append(0,document.model(),pose,references.mainFrame(),mainOwner);
     for(std::size_t i=0;i<references.instances().size();++i) {
         const auto& instance=references.instances()[i];
         require(i<document.references().size(),"stale reference identity");
         const auto& definition=document.references()[i];
-        append(i+1u,definition.model,instance.pose,instance.frame,
+        append(i+1u,definition.model,instance.pose,instance.frame,instance.animationOwner,
                instance.active&&instance.sceneMember);
     }
     for(const auto& object:area.objects()) {
@@ -688,13 +674,13 @@ void SceneQueries::synchronize(const ModelDocument& document,const model::Pose& 
             pending.back().value.ignoreHitCheck=effects.distortion;
         };
         if(!object->staticPrimary()) {
-            append(object->ownerId(),document.model(),object->pose(),object->frame());
+            append(object->ownerId(),document.model(),object->pose(),object->frame(),object->animationOwner());
             visualInputs();
         }
         for(std::size_t i=0;i<object->references().instances().size();++i) {
             const auto& ref=object->references().instances()[i];
             const auto& definition=document.references()[i];
-            append(object->ownerId(i),definition.model,ref.pose,ref.frame,
+            append(object->ownerId(i),definition.model,ref.pose,ref.frame,ref.animationOwner,
                    ref.active&&ref.sceneMember);
             visualInputs(i);
         }
@@ -714,21 +700,17 @@ void SceneQueries::synchronize(const ModelDocument& document,const model::Pose& 
         for(const auto* scene:scenes) {
             const auto& chunk=*scene->chunkOwner();
             const auto appendChunk=[&](HitOwnerId id,const Model& asset,const Pose& current,
-                                      const model::EngineFrame& frame,bool primary) {
+                                      const model::EngineFrame& frame,const SceneAnimationOwner& animationOwner) {
                 if(!registered&&registeredChunkIds.find(id)!=registeredChunkIds.end())return;
                 if(registered)registeredChunkIds.insert(id);
-                const auto* old=previousOwner(id);
-                const bool constructed=!old||old->model!=&asset;
-                append(id,asset,current,frame,registered);
-                // Pool reuse retains the constructed Gob +0x164 radius.
-                if(primary&&constructed)pending.back().value.sphere.radius=chunk.engineOwnerRadius;
+                append(id,asset,current,frame,animationOwner,registered);
             };
-            appendChunk(chunk.ownerIdentity,chunk.asset->model(),chunk.pose,chunk.frame,true);
+            appendChunk(chunk.ownerIdentity,chunk.asset->model(),chunk.pose,chunk.frame,chunk.animationOwner);
             for(std::size_t i=0;i<chunk.references->instances().size();++i) {
                 const auto& reference=chunk.references->instances()[i];
                 if(registered&&(!reference.active||!reference.sceneMember))continue;
                 appendChunk(chunk.ownerIdentity+i+1u,chunk.asset->references()[i].model,
-                    reference.pose,reference.frame,false);
+                    reference.pose,reference.frame,reference.animationOwner);
             }
         }
     };

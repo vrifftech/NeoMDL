@@ -291,6 +291,11 @@ void ReferenceScene::initializeInstance(std::size_t index,
         auto& random=sceneRandom_?*sceneRandom_:ownedRandom_;
         return advanceInstance(index,seconds,evaluate,random);
     });
+    runtime.animationOwner.configureSphere(definition.model,[this,index] {
+        const auto& runtime=instances_[index];
+        const auto& asset=document_->references()[index].model;
+        return engineMinimumHitSphere(asset,engineHitPose(asset,&runtime.animationRuntime->pose()),runtime.scale);
+    });
     runtime.animationOwner.setProcedural([this,index](float seconds) {
         instances_[index].animationRuntime->advanceProceduralUv(sceneRandom_?*sceneRandom_:ownedRandom_,seconds);
     });

@@ -49,6 +49,7 @@ struct AreaMeshInstance {
     const ModelDocument* document{};
     const model::Model* asset{};
     const model::Pose* pose{};
+    const SceneAnimationOwner* animationOwner{};
     const model::Mesh* mesh{};
     const model::DeformedMesh* deformed{};
     const neoshared::material::Material* material{};
