@@ -3469,7 +3469,7 @@ void updateDanglyPoseBounds(const Model& model, Pose& pose) {
         const auto& deformed = pose.deformedMeshes[meshIndex];
         if (deformed.valid && deformed.positions.size() == mesh.vertices.size()) {
             for (const auto& point : deformed.positions) extend(point);
-        } else if (mesh.nodeIndex < pose.worldTransforms.size()) {
+        } else if (!mesh.animated && mesh.nodeIndex < pose.worldTransforms.size()) {
             for (const auto& vertex : mesh.vertices)
                 extend(transformPoint(pose.worldTransforms[mesh.nodeIndex], vertex.position));
         }
@@ -3510,6 +3510,7 @@ void simulateDanglyMeshes(const Model& model, Pose& pose,
                                      kDanglyMinimumElapsed,
                                      kDanglyMaximumElapsed);
 
+    bool updated = false;
     for (std::size_t meshIndex = 0u; meshIndex < model.meshes.size(); ++meshIndex) {
         const auto& mesh = model.meshes[meshIndex];
         if (!mesh.dangly || mesh.skinned ||
@@ -3642,9 +3643,10 @@ void simulateDanglyMeshes(const Model& model, Pose& pose,
                 deformed.basisNormals[index] = {};
             }
         }
+        updated = true;
     }
 
-    updateDanglyPoseBounds(model, pose);
+    if (updated) updateDanglyPoseBounds(model, pose);
 }
 
 void simulateDanglyMeshes(const Model& model, Pose& pose,

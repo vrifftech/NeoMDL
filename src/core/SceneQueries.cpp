@@ -10,6 +10,7 @@
 #include <array>
 #include <cmath>
 #include <limits>
+#include <unordered_map>
 #include <unordered_set>
 #include <utility>
 
@@ -302,11 +303,14 @@ std::vector<std::size_t> rootsOf(const Model& model, bool allowForest = false) {
     require(allowForest || roots.size()<=1,"engine Gob requires one root part");
     return roots;
 }
-void validateOwner(const HitOwner& value) {
+void validateOwnerFields(const HitOwner& value) {
     require(value.model&&value.parts.size()==value.model->nodes.size(),"invalid owner registration");
     validateFrame({value.position,value.orientation,value.scale});
     require(finite(value.sphere.center)&&std::isfinite(value.sphere.radius)&&
         std::isfinite(value.alpha)&&std::isfinite(value.doorAlpha),"invalid owner query state");
+}
+void validateOwner(const HitOwner& value) {
+    validateOwnerFields(value);
     for (const auto& frame:value.parts) validateFrame(frame);
     rootsOf(*value.model);
 }
@@ -632,12 +636,22 @@ void SceneQueries::synchronize(const ModelDocument& document,const model::Pose& 
         const ParticleScene* inspectionParticles) {
     struct PendingOwner { HitOwner value; bool registered; };
     std::vector<PendingOwner> pending;
+    std::unordered_map<HitOwnerId,const HitOwner*> previousOwners;
+    previousOwners.reserve(owners_.size()+detachedOwners_.size());
+    for(const auto& value:owners_)previousOwners.emplace(value.id,&value);
+    for(const auto& value:detachedOwners_)previousOwners.emplace(value.id,&value);
+    const std::unordered_set<HitOwnerId> hostIds(hostOwners_.begin(),hostOwners_.end());
+    std::unordered_set<HitOwnerId> pendingIds;
+    const auto previousOwner=[&](HitOwnerId id) {
+        const auto found=previousOwners.find(id);
+        return found==previousOwners.end()?nullptr:found->second;
+    };
     const auto append=[&](HitOwnerId id,const Model& asset,const Pose& current,const model::EngineFrame& frame,
                           bool registered=true) {
         HitOwner value;
-        const auto* old=owner(id);
+        const auto* old=previousOwner(id);
         if(old) {
-            require(std::find(hostOwners_.begin(),hostOwners_.end(),id)!=hostOwners_.end(),
+            require(hostIds.count(id)!=0,
                     "host owner identity collides with external registration");
             if(old->model==&asset) {
                 value.sphere=old->sphere;value.alpha=old->alpha;value.doorAlpha=old->doorAlpha;
@@ -654,6 +668,7 @@ void SceneQueries::synchronize(const ModelDocument& document,const model::Pose& 
             value.sphere=engineConstructedOwnerSphere(asset);
         }
         pending.push_back({std::move(value),registered});
+        pendingIds.insert(id);
     };
     if(document.hasModelOwner())append(0,document.model(),pose,references.mainFrame());
     for(std::size_t i=0;i<references.instances().size();++i) {
@@ -702,7 +717,7 @@ void SceneQueries::synchronize(const ModelDocument& document,const model::Pose& 
                                       const model::EngineFrame& frame,bool primary) {
                 if(!registered&&registeredChunkIds.find(id)!=registeredChunkIds.end())return;
                 if(registered)registeredChunkIds.insert(id);
-                const auto* old=owner(id);
+                const auto* old=previousOwner(id);
                 const bool constructed=!old||old->model!=&asset;
                 append(id,asset,current,frame,registered);
                 // Pool reuse retains the constructed Gob +0x164 radius.
@@ -738,10 +753,12 @@ void SceneQueries::synchronize(const ModelDocument& document,const model::Pose& 
     // SetScene(null) unlists a Gob without destroying its sphere or hit flags.
     // Keep allocated detached references/chunks separately; only an absent
     // allocation is destroyed. Explicit external owners remain untouched.
-    for(const auto& item:pending)validateOwner(item.value);
+    for(const auto& item:pending) {
+        validateOwnerFields(item.value);
+        rootsOf(*item.value.model);
+    }
     validateRooms(rooms);
-    for(const auto id:hostOwners_)if(std::none_of(pending.begin(),pending.end(),
-        [id](const auto& v){return v.value.id==id;}))removeOwner(id);
+    for(const auto id:hostOwners_)if(!pendingIds.count(id))removeOwner(id);
     hostOwners_.clear();
     for(auto& item:pending) {
         hostOwners_.push_back(item.value.id);

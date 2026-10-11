@@ -16,16 +16,16 @@ std::string format(const char* text,unsigned a,unsigned b=0) {
     if(count<0 || static_cast<std::size_t>(count)>=bytes.size())throw std::runtime_error("Engine light snippet overflow");
     return std::string(bytes.data(),static_cast<std::size_t>(count));
 }
-const std::string& ProgramCache::lightProgram(std::string_view source,const std::vector<PreviewLight>& lights) {
-    std::string pattern;pattern.reserve(lights.size());
-    for(const auto& light:lights)pattern+=light.position[3]==0?'d':'p';
+const std::string& ProgramCache::lightProgram(std::string_view source,const PreviewLight* lights,std::size_t count) {
+    std::string pattern;pattern.reserve(count);
+    for(std::size_t n=0;n<count;++n)pattern+=lights[n].position[3]==0?'d':'p';
     auto body=lightSources.find(source);
     if(body==lightSources.end())body=lightSources.emplace(std::string(source),std::map<std::string,std::string>{}).first;
     auto& variants=body->second;
     const auto old=variants.find(pattern);if(old!=variants.end())return old->second;
     using namespace skin_programs;
     std::string result(source);result+=Light529592;
-    for(unsigned n=0;n<lights.size();++n) {
+    for(unsigned n=0;n<count;++n) {
         const unsigned slot=70+n*4;
         if(lights[n].position[3]==0) {
             // Explicit inspection headlight, not an authored K2 light. The

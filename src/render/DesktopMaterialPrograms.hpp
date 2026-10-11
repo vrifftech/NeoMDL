@@ -1,6 +1,7 @@
 #pragma once
 #include "render/GlApi.hpp"
 #include <array>
+#include <cstddef>
 #include <map>
 #include <string>
 #include <string_view>
@@ -51,7 +52,7 @@ struct ProgramCache {
     std::map<std::string,std::map<std::string,std::string>,std::less<>> lightSources;
     struct LocalParameter {std::array<float,4> value{};bool initialized{};};
     std::map<std::pair<g::Enum,g::UInt>,std::vector<LocalParameter>> localParameters;
-    const std::string& lightProgram(std::string_view,const std::vector<PreviewLight>&);
+    const std::string& lightProgram(std::string_view,const PreviewLight*,std::size_t);
     g::UInt program(g::Api&,g::Enum,std::string_view,std::string&);
     void setLocalParameters(g::Enum,g::UInt,g::UInt,const std::array<float,4>*,std::size_t);
     void shutdown();

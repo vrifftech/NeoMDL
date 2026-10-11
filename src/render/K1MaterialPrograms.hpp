@@ -65,7 +65,7 @@ ADD	vReg0.x, -state.fog.params.y, vReg0;
 MOV    result.color.xyz, state.fog.color;
 MUL	result.color.w, vReg0.x, state.fog.params.w;
 MOV result.fogcoord, const1;
-)ENGINE";
+)ENGINE" "END\n";
 // K1 source 0x48a270 + ATI suffix 0x48a130.
 inline constexpr char Shiny[] = R"ENGINE(!!ARBvp1.0
 ATTRIB vTex0 = vertex.attrib[8];
@@ -96,7 +96,7 @@ MOV   result.color, program.local[15].x;
 DP3   result.texcoord[4].x, vReg10, program.local[92];
 DP3   result.texcoord[4].y, vReg10, program.local[91];
 DP3   result.texcoord[4].z, vReg10, program.local[90];
-)ENGINE";
+)ENGINE" "END\n";
 // K1 source 0x48aff0.
 inline constexpr char Bump[] = R"ENGINE(!!ARBvp1.0
 PARAM mvMatrix[4] = { state.matrix.modelview[0] };
@@ -149,10 +149,10 @@ MOV result.fogcoord.x, vReg0.x;
 // The engine lightmapped-bump caller supplies this NV text even to its ARB
 // uploader. Preserve that engine limitation; no replacement shader is inferred.
 inline constexpr char NvLightmapDiffuse[] = R"ENGINE(!!VP1.0 # This is the vertex program for transforming light/halfangle vectors into tangent space.
-DP4   o[HPOS].x, c[0], v[OPOS];DP4   o[HPOS].y, c[1], v[OPOS];DP4   o[HPOS].z, c[2], v[OPOS];DP4   o[HPOS].w, c[3], v[OPOS];ADD  R0, c[12], -v[OPOS];DP3   R0.w, R0, R0;RSQ   R1.w, R0.w;DST R2, R0.w, R1.w;DP3 R2.w, R2, c[14];RCP R2.w, R2.w;MOV   R4.xyzw, R2.wwww;MUL   R0, R0, R1.w;MOV   R0.w, c[17].x;DP3   R1.x, v[TEX4], R0;DP3   R1.y, v[TEX5], R0;DP3   R1.z, v[TEX6], R0;MOV   R1.w, c[17].x;MOV   o[TEX1], R1;DP4   R10.x, c[8], v[OPOS];DP4   R10.y, c[9], v[OPOS];DP4   R10.z, c[10], v[OPOS];DP4   R10.w, c[11], v[OPOS];DP3   R11.x, c[8], v[NRML];DP3   R11.y, c[9], v[NRML];DP3   R11.z, c[10], v[NRML];DP3   R1.w, R10, R10;RSQ   R1.w, R1.w;RCP   R1.w, R1.w;MOV o[FOGC], R1.w;MOV   o[COL1], R4;MOV   R9, v[COL0];MOV   o[TEX0], v[TEX0];MOV   o[TEX2], v[TEX1];MOV   o[TEX3], v[TEX0];)ENGINE";
+DP4   o[HPOS].x, c[0], v[OPOS];DP4   o[HPOS].y, c[1], v[OPOS];DP4   o[HPOS].z, c[2], v[OPOS];DP4   o[HPOS].w, c[3], v[OPOS];ADD  R0, c[12], -v[OPOS];DP3   R0.w, R0, R0;RSQ   R1.w, R0.w;DST R2, R0.w, R1.w;DP3 R2.w, R2, c[14];RCP R2.w, R2.w;MOV   R4.xyzw, R2.wwww;MUL   R0, R0, R1.w;MOV   R0.w, c[17].x;DP3   R1.x, v[TEX4], R0;DP3   R1.y, v[TEX5], R0;DP3   R1.z, v[TEX6], R0;MOV   R1.w, c[17].x;MOV   o[TEX1], R1;DP4   R10.x, c[8], v[OPOS];DP4   R10.y, c[9], v[OPOS];DP4   R10.z, c[10], v[OPOS];DP4   R10.w, c[11], v[OPOS];DP3   R11.x, c[8], v[NRML];DP3   R11.y, c[9], v[NRML];DP3   R11.z, c[10], v[NRML];DP3   R1.w, R10, R10;RSQ   R1.w, R1.w;RCP   R1.w, R1.w;MOV o[FOGC], R1.w;MOV   o[COL1], R4;MOV   R9, v[COL0];MOV   o[TEX0], v[TEX0];MOV   o[TEX2], v[TEX1];MOV   o[TEX3], v[TEX0];)ENGINE" "END\n";
 // K1 source 0x491f54.
 // The engine lightmapped-bump caller supplies this NV text even to its ARB
 // uploader. Preserve that engine limitation; no replacement shader is inferred.
 inline constexpr char NvLightmapSpecular[] = R"ENGINE(!!VP1.0 # This is the vertex program for transforming light/halfangle vectors into tangent space.
-DP4   o[HPOS].x, c[0], v[OPOS];DP4   o[HPOS].y, c[1], v[OPOS];DP4   o[HPOS].z, c[2], v[OPOS];DP4   o[HPOS].w, c[3], v[OPOS];ADD  R0, c[12], -v[OPOS];DP3   R0.w, R0, R0;RSQ   R1.w, R0.w;MUL   R0, R0, R1.w;DST R2, R0.w, R1.w;DP3 R2.w, R2, c[14];RCP R2.w, R2.w;MOV   R4.xyzw, R2.wwww;ADD R2, c[13],-v[OPOS];DP3   R2.w, R2, R2;RSQ   R2.w, R2.w;MUL   R2, R2, R2.w;MOV   R2.w, c[17].x;ADD R2, R2,R0;MOV   R2.w, c[17].x;DP3   R1.x, v[TEX4], R2;DP3   R1.y, v[TEX5], R2;DP3   R1.z, v[TEX6], R2;MOV   R1.w, c[17].x;MOV   o[TEX1], R1;DP4   R10.x, c[8], v[OPOS];DP4   R10.y, c[9], v[OPOS];DP4   R10.z, c[10], v[OPOS];DP4   R10.w, c[11], v[OPOS];DP3   R11.x, c[8], v[NRML];DP3   R11.y, c[9], v[NRML];DP3   R11.z, c[10], v[NRML];DP3   R1.w, R10, R10;RSQ   R1.w, R1.w;RCP   R1.w, R1.w;MOV   o[FOGC], R1.w;MOV   o[COL1], R4;MOV   R9, v[COL0];MOV   o[TEX0], v[TEX0];MOV   o[TEX2], v[TEX1];MOV   o[TEX3], v[TEX0];)ENGINE";
+DP4   o[HPOS].x, c[0], v[OPOS];DP4   o[HPOS].y, c[1], v[OPOS];DP4   o[HPOS].z, c[2], v[OPOS];DP4   o[HPOS].w, c[3], v[OPOS];ADD  R0, c[12], -v[OPOS];DP3   R0.w, R0, R0;RSQ   R1.w, R0.w;MUL   R0, R0, R1.w;DST R2, R0.w, R1.w;DP3 R2.w, R2, c[14];RCP R2.w, R2.w;MOV   R4.xyzw, R2.wwww;ADD R2, c[13],-v[OPOS];DP3   R2.w, R2, R2;RSQ   R2.w, R2.w;MUL   R2, R2, R2.w;MOV   R2.w, c[17].x;ADD R2, R2,R0;MOV   R2.w, c[17].x;DP3   R1.x, v[TEX4], R2;DP3   R1.y, v[TEX5], R2;DP3   R1.z, v[TEX6], R2;MOV   R1.w, c[17].x;MOV   o[TEX1], R1;DP4   R10.x, c[8], v[OPOS];DP4   R10.y, c[9], v[OPOS];DP4   R10.z, c[10], v[OPOS];DP4   R10.w, c[11], v[OPOS];DP3   R11.x, c[8], v[NRML];DP3   R11.y, c[9], v[NRML];DP3   R11.z, c[10], v[NRML];DP3   R1.w, R10, R10;RSQ   R1.w, R1.w;RCP   R1.w, R1.w;MOV   o[FOGC], R1.w;MOV   o[COL1], R4;MOV   R9, v[COL0];MOV   o[TEX0], v[TEX0];MOV   o[TEX2], v[TEX1];MOV   o[TEX3], v[TEX0];)ENGINE" "END\n";
 }

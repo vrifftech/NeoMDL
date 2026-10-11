@@ -49,7 +49,7 @@ std::vector<PreviewLight> baseLights(const MeshDrawParameters& p,MaterialProgram
     return lights;
 }
 const std::string& litSkin(ProgramCache& programs,const std::vector<PreviewLight>& lights,bool environment=false) {
-    return programs.lightProgram(environment?skin_programs::SkinEnvironment:skin_programs::Skin,lights);
+    return programs.lightProgram(environment?skin_programs::SkinEnvironment:skin_programs::Skin,lights.data(),lights.size());
 }
 model::Vec3 localPoint(const model::Mat4& frame,model::Vec3 p) {
     const auto& m=frame.values;p={p.x-m[12],p.y-m[13],p.z-m[14]};

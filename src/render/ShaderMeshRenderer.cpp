@@ -90,12 +90,14 @@ struct StateGuard {
         api.GetIntegerv(g::CullFaceMode,&cullMode); api.GetIntegerv(g::FrontFace,&winding);
         blend=api.IsEnabled(g::Blend); depth=api.IsEnabled(g::DepthTest);
         alpha=api.IsEnabled(g::AlphaTest); cull=api.IsEnabled(g::CullFace);
-        lighting=api.IsEnabled(g::Lighting);fog=api.IsEnabled(g::Fog);
-        colorMaterial=api.IsEnabled(g::ColorMaterial);
-        api.GetFloatv(g::LightModelAmbient,globalAmbient.data());
-        api.GetMaterialfv(g::Front,g::MaterialAmbient,materialAmbient.data());
-        api.GetMaterialfv(g::Front,g::MaterialDiffuse,materialDiffuse.data());
-        api.GetMaterialfv(g::Front,g::MaterialEmission,materialEmission.data());
+        if(captureBindings) {
+            lighting=api.IsEnabled(g::Lighting);fog=api.IsEnabled(g::Fog);
+            colorMaterial=api.IsEnabled(g::ColorMaterial);
+            api.GetFloatv(g::LightModelAmbient,globalAmbient.data());
+            api.GetMaterialfv(g::Front,g::MaterialAmbient,materialAmbient.data());
+            api.GetMaterialfv(g::Front,g::MaterialDiffuse,materialDiffuse.data());
+            api.GetMaterialfv(g::Front,g::MaterialEmission,materialEmission.data());
+        }
         api.GetIntegerv(g::AlphaTestFunc,&alphaFunction);api.GetFloatv(g::AlphaTestRef,&alphaReference);
         for (g::UInt i=0;i<static_cast<g::UInt>(attributeCount);++i) {
             auto& s=attributes[i];
@@ -148,13 +150,15 @@ struct StateGuard {
         api.BlendEquationSeparate(static_cast<g::Enum>(eqRgb),static_cast<g::Enum>(eqAlpha));
         api.DepthMask(depthMask); api.DepthFunc(static_cast<g::Enum>(depthFunction));
         api.AlphaFunc(static_cast<g::Enum>(alphaFunction),alphaReference);
-        enabled(api,g::Lighting,lighting!=0);enabled(api,g::Fog,fog!=0);
-        api.Disable(g::ColorMaterial);
-        api.LightModelfv(g::LightModelAmbient,globalAmbient.data());
-        api.Materialfv(g::Front,g::MaterialAmbient,materialAmbient.data());
-        api.Materialfv(g::Front,g::MaterialDiffuse,materialDiffuse.data());
-        api.Materialfv(g::Front,g::MaterialEmission,materialEmission.data());
-        enabled(api,g::ColorMaterial,colorMaterial!=0);
+        if(captureBindings) {
+            enabled(api,g::Lighting,lighting!=0);enabled(api,g::Fog,fog!=0);
+            api.Disable(g::ColorMaterial);
+            api.LightModelfv(g::LightModelAmbient,globalAmbient.data());
+            api.Materialfv(g::Front,g::MaterialAmbient,materialAmbient.data());
+            api.Materialfv(g::Front,g::MaterialDiffuse,materialDiffuse.data());
+            api.Materialfv(g::Front,g::MaterialEmission,materialEmission.data());
+            enabled(api,g::ColorMaterial,colorMaterial!=0);
+        }
         api.PolygonMode(g::Front,static_cast<g::Enum>(polygon[0]));
         api.PolygonMode(g::Back,static_cast<g::Enum>(polygon[1]));
         api.LineWidth(lineWidth); api.CullFace(static_cast<g::Enum>(cullMode));
@@ -504,10 +508,6 @@ bool ShaderMeshRenderer::drawPrepared(const neomdl::model::Mesh& mesh,
                 p.skinEffect==SkinRenderEffect::BumpedOutShell,p.shellAmount);
             p.modelView=model::multiply(p.modelView,deformed->skinPartFrame);
             cpuPose.valid=true;
-            for(const auto& vertex:cpuGeometry->vertices) {
-                cpuPose.positions.push_back(vertex.position);
-                cpuPose.normals.push_back(vertex.rawNormal);
-            }
             deformed=&cpuPose;
         } catch(const std::exception& e) {error=e.what();return false;}
     }
@@ -786,6 +786,11 @@ bool ShaderMeshRenderer::drawPrepared(const neomdl::model::Mesh& mesh,
             ((p.streamedGeometry || (posed&&(!engineSkin||p.selected))) &&
              (cache.revision!=revision || cache.pose!=deformed));
         if(refresh) {
+            if(k1Rigid && p.engineCpuSkin)
+                for(const auto& vertex:cpuGeometry->vertices) {
+                    cpuPose.positions.push_back(vertex.position);
+                    cpuPose.normals.push_back(vertex.rawNormal);
+                }
             auto geometry=p.engineCpuSkin?std::move(*cpuGeometry):
                 neomdl::model::prepareRenderGeometry(mesh,posed ? deformed : nullptr,true);
             applyPrelight(geometry.vertices);
