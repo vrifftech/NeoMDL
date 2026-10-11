@@ -14,7 +14,7 @@ std::vector<EngineFloatSkinChannels> decodeEngineFloatSkinChannels(const Mesh&);
 // the equivalent retained storage, shared across its CPU skin draw calls.
 class EngineCpuSkinPools {
 public:
-    RenderGeometry execute(const Mesh&,const DeformedMesh&,const EngineCpuSkinSource&,bool shell,float shellAmount);
+    std::vector<RenderVertex> execute(const Mesh&,const DeformedMesh&,const EngineCpuSkinSource&,bool shell,float shellAmount);
 private:
     std::vector<Vec3> positions_,normals_;
 };

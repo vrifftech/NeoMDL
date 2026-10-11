@@ -306,7 +306,6 @@ bool GrassPass::draw(gl::Api& a,const GrassScene& scene,const EngineGrassRenderS
                 }
                 require(d.mesh.indices.size()<=std::size_t(std::numeric_limits<gl::Size>::max()),"grass index draw exceeds GL limit");
                 a.DrawElements(gl::Triangles,gl::Size(d.mesh.indices.size()),gl::UnsignedInt,nullptr);++drawCalls;
-                require(a.GetError()==gl::NoError,"GL stream/draw failed");
             }
         }
         return true;

@@ -42,7 +42,7 @@ struct AttributeState {
 // attribute buffer associations, which remain attached after a VBO unbind.
 struct StateGuard {
     g::Api& api;
-    bool captureBindings;
+    bool captureBindings, captureStencil;
     g::Int program{}, arrayBuffer{}, indexBuffer{}, active{}, textures[6]{}, cubes[6]{}, volumes[6]{};
     g::Int srcRgb{}, dstRgb{}, srcAlpha{}, dstAlpha{}, eqRgb{}, eqAlpha{};
     g::Int depthFunction{}, polygon[2]{}, cullMode{}, winding{};
@@ -55,17 +55,20 @@ struct StateGuard {
     g::Int stencilClear{}, stencilState[2][7]{};
     std::array<AttributeState,15> attributes{};
     g::Int attributeCount{}, textureCount{};
-    explicit StateGuard(g::Api& a,g::Int attributeLimit=15,bool preserveBindings=true):api(a),captureBindings(preserveBindings) {
+    explicit StateGuard(g::Api& a,g::Int attributeLimit=15,bool preserveBindings=true,bool preserveStencil=true)
+        :api(a),captureBindings(preserveBindings),captureStencil(preserveStencil) {
         api.GetIntegerv(g::MaxVertexAttribs,&attributeCount);attributeCount=std::min(attributeCount,attributeLimit);
         api.GetIntegerv(g::MaxTextureUnits,&textureCount);textureCount=std::min(textureCount,6);
-        stencil=api.IsEnabled(g::StencilTest);
-        api.GetBooleanv(g::ColorWriteMask,colorMask);
-        api.GetIntegerv(g::StencilClearValue,&stencilClear);
-        const g::Enum stencilKeys[2][7]={
-            {g::StencilFunc,g::StencilRef,g::StencilValueMask,g::StencilWriteMask,g::StencilFail,g::StencilDepthFail,g::StencilDepthPass},
-            {g::StencilBackFunc,g::StencilBackRef,g::StencilBackValueMask,g::StencilBackWriteMask,g::StencilBackFail,g::StencilBackDepthFail,g::StencilBackDepthPass}};
-        for (unsigned face=0;face<2;++face) for (unsigned field=0;field<7;++field)
-            api.GetIntegerv(stencilKeys[face][field],&stencilState[face][field]);
+        if(captureStencil) {
+            stencil=api.IsEnabled(g::StencilTest);
+            api.GetBooleanv(g::ColorWriteMask,colorMask);
+            api.GetIntegerv(g::StencilClearValue,&stencilClear);
+            const g::Enum stencilKeys[2][7]={
+                {g::StencilFunc,g::StencilRef,g::StencilValueMask,g::StencilWriteMask,g::StencilFail,g::StencilDepthFail,g::StencilDepthPass},
+                {g::StencilBackFunc,g::StencilBackRef,g::StencilBackValueMask,g::StencilBackWriteMask,g::StencilBackFail,g::StencilBackDepthFail,g::StencilBackDepthPass}};
+            for (unsigned face=0;face<2;++face) for (unsigned field=0;field<7;++field)
+                api.GetIntegerv(stencilKeys[face][field],&stencilState[face][field]);
+        }
         if(captureBindings) {
             api.GetIntegerv(g::CurrentProgram,&program);
             api.GetIntegerv(g::ArrayBufferBinding,&arrayBuffer);
@@ -112,16 +115,18 @@ struct StateGuard {
         }
     }
     ~StateGuard() {
-        for (unsigned face=0;face<2;++face) {
-            const auto side=face==0 ? g::Front : g::Back;
-            const auto* values=stencilState[face];
-            api.StencilFuncSeparate(side,static_cast<g::Enum>(values[0]),values[1],static_cast<g::UInt>(values[2]));
-            api.StencilMaskSeparate(side,static_cast<g::UInt>(values[3]));
-            api.StencilOpSeparate(side,static_cast<g::Enum>(values[4]),static_cast<g::Enum>(values[5]),static_cast<g::Enum>(values[6]));
+        if(captureStencil) {
+            for (unsigned face=0;face<2;++face) {
+                const auto side=face==0 ? g::Front : g::Back;
+                const auto* values=stencilState[face];
+                api.StencilFuncSeparate(side,static_cast<g::Enum>(values[0]),values[1],static_cast<g::UInt>(values[2]));
+                api.StencilMaskSeparate(side,static_cast<g::UInt>(values[3]));
+                api.StencilOpSeparate(side,static_cast<g::Enum>(values[4]),static_cast<g::Enum>(values[5]),static_cast<g::Enum>(values[6]));
+            }
+            api.ClearStencil(stencilClear);
+            api.ColorMask(colorMask[0],colorMask[1],colorMask[2],colorMask[3]);
+            enabled(api,g::StencilTest,stencil!=0);
         }
-        api.ClearStencil(stencilClear);
-        api.ColorMask(colorMask[0],colorMask[1],colorMask[2],colorMask[3]);
-        enabled(api,g::StencilTest,stencil!=0);
         for (g::UInt i=0;i<static_cast<g::UInt>(attributeCount);++i) {
             const auto& s=attributes[i];
             api.BindBuffer(g::ArrayBuffer,static_cast<g::UInt>(s.buffer));
@@ -483,7 +488,7 @@ bool ShaderMeshRenderer::drawPrepared(const neomdl::model::Mesh& mesh,
         }
     }
     p.engineCpuSkin=p.material.k2PartTriMeshState && mesh.skinned && !p.engineSkinVertexPrograms;
-    std::optional<model::RenderGeometry> cpuGeometry;
+    std::vector<model::RenderVertex> cpuVertices;
     model::DeformedMesh cpuPose;
     const model::EngineCpuSkinSource* cpuSource=nullptr;
     if(p.engineCpuSkin) {
@@ -504,7 +509,7 @@ bool ShaderMeshRenderer::drawPrepared(const neomdl::model::Mesh& mesh,
                 cache.cpuNormalRevision=mesh.normalRevision();
             }
             cpuSource=&*cache.cpuSource;
-            cpuGeometry=impl_->cpuSkinPools.execute(mesh,*deformed,*cpuSource,
+            cpuVertices=impl_->cpuSkinPools.execute(mesh,*deformed,*cpuSource,
                 p.skinEffect==SkinRenderEffect::BumpedOutShell,p.shellAmount);
             p.modelView=model::multiply(p.modelView,deformed->skinPartFrame);
             cpuPose.valid=true;
@@ -691,7 +696,9 @@ bool ShaderMeshRenderer::drawPrepared(const neomdl::model::Mesh& mesh,
     const bool engineSkin=engineProgram==MaterialProgram::SkinBump || engineProgram==MaterialProgram::SkinBumpyShiny ||
             engineProgram==MaterialProgram::SkinFlat || engineProgram==MaterialProgram::SkinEnvironment;
     const bool k1Rigid=engineProgram==MaterialProgram::K1Rigid;
-    StateGuard restore(a,i.sceneActive ? 0 : (engineSkin || k1Rigid ? 15 : 9),!i.sceneActive);
+    StateGuard restore(a,i.sceneActive ? 0 : (engineSkin || k1Rigid ? 15 : 9),!i.sceneActive,
+        !i.sceneActive || p.outlineOnly || p.engineShadowPass!=EngineShadowPass::None ||
+        (k1DesktopScene && p.lightsaberPass && p.oneOneBlend));
     if(enginePartMat&&p.enginePartMaterial) {
         i.desktopStandard.emission=p.enginePartMaterial->vertex[0];
         i.desktopStandard.diffuse=p.enginePartMaterial->vertex[1];
@@ -787,15 +794,15 @@ bool ShaderMeshRenderer::drawPrepared(const neomdl::model::Mesh& mesh,
              (cache.revision!=revision || cache.pose!=deformed));
         if(refresh) {
             if(k1Rigid && p.engineCpuSkin)
-                for(const auto& vertex:cpuGeometry->vertices) {
+                for(const auto& vertex:cpuVertices) {
                     cpuPose.positions.push_back(vertex.position);
                     cpuPose.normals.push_back(vertex.rawNormal);
                 }
-            auto geometry=p.engineCpuSkin?std::move(*cpuGeometry):
+            auto geometry=p.engineCpuSkin?model::RenderGeometry{std::move(cpuVertices),{},0u}:
                 neomdl::model::prepareRenderGeometry(mesh,posed ? deformed : nullptr,true);
             applyPrelight(geometry.vertices);
             applyUv(geometry.vertices,&RenderVertex::texcoord0);
-            if(engineK1Draw)geometry.indices=drawIndices;
+            if(engineK1Draw && !p.engineCpuSkin)geometry.indices=drawIndices;
             if(p.primitive!=PrimitiveTopology::Triangles) {
                 // A lightsaber stream is already the exact
                 // GL_QUAD_STRIP index order from PartLightsaber::Draw,
@@ -810,9 +817,11 @@ bool ShaderMeshRenderer::drawPrepared(const neomdl::model::Mesh& mesh,
                     geometry.indices.push_back(index);
                 }
             }
-            if(geometry.indices.size()>static_cast<std::size_t>(std::numeric_limits<g::Size>::max()) ||
+            const auto& geometryIndices=p.engineCpuSkin && p.primitive==PrimitiveTopology::Triangles
+                ?drawIndices:geometry.indices;
+            if(geometryIndices.size()>static_cast<std::size_t>(std::numeric_limits<g::Size>::max()) ||
                 geometry.vertices.size()>static_cast<std::size_t>(std::numeric_limits<g::Bytes>::max())/sizeof(RenderVertex) ||
-                geometry.indices.size()>static_cast<std::size_t>(std::numeric_limits<g::Bytes>::max())/sizeof(std::uint32_t)) {
+                geometryIndices.size()>static_cast<std::size_t>(std::numeric_limits<g::Bytes>::max())/sizeof(std::uint32_t)) {
                 error="Mesh exceeds OpenGL buffer/count limits"; return false;
             }
             const auto bytes=geometry.vertices.size()*sizeof(RenderVertex);
@@ -826,10 +835,10 @@ bool ShaderMeshRenderer::drawPrepared(const neomdl::model::Mesh& mesh,
             a.BindBuffer(g::ElementArrayBuffer,cache.ebo);
             // CPU deformation cannot change topology; the IBO is uploaded only
             // at allocation/replacement, not on every animation frame.
-            if(newGeometry || p.streamedGeometry || cache.count!=static_cast<g::Size>(geometry.indices.size()))
-                a.BufferData(g::ElementArrayBuffer,static_cast<g::Bytes>(geometry.indices.size()*sizeof(std::uint32_t)),
-                             geometry.indices.data(),p.streamedGeometry ? g::DynamicDraw : g::StaticDraw);
-            cache.count=static_cast<g::Size>(geometry.indices.size()); cache.bytes=bytes;
+            if(newGeometry || p.streamedGeometry || cache.count!=static_cast<g::Size>(geometryIndices.size()))
+                a.BufferData(g::ElementArrayBuffer,static_cast<g::Bytes>(geometryIndices.size()*sizeof(std::uint32_t)),
+                             geometryIndices.data(),p.streamedGeometry ? g::DynamicDraw : g::StaticDraw);
+            cache.count=static_cast<g::Size>(geometryIndices.size()); cache.bytes=bytes;
             cache.vertices=mesh.vertices.data(); cache.indices=drawIndices.data();
             cache.vertexCount=mesh.vertices.size(); cache.indexCount=drawIndices.size();
             cache.revision=revision; cache.pose=deformed; cache.posed=posed; cache.streamed=p.streamedGeometry;

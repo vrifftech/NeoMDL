@@ -19,7 +19,7 @@ std::uint32_t signedSkinIndex(float value) {
     return static_cast<std::uint32_t>(static_cast<std::int64_t>(value));
 }
 }
-RenderGeometry EngineCpuSkinPools::execute(const Mesh& mesh,const DeformedMesh& pose,
+std::vector<RenderVertex> EngineCpuSkinPools::execute(const Mesh& mesh,const DeformedMesh& pose,
                                           const EngineCpuSkinSource& source,
                                           bool shell,float shellAmount) {
 
@@ -74,10 +74,9 @@ RenderGeometry EngineCpuSkinPools::execute(const Mesh& mesh,const DeformedMesh& 
     };
     for(const auto index:source.stripVertices)vertex(index,false);
     for(const auto index:source.triangleVertices)vertex(index,true);
-    RenderGeometry result;result.indices=source.indices;
-    result.vertices.resize(mesh.vertices.size());
+    std::vector<RenderVertex> result(mesh.vertices.size());
     for(std::size_t index=0;index<mesh.vertices.size();++index) {
-        auto& v=result.vertices[index];const auto& authored=mesh.vertices[index];
+        auto& v=result[index];const auto& authored=mesh.vertices[index];
         v.position=positions_[index];v.normal=normals_[index];v.rawNormal=normals_[index];
         v.texcoord0=authored.texcoord0;v.texcoord1=authored.texcoord1;
         for(unsigned c=0;c<4;++c)v.color[c]=static_cast<float>(authored.color[c])/255.0f;

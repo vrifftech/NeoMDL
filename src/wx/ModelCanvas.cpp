@@ -5311,16 +5311,16 @@ void ModelCanvas::queueLightsabers() {
         };
         prepareSaberMaterial(parameters);
 
-        neomdl::model::Bounds eyeBounds;
-        for (const auto& vertex : mesh.vertices)
-            extendBounds(eyeBounds, neomdl::model::transformPoint(
-                parameters.modelView, vertex.position));
-        const neomdl::model::Vec3 center = eyeBounds.valid
-            ? neomdl::model::Vec3{
-                  (eyeBounds.minimum.x + eyeBounds.maximum.x) * 0.5f,
-                  (eyeBounds.minimum.y + eyeBounds.maximum.y) * 0.5f,
-                  (eyeBounds.minimum.z + eyeBounds.maximum.z) * 0.5f}
-            : neomdl::model::Vec3{};
+        float minimumZ{},maximumZ{};
+        const auto& matrix=parameters.modelView.values;
+        for(std::size_t n=0;n<mesh.vertices.size();++n) {
+            const auto& point=mesh.vertices[n].position;
+            const float z=matrix[2]*point.x+matrix[6]*point.y+
+                matrix[10]*point.z+matrix[14];
+            if(n==0)minimumZ=maximumZ=z;
+            else {minimumZ=std::min(minimumZ,z);maximumZ=std::max(maximumZ,z);}
+        }
+        const float eyeDepth=mesh.vertices.empty()?-0.0f:-((minimumZ+maximumZ)*0.5f);
         if (parameters.lighting) {
             if (options_.headlight) {
                 auto& light = parameters.lights[parameters.lightCount++];
@@ -5367,7 +5367,7 @@ void ModelCanvas::queueLightsabers() {
         if(k2Lights_) submission.lightOwner=source.object&&source.object->staticPrimary()&&!instance->reference
             ?AreaScene::sceneDynamicLightOwner:id;
         submission.inspectionLightCount = parameters.lightCount;
-        submission.eyeDepth=-center.z;
+        submission.eyeDepth=eyeDepth;
         if(parameters.engineLightsaberMaterial) {
             // The K1 bucket contains complete owners. Insert this specialized
             // Part amongst its ordinary Parts in the loader's DFS node order.
@@ -5819,15 +5819,16 @@ void ModelCanvas::drawMesh(const neomdl::model::Mesh& mesh,
     if(retainedEyeDepth)eyeDepth=*retainedEyeDepth;
     else {
         // Posed mesh bounds supply the initial queue depth; late draws retain it.
-        neomdl::model::Bounds eyeBounds;
-        for(std::size_t n=0;n<mesh.vertices.size();++n)
-            extendBounds(eyeBounds,neomdl::model::transformPoint(parameters.modelView,
-                deformed ? deformed->positions[n] : mesh.vertices[n].position));
-        const neomdl::model::Vec3 center=eyeBounds.valid ? neomdl::model::Vec3{
-            (eyeBounds.minimum.x+eyeBounds.maximum.x)*0.5f,
-            (eyeBounds.minimum.y+eyeBounds.maximum.y)*0.5f,
-            (eyeBounds.minimum.z+eyeBounds.maximum.z)*0.5f} : neomdl::model::Vec3{};
-        eyeDepth=-center.z;
+        float minimumZ{},maximumZ{};
+        const auto& matrix=parameters.modelView.values;
+        for(std::size_t n=0;n<mesh.vertices.size();++n) {
+            const auto& point=deformed ? deformed->positions[n] : mesh.vertices[n].position;
+            const float z=matrix[2]*point.x+matrix[6]*point.y+
+                matrix[10]*point.z+matrix[14];
+            if(n==0)minimumZ=maximumZ=z;
+            else {minimumZ=std::min(minimumZ,z);maximumZ=std::max(maximumZ,z);}
+        }
+        eyeDepth=mesh.vertices.empty()?-0.0f:-((minimumZ+maximumZ)*0.5f);
     }
     if(options_.lighting) {
         if(options_.headlight) {

@@ -5,6 +5,7 @@
 #include "render/SkinMaterialPrograms.hpp"
 #include "render/ShaderMeshRenderer.hpp"
 #include <algorithm>
+#include <array>
 #include <cstddef>
 #include <cstdio>
 #include <cmath>
@@ -60,7 +61,7 @@ MUL base.rgb, base, primary;
 MOV result.color, base;
 END
 )ARB";
-std::string environmentFragment(bool cube,bool lightmap) {
+std::string buildEnvironmentFragment(bool cube,bool lightmap) {
     if(!lightmap) {
         // K1's non-fog environment FP has the same LRP as K2's fog variant.
         std::string text=cube?skin_programs::CubeEnvironmentFogFragment:skin_programs::EnvironmentFogFragment;
@@ -78,22 +79,51 @@ std::string environmentFragment(bool cube,bool lightmap) {
         "ADD rgb.rgb, rgb, term;\n"
         "MOV rgb.a, program.local[0].a;\nMOV result.color, rgb;\nEND\n";
 }
-std::string fixedFogFragment(std::string source,model::FogMode fog) {
+std::string buildFixedFogFragment(std::string source,model::FogMode fog) {
     // ATI text fragments retain the normal post-fragment fog stage.
     // The ARB translation requests that same stage explicitly.
     if(fog!=model::FogMode::Disabled)
         source.insert(source.find('\n')+1,fog==model::FogMode::Exponential?"OPTION ARB_fog_exp;\n":fog==model::FogMode::ExponentialSquared?"OPTION ARB_fog_exp2;\n":"OPTION ARB_fog_linear;\n");
     return source;
 }
-std::string nv1xFragment(const MeshDrawParameters& p,bool environment) {
+std::string buildNv1xFragment(bool environment,bool cube) {
     // EnableCombiners command26 0x30d189, command21 0x30ca16.
     // General-combiner sum outputs saturate before the next stage.
     std::string text="!!ARBfp1.0\n";
     text+="TEMP base,other,value;\nTEX base,fragment.texcoord[0],texture[0],2D;\n";
-    text+="TEX other,fragment.texcoord[1],texture[1],";text+=environment&&p.environmentCube?"CUBE;\n":"2D;\n";
+    text+="TEX other,fragment.texcoord[1],texture[1],";text+=environment&&cube?"CUBE;\n":"2D;\n";
     if(environment)text+="SUB value.a,1.0,base.a;\nMUL_SAT value.rgb,other,value.a;\nMOV value.a,1.0;\n";
     else text+="ADD_SAT value.rgb,fragment.color.primary,other;\nMUL_SAT value.rgb,base,value;\nMUL value.a,fragment.color.primary.a,base.a;\n";
-    text+="MOV result.color,value;\nEND\n";return fixedFogFragment(text,p.fog.mode);
+    text+="MOV result.color,value;\nEND\n";return text;
+}
+enum class FixedFragment {
+    Lightmap,Bump,Environment,CubeEnvironment,LightmapEnvironment,LightmapCubeEnvironment,
+    NvLightmap,NvEnvironment,NvCubeEnvironment
+};
+std::array<std::string,4> fogFragments(const std::string& source) {
+    return {{source,buildFixedFogFragment(source,model::FogMode::Linear),
+        buildFixedFogFragment(source,model::FogMode::Exponential),
+        buildFixedFogFragment(source,model::FogMode::ExponentialSquared)}};
+}
+const std::string& fixedFogFragment(FixedFragment fragment,model::FogMode fog) {
+    static const std::array<std::array<std::string,4>,9> sources{{
+        fogFragments(lightmapFragment),fogFragments(skin_programs::BumpFragment),
+        fogFragments(buildEnvironmentFragment(false,false)),fogFragments(buildEnvironmentFragment(true,false)),
+        fogFragments(buildEnvironmentFragment(false,true)),fogFragments(buildEnvironmentFragment(true,true)),
+        fogFragments(buildNv1xFragment(false,false)),fogFragments(buildNv1xFragment(true,false)),
+        fogFragments(buildNv1xFragment(true,true))
+    }};
+    const auto mode=fog==model::FogMode::Disabled?0u:fog==model::FogMode::Exponential?2u:
+        fog==model::FogMode::ExponentialSquared?3u:1u;
+    return sources[static_cast<std::size_t>(fragment)][mode];
+}
+const std::string& environmentFragment(bool cube,bool lightmap,model::FogMode fog) {
+    return fixedFogFragment(lightmap?(cube?FixedFragment::LightmapCubeEnvironment:FixedFragment::LightmapEnvironment):
+        (cube?FixedFragment::CubeEnvironment:FixedFragment::Environment),fog);
+}
+const std::string& nv1xFragment(const MeshDrawParameters& p,bool environment) {
+    return fixedFogFragment(environment?(p.environmentCube?FixedFragment::NvCubeEnvironment:FixedFragment::NvEnvironment):
+        FixedFragment::NvLightmap,p.fog.mode);
 }
 const std::string& litStandard(ProgramCache& programs,const MeshDrawParameters& p,const char* body=k1_programs::Standard) {
     return programs.lightProgram(body,p.lights.data(),std::min(p.lightCount,p.lights.size()));
@@ -136,19 +166,19 @@ bool K1MaterialPass::prepare(g::Api& a,const MeshDrawParameters& p,std::string& 
     if(!i.ready){if(!i.loader||!i.x.load(i.loader,error)||!i.fixed.load(i.loader,error))return false;
     i.ready=true;}
     switch(selectedPath(p)) {
-    case Path::LightMapped: return i.program(a,FP,fixedFogFragment(lightmapFragment,p.fog.mode),error)!=0;
-    case Path::EnvironmentMapped: return i.program(a,FP,fixedFogFragment(environmentFragment(p.environmentCube,false),p.fog.mode),error)!=0;
-    case Path::EMLM:return i.program(a,FP,fixedFogFragment(environmentFragment(p.environmentCube,true),p.fog.mode),error)!=0;
+    case Path::LightMapped: return i.program(a,FP,fixedFogFragment(FixedFragment::Lightmap,p.fog.mode),error)!=0;
+    case Path::EnvironmentMapped: return i.program(a,FP,environmentFragment(p.environmentCube,false,p.fog.mode),error)!=0;
+    case Path::EMLM:return i.program(a,FP,environmentFragment(p.environmentCube,true,p.fog.mode),error)!=0;
     case Path::EMBM:
         return i.program(a,VP,litStandard(i,p),error)&&i.program(a,VP,k1_programs::Shiny,error)&&i.program(a,FP,skin_programs::ShinyFragment,error);
     case Path::LightMappedBumpSpecular:
     case Path::LightMappedBumpDiffuse:
-        if(p.skinBumpLights.empty())return i.program(a,FP,fixedFogFragment(lightmapFragment,p.fog.mode),error)!=0;
+        if(p.skinBumpLights.empty())return i.program(a,FP,fixedFogFragment(FixedFragment::Lightmap,p.fog.mode),error)!=0;
         // Engine 0x347xxx feeds these NV strings to glProgramStringARB;
         // neither its constructor nor its ATI command8..12 translates them.
         return i.program(a,VP,p.material.renderPath==Path::LightMappedBumpSpecular?k1_programs::NvLightmapSpecular:k1_programs::NvLightmapDiffuse,error)!=0;
     case Path::BumpMapped:
-        return p.skinBumpLights.empty()||(i.program(a,VP,litStandard(i,p,k1_programs::Bump),error)&&i.program(a,FP,fixedFogFragment(skin_programs::BumpFragment,p.fog.mode),error));
+        return p.skinBumpLights.empty()||(i.program(a,VP,litStandard(i,p,k1_programs::Bump),error)&&i.program(a,FP,fixedFogFragment(FixedFragment::Bump,p.fog.mode),error));
     default:return true;
     }
 }
@@ -213,15 +243,15 @@ bool K1MaterialPass::draw(g::Api& a,const model::Mesh& mesh,const MeshDrawParame
         state.fixedSecondTexture=true;
     if(path==Path::EnvironmentMapped||path==Path::EMLM)state.fixedEnvironmentMap=true;
     if(path==Path::Flat||path==Path::BumpmapFallback){if(path==Path::BumpmapFallback){a.Disable(g::AlphaTest);blend(g::One,g::Zero);}draw();}
-    else if(path==Path::LightMapped){blend(g::SrcAlpha,g::OneMinusSrcAlpha);uv(1,true);if(!bind(0,false,p.diffuseTexture,true)||!bind(1,p.lightmapCube,p.lightmapTexture,true)||!fp(fixedFogFragment(lightmapFragment,p.fog.mode)))return false;draw();}
-    else if(path==Path::EnvironmentMapped||path==Path::EMLM){const bool lm=path==Path::EMLM;a.Disable(g::AlphaTest);if(lm)uv(1,true);if(!bind(0,false,p.diffuseTexture,true)||!bind(lm?2:1,p.environmentCube,p.environmentTexture,true))return false;if(lm&&!bind(1,p.lightmapCube,p.lightmapTexture,true))return false;texgen(lm?2:1);state.fragmentConstants[0]={{1,1,1,p.material.environmentOpacity}};if(!fp(fixedFogFragment(environmentFragment(p.environmentCube,lm),p.fog.mode)))return false;draw();}
+    else if(path==Path::LightMapped){blend(g::SrcAlpha,g::OneMinusSrcAlpha);uv(1,true);if(!bind(0,false,p.diffuseTexture,true)||!bind(1,p.lightmapCube,p.lightmapTexture,true)||!fp(fixedFogFragment(FixedFragment::Lightmap,p.fog.mode)))return false;draw();}
+    else if(path==Path::EnvironmentMapped||path==Path::EMLM){const bool lm=path==Path::EMLM;a.Disable(g::AlphaTest);if(lm)uv(1,true);if(!bind(0,false,p.diffuseTexture,true)||!bind(lm?2:1,p.environmentCube,p.environmentTexture,true))return false;if(lm&&!bind(1,p.lightmapCube,p.lightmapTexture,true))return false;texgen(lm?2:1);state.fragmentConstants[0]={{1,1,1,p.material.environmentOpacity}};if(!fp(environmentFragment(p.environmentCube,lm,p.fog.mode)))return false;draw();}
     else if(path==Path::NV1xEMLM){
         // Engine NV1x caller excludes owned parts, then issues26/32/21/32.
         if(p.material.engineHardware.nv1xLevelShaders&&!p.partHasOwner){
             if(!p.diffuseTexture||!p.lightmapTexture||!p.environmentTexture)draw();
             else {
                 a.Disable(g::AlphaTest);a.Disable(VP);blend(g::One,g::Zero);uv(1,true);
-                if(!bind(0,false,p.diffuseTexture,true)||!bind(1,p.lightmapCube,p.lightmapTexture,true)||!fp(p.material.engineAtiValidation?fixedFogFragment(lightmapFragment,p.fog.mode):nv1xFragment(p,false)))return false;
+                if(!bind(0,false,p.diffuseTexture,true)||!bind(1,p.lightmapCube,p.lightmapTexture,true)||!fp(p.material.engineAtiValidation?fixedFogFragment(FixedFragment::Lightmap,p.fog.mode):nv1xFragment(p,false)))return false;
                 draw();if(p.material.engineAtiValidation)state.disableFragmentProgram();a.Disable(FP);a.ActiveTexture(g::Texture1);a.Disable(g::Texture2D);a.Disable(g::TextureCube);a.ActiveTexture(g::Texture0);f.ClientActiveTexture(g::Texture1);f.DisableClientState(0x8078);f.ClientActiveTexture(g::Texture0);blend(g::One,g::One);
                 if(!p.material.engineAtiValidation){
                     if(!bind(0,false,p.diffuseTexture,true)||!bind(1,p.environmentCube,p.environmentTexture,true))return false;
@@ -293,7 +323,7 @@ bool K1MaterialPass::draw(g::Api& a,const model::Mesh& mesh,const MeshDrawParame
             draw();}
             cleanup();
         }else if(path==Path::LightMappedBumpSpecular||path==Path::LightMappedBumpDiffuse){
-            if(p.skinBumpLights.empty()){blend(g::SrcAlpha,g::OneMinusSrcAlpha);uv(1,true);if(!bind(0,false,p.diffuseTexture,true)||!bind(1,p.lightmapCube,p.lightmapTexture,true)||!fp(fixedFogFragment(lightmapFragment,p.fog.mode)))return false;
+            if(p.skinBumpLights.empty()){blend(g::SrcAlpha,g::OneMinusSrcAlpha);uv(1,true);if(!bind(0,false,p.diffuseTexture,true)||!bind(1,p.lightmapCube,p.lightmapTexture,true)||!fp(fixedFogFragment(FixedFragment::Lightmap,p.fog.mode)))return false;
             draw();}
             else if(!vp(path==Path::LightMappedBumpSpecular?k1_programs::NvLightmapSpecular:k1_programs::NvLightmapDiffuse))return false;
         }else if(path==Path::BumpMapped){
@@ -306,7 +336,7 @@ bool K1MaterialPass::draw(g::Api& a,const model::Mesh& mesh,const MeshDrawParame
                 for(unsigned n=0;n<baseLightCount;++n){const auto& light=baseLights[n];auto& pos=constants[70+4*n];for(unsigned row=0;row<3;++row)pos[row]=p.worldFromEye.values[row]*light.position[0]+p.worldFromEye.values[4+row]*light.position[1]+p.worldFromEye.values[8+row]*light.position[2]+p.worldFromEye.values[12+row]*light.position[3];pos[3]=light.position[3];constants[71+4*n]={{light.attenuation[0],light.attenuation[1],light.attenuation[2],0}};constants[72+4*n]={{light.ambient[0],light.ambient[1],light.ambient[2],1}};constants[73+4*n]={{light.diffuse[0],light.diffuse[1],light.diffuse[2],1}};}
                 const auto local=[&](model::Vec3 q){return engineRotate(engineInverse(p.enginePartOrientation),{q.x-p.enginePartPosition.x,q.y-p.enginePartPosition.y,q.z-p.enginePartPosition.z});};
                 const auto camera=local({p.worldFromEye.values[12],p.worldFromEye.values[13],p.worldFromEye.values[14]});
-                for(const auto& light:p.skinBumpLights){const auto position=local(light.position);constants[12]={{position.x,position.y,position.z,1}};constants[13]={{camera.x,camera.y,camera.z,1}};constants[14]={{1,0,9.0f/(2.0f*light.radius*light.radius),1}};state.bumpVertexConstants={{constants[12],constants[13],constants[14]}};for(unsigned c=0;c<3;++c){state.fragmentConstants[0][c]=light.color[c]*p.material.engineSpecularColor[c]*p.material.engineSpecularBumpIntensity;state.fragmentConstants[1][c]=light.color[c]*diffuse[c]*p.material.engineDiffuseBumpIntensity;}state.fragmentConstants[0][3]=state.fragmentConstants[1][3]=1;if(!vp(i.lightProgram(k1_programs::Bump,baseLights.data(),baseLightCount))||!fp(fixedFogFragment(skin_programs::BumpFragment,p.fog.mode)))return false;draw();enabled(a,g::AlphaTest,p.material.alphaTest);}
+                for(const auto& light:p.skinBumpLights){const auto position=local(light.position);constants[12]={{position.x,position.y,position.z,1}};constants[13]={{camera.x,camera.y,camera.z,1}};constants[14]={{1,0,9.0f/(2.0f*light.radius*light.radius),1}};state.bumpVertexConstants={{constants[12],constants[13],constants[14]}};for(unsigned c=0;c<3;++c){state.fragmentConstants[0][c]=light.color[c]*p.material.engineSpecularColor[c]*p.material.engineSpecularBumpIntensity;state.fragmentConstants[1][c]=light.color[c]*diffuse[c]*p.material.engineDiffuseBumpIntensity;}state.fragmentConstants[0][3]=state.fragmentConstants[1][3]=1;if(!vp(i.lightProgram(k1_programs::Bump,baseLights.data(),baseLightCount))||!fp(fixedFogFragment(FixedFragment::Bump,p.fog.mode)))return false;draw();enabled(a,g::AlphaTest,p.material.alphaTest);}
                 // Command13 disables the program and auxiliary targets;
                 // unlike command0 it does not unbind the retained textures.
                 state.finishFragmentCommand(13,true);a.Disable(FP);
@@ -321,7 +351,7 @@ bool K1MaterialPass::draw(g::Api& a,const model::Mesh& mesh,const MeshDrawParame
         state.finishFragmentCommand(path==Path::EMLM?37u:32u,true);
     state.alphaTestEnabled=a.IsEnabled(g::AlphaTest)!=0;
     a.GetFloatv(g::AlphaTestRef,&state.alphaReference);
-    const auto code=a.GetError();if(code!=g::NoError){error="Engine K1 material submission failed ("+std::to_string(code)+")";return false;}return true;
+    return true;
 }
 void K1MaterialPass::shutdown(){auto& i=*impl_;if(i.lookup){i.fixed.DeleteTextures(1,&i.lookup);i.lookup=0;}i.shutdown();}
 } // namespace neomdl::render

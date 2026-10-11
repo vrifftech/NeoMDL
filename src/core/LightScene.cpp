@@ -1,6 +1,7 @@
 #include "core/LightScene.hpp"
 #include "core/ReferenceScene.hpp"
-#include "core/SceneOwners.hpp"
+#include "core/AreaScene.hpp"
+#include "core/ParticleScene.hpp"
 
 #include <model/Lighting.hpp>
 
@@ -277,13 +278,41 @@ void LightScene::synchronizeChunks(const ParticleScene* inspectionParticles,
     chunkLightDocuments_.clear();
     auto previousChunkOwners=std::move(chunkOwnerIds_);
     chunkOwnerIds_.clear();
-    for(const auto& owner:collectParticleChunkOwners(inspectionParticles,area,true,false)) {
-        chunkOwnerIds_.insert(owner.id);
-        chunkLightDocuments_.emplace(static_cast<std::size_t>(owner.id),owner.sourceDocument);
+    const auto chunkScenes=[&](bool registeredOnly) {
+        std::vector<const ParticleScene*> scenes;
+        const auto collect=[&](const ParticleScene& source) {
+            if(registeredOnly)source.appendActiveChunkScenes(scenes);
+            else source.appendAllocatedChunkScenes(scenes);
+        };
+        if(inspectionParticles)collect(*inspectionParticles);
+        for(const auto* root:area.particleSceneRoots())collect(*root);
+        if(registeredOnly)std::stable_sort(scenes.begin(),scenes.end(),[](const auto* left,const auto* right) {
+            return left->chunkOwner()->sceneRegistration<right->chunkOwner()->sceneRegistration;
+        });
+        return scenes;
+    };
+    for(const auto* scene:chunkScenes(false)) {
+        const auto& chunk=*scene->chunkOwner();
+        const auto remember=[&](LightOwnerId id) {
+            chunkOwnerIds_.insert(id);
+            chunkLightDocuments_.emplace(static_cast<std::size_t>(id),chunk.asset);
+        };
+        remember(chunk.ownerIdentity);
+        for(std::size_t i=0;i<chunk.references->instances().size();++i)
+            remember(chunk.ownerIdentity+i+1u);
     }
-    for(const auto& owner:collectParticleChunkOwners(inspectionParticles,area,includeReferences)) {
-        const auto instance=static_cast<std::size_t>(owner.id);
-        appendModelLights(*owner.asset,*owner.pose,owner.world,instance,pending,owner.scale);
+    for(const auto* scene:chunkScenes(true)) {
+        const auto& chunk=*scene->chunkOwner();
+        const auto append=[&](LightOwnerId id,const Model& asset,const Pose& pose,const model::EngineFrame& frame) {
+            appendModelLights(asset,pose,model::nodeTransform(frame.position,frame.orientation),
+                static_cast<std::size_t>(id),pending,frame.scale);
+        };
+        append(chunk.ownerIdentity,chunk.asset->model(),chunk.pose,chunk.frame);
+        if(includeReferences)for(std::size_t i=0;i<chunk.references->instances().size();++i) {
+            const auto& reference=chunk.references->instances()[i];
+            if(!reference.active||!reference.sceneMember)continue;
+            append(chunk.ownerIdentity+i+1u,chunk.asset->references()[i].model,reference.pose,reference.frame);
+        }
     }
     std::unordered_set<std::uint64_t> ids;
     for(auto& runtime:pending) {
