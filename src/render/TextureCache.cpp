@@ -728,10 +728,9 @@ bool TextureCache::uploadPixelTids(ProcedureRecord& r,std::string& error) {
     const bool runtimeMips=r.storage.mipOwnership==material::ProcedureMipOwnership::RuntimeGenerated;
     const bool automatic=runtimeMips&&mip&&!r.normalUpload&&!r.cube&&automaticMipmaps();
     const bool explicitMips=runtimeMips&&mip&&!r.normalUpload&&!automatic;
-    if(api_.GetError()!=gl::NoError){error="Pending OpenGL error before procedural TID upload";return false;}
-    gl::Int maximum{};api_.GetIntegerv(r.cube?0x851cu:0x0d33u,&maximum);
-    gl::Int gluMaximum{};api_.GetIntegerv(0x0d33u,&gluMaximum);
-    if(maximum<=0){error="Procedural TID exceeds current GL texture limits";return false;}
+    gl::Int gluMaximum{};
+    if(explicitMips&&(r.cube||(!updating&&r.controller.image().bytesPerPixel!=2)))
+        api_.GetIntegerv(0x0d33u,&gluMaximum);
     try {
         const auto& d=r.controller.definition();
         auto tids=material::procedureTidImages(r.controller.image(),unsigned(d.numX),unsigned(d.numY),r.cube,r.cubeLayout);
@@ -749,75 +748,45 @@ bool TextureCache::uploadPixelTids(ProcedureRecord& r,std::string& error) {
             plans[tid].push_back(std::move(p));
         }
     } catch(const std::exception& e) {error=e.what();return false;}
-    for(const auto& tid:plans)for(const auto& face:tid) {
-        const auto& p=face.levels.front();
-        if(maximum<=0||p.width>unsigned(maximum)||p.height>unsigned(maximum)) {
-            error="Procedural TID exceeds current GL texture limits";return false;
-        }
-    }
-    const auto existing=entries_.find(r.source);
-    const auto oldSize=existing==entries_.end()?0u:existing->second.size();
-    if(oldSize!=0&&oldSize!=plans.size()) {error="Procedural TID allocation shape changed without a resource reset";return false;}
-    if(!r.registrationIds.empty()&&r.registrationIds.size()!=plans.size()) {
-        error="Procedural registration-handle shape changed without a resource reset";return false;
-    }
-    std::vector<GpuTexture> oldTargets;
-    if(oldSize)for(std::size_t tid=0;tid<oldSize;++tid)oldTargets.push_back(existing->second.at(tid));
-    std::vector<GpuTexture> targets(plans.size());
-    std::vector<gl::UInt> allocated;
+    auto& targets=entries_[r.source];
+    const bool subImage=updating&&!r.normalUpload&&!automatic&&!(r.cube&&explicitMips);
     UploadState restore(api_);
-    const auto cleanup=[&] {for(const auto id:allocated)api_.DeleteTextures(1,&id);};
-    try {
-        for(std::size_t tid=0;tid<plans.size();++tid) {
-            auto& target=targets[tid];
+    for(std::size_t tid=0;tid<plans.size();++tid) {
+        auto& target=targets[tid];
+        if(!updating) {
             api_.GenTextures(1,&target.id);
-            if(!target.id)throw std::runtime_error("Cannot allocate transactional procedural TID");
-            allocated.push_back(target.id);
-            target.cube=r.cube;target.engineNormal=r.normalUpload;
-            target.width=plans[tid][0].levels[0].width;target.height=plans[tid][0].levels[0].height;
             target.order=orderFor(*r.source,tid);
-            const auto binding=r.cube?gl::TextureCube:gl::Texture2D;
-            api_.BindTexture(binding,target.id);
-            const bool filter=r.metadata.txi.properties.filter.value_or(true);
-            if(!r.cube)api_.TexParameteri(binding,0x8191,automatic?1:0);
-            if(r.normalUpload) {
-                api_.TexParameteri(binding,0x2802,0x2901);api_.TexParameteri(binding,0x2803,0x2901);
-                api_.TexParameteri(binding,0x2801,0x2703);api_.TexParameteri(binding,0x2800,0x2601);
-            } else {
-                const auto clamp=r.metadata.txi.properties.clamp.value_or(0);
-                api_.TexParameteri(binding,0x2802,r.cube?0x812f:((clamp&1)?0x2900:0x2901));
-                api_.TexParameteri(binding,0x2803,r.cube?0x812f:((clamp&2)?0x2900:0x2901));
-                if(r.cube)api_.TexParameteri(binding,0x8072,0x812f);
-                api_.TexParameteri(binding,0x2801,mip?(filter?0x2703:0x2700):(filter?0x2601:0x2600));
-                api_.TexParameteri(binding,0x2800,filter?0x2601:0x2600);
-            }
-            for(std::size_t face=0;face<plans[tid].size();++face)for(std::size_t l=0;l<plans[tid][face].levels.size();++l) {
-                const auto& p=plans[tid][face].levels[l];
-                const auto imageTarget=r.cube?0x8515u+gl::Enum(face):gl::Texture2D;
-                const auto format=r.normalUpload?0x80e1u:p.bytesPerPixel==4?0x1908u:p.bytesPerPixel==3?0x1907u:
-                    p.bytesPerPixel==2?(r.cube?0x190au:0x1908u):0x1909u;
-                const auto type=(!r.normalUpload&&!r.cube&&p.bytesPerPixel==2)?0x8033u:0x1401u;
-                const auto internal=r.normalUpload?0x8058u:
-                    plans[tid][face].glu&&p.bytesPerPixel<3?p.bytesPerPixel:format;
-                api_.TexImage2D(imageTarget,gl::Int(l),gl::Int(internal),gl::Size(p.width),gl::Size(p.height),0,format,type,p.bytes.data());
-            }
-            if(api_.GetError()!=gl::NoError)
-                throw std::runtime_error("OpenGL procedural TID upload failed; replacement not published");
+            procedureIds_[target.id]=&r;
         }
-    } catch(const std::exception& e) {cleanup();error=e.what();return false;}
-    if(r.registrationIds.empty()) {
-        r.registrationIds.reserve(targets.size());
-        for(const auto& target:targets)r.registrationIds.push_back(target.id);
-    }
-    for(std::size_t tid=0;tid<targets.size();++tid) {
-        entries_[r.source][tid]=targets[tid];
-        procedureIds_[r.registrationIds[tid]]=&r;
-        procedureIds_[targets[tid].id]=&r;
-    }
-    for(std::size_t tid=0;tid<oldTargets.size();++tid) {
-        const auto id=oldTargets[tid].id;
-        if(id&&id!=r.registrationIds[tid]) {
-            procedureIds_.erase(id);if(textureDeleted_)textureDeleted_(id);api_.DeleteTextures(1,&id);
+        target.cube=r.cube;target.engineNormal=r.normalUpload;
+        target.width=plans[tid][0].levels[0].width;target.height=plans[tid][0].levels[0].height;
+        const auto binding=r.cube?gl::TextureCube:gl::Texture2D;
+        api_.BindTexture(binding,target.id);
+        const bool filter=r.metadata.txi.properties.filter.value_or(true);
+        if(!r.cube)api_.TexParameteri(binding,0x8191,automatic?1:0);
+        if(r.normalUpload) {
+            api_.TexParameteri(binding,0x2802,0x2901);api_.TexParameteri(binding,0x2803,0x2901);
+            api_.TexParameteri(binding,0x2801,0x2703);api_.TexParameteri(binding,0x2800,0x2601);
+        } else {
+            const auto clamp=r.metadata.txi.properties.clamp.value_or(0);
+            api_.TexParameteri(binding,0x2802,r.cube?0x812f:((clamp&1)?0x2900:0x2901));
+            api_.TexParameteri(binding,0x2803,r.cube?0x812f:((clamp&2)?0x2900:0x2901));
+            if(r.cube)api_.TexParameteri(binding,0x8072,0x812f);
+            api_.TexParameteri(binding,0x2801,mip?(filter?0x2703:0x2700):(filter?0x2601:0x2600));
+            api_.TexParameteri(binding,0x2800,filter?0x2601:0x2600);
+        }
+        for(std::size_t face=0;face<plans[tid].size();++face)for(std::size_t l=0;l<plans[tid][face].levels.size();++l) {
+            const auto& p=plans[tid][face].levels[l];
+            const auto imageTarget=r.cube?0x8515u+gl::Enum(face):gl::Texture2D;
+            const auto format=r.normalUpload?0x80e1u:p.bytesPerPixel==4?0x1908u:p.bytesPerPixel==3?0x1907u:
+                p.bytesPerPixel==2?(r.cube?0x190au:0x1908u):0x1909u;
+            const auto type=(!r.normalUpload&&!r.cube&&p.bytesPerPixel==2)?0x8033u:0x1401u;
+            const auto internal=r.normalUpload?0x8058u:
+                plans[tid][face].glu&&p.bytesPerPixel<3?p.bytesPerPixel:format;
+            if(subImage)
+                api_.TexSubImage2D(imageTarget,gl::Int(l),0,0,gl::Size(p.width),gl::Size(p.height),format,type,p.bytes.data());
+            else
+                api_.TexImage2D(imageTarget,gl::Int(l),gl::Int(internal),gl::Size(p.width),gl::Size(p.height),0,format,type,p.bytes.data());
         }
     }
     r.uploadedRevision=r.controller.revision();return true;
@@ -830,10 +799,6 @@ GpuTexture TextureCache::bind(ProcedureRecord& r,std::string& error) {
     if(!error.empty()){r.fault=error;return {};}
     if(change==material::ProcedureChange::Image) {
         if(!uploadProcedure(r,error))return {};
-        // Engine upload mutates the selected TID before this draw samples it.
-        // Transactional host uploads publish a replacement physical object, so
-        // resolve that same selected TID again after publication.
-        result=selected(r,error);if(!result.id)return {};
     }
     // Frame changes and InvalidTexture become visible to the NEXT Bind. This
     // bind selected its TID before the engine Control call (CAurTexture::Bind).
@@ -966,21 +931,15 @@ void TextureCache::setDirtyAreaInputs(const std::array<material::DirtyTextureInp
     // These are context-owned names. Call with this cache's GL context current,
     // exactly like clear(); all borrowers re-resolve at the next submission.
     for(const auto* source:dirtySources_) {
-        std::unordered_set<gl::UInt> deleted;
         const auto entry=entries_.find(source);
         if(entry!=entries_.end()) {
             for(const auto& frame:entry->second) {
-                const auto id=frame.second.id;deleted.insert(id);
+                const auto id=frame.second.id;
                 procedureIds_.erase(id);if(textureDeleted_)textureDeleted_(id);
                 if(ready_)api_.DeleteTextures(1,&id);
             }
             entries_.erase(entry);
         }
-        if(const auto procedure=procedures_.find(source);procedure!=procedures_.end())
-            for(const auto id:procedure->second->registrationIds)if(id&&deleted.insert(id).second) {
-                procedureIds_.erase(id);if(textureDeleted_)textureDeleted_(id);
-                if(ready_)api_.DeleteTextures(1,&id);
-            }
         procedures_.erase(source);failures_.erase(source);
     }
     dirtySources_.clear();dirtyScope_=scope;procedureContext_.dirty=inputs;
@@ -995,23 +954,24 @@ void TextureCache::release(const void* owner) {
         const auto count=borrowCounts_.find(source);
         if(--count->second)continue;
         borrowCounts_.erase(count);
-        std::unordered_set<gl::UInt> retired;
-        const auto retire=[&](gl::UInt id) {
-            if(id&&retired.insert(id).second) {
-                procedureIds_.erase(id);
-                if(textureDeleted_)textureDeleted_(id);
-                retiredTextures_.push_back(id);
+        const auto retire=[&](const neoshared::texture::TextureData* texture) {
+            if(const auto entry=entries_.find(texture);entry!=entries_.end()) {
+                for(const auto& frame:entry->second) {
+                    const auto id=frame.second.id;
+                    procedureIds_.erase(id);
+                    if(textureDeleted_)textureDeleted_(id);
+                    retiredTextures_.push_back(id);
+                }
+                entries_.erase(entry);
             }
+            orders_.erase(texture);
         };
-        if(const auto entry=entries_.find(source);entry!=entries_.end()) {
-            for(const auto& frame:entry->second)retire(frame.second.id);
-            entries_.erase(entry);
-        }
+        retire(source);
         if(const auto procedure=procedures_.find(source);procedure!=procedures_.end()) {
-            for(const auto id:procedure->second->registrationIds)retire(id);
+            if(procedure->second->tiled)retire(&procedure->second->frames);
             procedures_.erase(procedure);
         }
-        failures_.erase(source);orders_.erase(source);dirtySources_.erase(source);definitions_.erase(source);
+        failures_.erase(source);dirtySources_.erase(source);definitions_.erase(source);
     }
     borrowers_.erase(borrower);
 }
@@ -1021,16 +981,10 @@ void TextureCache::flushRetiredTextures() {
 }
 void TextureCache::clear() {
     flushRetiredTextures();
-    std::unordered_set<gl::UInt> deleted;
     if(ready_)
         for(const auto& texture:entries_) for(const auto& frame:texture.second) {
-            deleted.insert(frame.second.id);
             if(textureDeleted_)textureDeleted_(frame.second.id);
             api_.DeleteTextures(1,&frame.second.id);
-        }
-    if(ready_)for(const auto& procedure:procedures_)
-        for(const auto id:procedure.second->registrationIds)if(id&&deleted.insert(id).second) {
-            if(textureDeleted_)textureDeleted_(id);api_.DeleteTextures(1,&id);
         }
     entries_.clear();dirtySources_.clear();dirtyScope_.clear();
     procedures_.clear();failures_.clear();procedureIds_.clear();definitions_.clear();

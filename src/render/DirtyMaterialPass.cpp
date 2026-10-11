@@ -63,7 +63,6 @@ bool prepareDirtyBindings(gl::Api& a,MeshDrawParameters& p,const material::Dirty
         if(p.material.engineHardware.arbFragmentPrograms)
             if(const auto* fragment=desktop_programs::k2FragmentProgram(plan.command))state.bindFragmentProgram(fragment);
         a.ActiveTexture(gl::Texture0);
-        if(a.GetError()!=gl::NoError) {error="Dirty engine texture/sampler setup failed";return false;}
         return true;
     } catch(const std::exception& e) {error=e.what();return false;}
 }

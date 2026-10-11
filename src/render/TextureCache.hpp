@@ -98,9 +98,6 @@ private:
         neoshared::texture::TextureData frames;
         material::ProcedureStorageDescriptor storage;
         material::ProcedureCubeLayout cubeLayout{material::ProcedureCubeLayout::OrdinaryMapped};
-        // The first published GL names remain registration handles when a
-        // transactional update publishes replacement physical objects.
-        std::vector<gl::UInt> registrationIds;
         bool tiled{}, normalUpload{}, used{true}, pixelStorage{}, cube{};
         std::uint16_t engineHash{};
         std::uint64_t uploadedRevision{};

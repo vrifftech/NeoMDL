@@ -14,6 +14,7 @@ void bindOwnerHistory(SceneOwnerView& view,const SceneAnimationOwner& source) {
     // State identity is stable across handle moves; callbacks are borrowed and
     // guarded by the separately invalidated engine owner lifetime token.
     const auto* owner=&source;
+    view.animationOwner=owner;
     view.resolvePreviousRenderedFrame=[owner]{return owner->previousRenderedFrame();};
     view.commitRenderedFrame=[owner](const model::EngineFrame& frame){owner->commitRenderedFrame(frame);};
     view.resolveRangePosition=[owner,asset=view.asset,pose=view.pose,

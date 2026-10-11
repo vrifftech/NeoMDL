@@ -2881,7 +2881,7 @@ void ModelCanvas::refreshAnimatedSubmission(render::MeshSubmission& submission,
         asset.game,asset.fog,submission.lightOwner.value_or(0),document,time,&refreshed,
         submission.sceneOwner,submission.ownerAlpha,asset.classification,submission.ownerHasTransparency,
         submission.ownerCameraDistance,false,effects,&world,textureAngle,
-        engineParts.empty()?nullptr:&engineParts[mesh.nodeIndex],&failure);
+        engineParts.empty()?nullptr:&engineParts[mesh.nodeIndex],&failure,submission.eyeDepth);
     glPopMatrix();
     if(!failure.empty())throw std::runtime_error(failure);
     // Draw reassembly keeps the already-sorted owner key and borrowed
@@ -2934,7 +2934,7 @@ void ModelCanvas::updateAnimationVisibility() {
     const auto owners=collectSceneOwners(*document_,*pose_,referenceScene_,areaScene_,true,
         options_.objectLightRadius,&danglyState_,&particleScene_,&mainAnimationOwner_);
     for(const auto& owner:owners)
-        if(auto* animation=animationOwnerForId(owner.id))animation->setInViewVolume(false);
+        if(auto* animation=owner.animationOwner)animation->setInViewVolume(false);
     for(const auto& owner:owners) {
         if(!owner.renderVisible)continue;
         const auto sphere=engineConstructedOwnerSphere(*owner.asset);
@@ -2944,7 +2944,7 @@ void ModelCanvas::updateAnimationVisibility() {
         const bool outside=std::any_of(lastScenePlanes_.begin(),lastScenePlanes_.end(),[&](const auto& plane) {
             return ((plane.normal.x*center.x+plane.distance)+plane.normal.y*center.y)+plane.normal.z*center.z-sphere.radius>0.0f;
         });
-        if(!outside)if(auto* animation=animationOwnerForId(owner.id))animation->setInViewVolume(true);
+        if(!outside)if(auto* animation=owner.animationOwner)animation->setInViewVolume(true);
     }
     const auto propagate=[](ReferenceScene& references,SceneAnimationOwner* primary) {
         const auto visit=[&](const auto& self,std::size_t index)->bool {
@@ -5346,7 +5346,9 @@ void ModelCanvas::queueLightsabers() {
         if(source.chunk)submission.ownerLifetime=instance->reference
             ?source.references->animationOwner(*instance->reference).lifetime():SceneOwnerLifetime{source.chunk->lifetime};
         else if(auto* owner=animationOwnerForId(id))submission.ownerLifetime=owner->lifetime();
-        submission.resolveOwner=[this,source,saber=instance.get(),id,prepareSaberMaterial](auto& live) {
+        const auto retainedRadius=instance->game==model::GameVersion::Kotor2
+            ?sceneQueries_.owner(id)->sphere.radius:0.0f;
+        submission.resolveOwner=[this,source,saber=instance.get(),id,retainedRadius,prepareSaberMaterial](auto& live) {
             live.mesh=&saber->renderMesh();live.poseRevision=source.scene->revision();
             live.parameters.modelView=model::multiply(cameraView_,saber->world);
             live.parameters.streamedGeometry=saber->streamsMovingGeometry();
@@ -5354,8 +5356,10 @@ void ModelCanvas::queueLightsabers() {
             const auto& world=reference ? reference->world : source.chunk ? source.chunk->world
                 : source.object ? source.object->world() : source.references->mainWorld();
             const auto& asset=saber->reference ? source.document->references()[*saber->reference].model : source.document->model();
-            ownerLightSpheres_[id]={model::transformPoint(world,{}),source.chunk&&!reference
-                ?source.chunk->engineOwnerRadius:engineConstructedOwnerSphere(asset).radius};
+            const auto radius=saber->game==model::GameVersion::Kotor2 ? retainedRadius
+                : source.chunk&&!reference ? source.chunk->engineOwnerRadius
+                : engineConstructedOwnerSphere(asset).radius;
+            ownerLightSpheres_[id]={model::transformPoint(world,{}),radius};
             prepareSaberMaterial(live.parameters);
         };
         if(parameters.engineLightsaberMaterial)
@@ -5652,7 +5656,8 @@ void ModelCanvas::drawMesh(const neomdl::model::Mesh& mesh,
                            bool allowK2SkinEffects, const OwnerVisualEffects* ownerEffects,
                            const model::Mat4* engineOwnerFrame,
                            std::optional<float> ownerTextureAngleDegrees,
-                           const HitPartTransform* enginePartFrame,std::string* failure) {
+                           const HitPartTransform* enginePartFrame,std::string* failure,
+                           std::optional<float> retainedEyeDepth) {
     if (!meshRenderer_.ready()) return; // Explicit shader failure; no silent immediate-mode fallback.
     neomdl::render::MeshDrawParameters parameters;
     // Camera/helper transforms remain compatibility state in this stage; the
@@ -5810,15 +5815,20 @@ void ModelCanvas::drawMesh(const neomdl::model::Mesh& mesh,
         parameters.enginePartOrientation=enginePartFrame->orientation;
     }
     parameters.lightCount = 0u;
-    // Posed mesh bounds supply the submission depth; light selection is per owner.
-    neomdl::model::Bounds eyeBounds;
-    for(std::size_t n=0;n<mesh.vertices.size();++n)
-        extendBounds(eyeBounds,neomdl::model::transformPoint(parameters.modelView,
-            deformed ? deformed->positions[n] : mesh.vertices[n].position));
-    const neomdl::model::Vec3 center=eyeBounds.valid ? neomdl::model::Vec3{
-        (eyeBounds.minimum.x+eyeBounds.maximum.x)*0.5f,
-        (eyeBounds.minimum.y+eyeBounds.maximum.y)*0.5f,
-        (eyeBounds.minimum.z+eyeBounds.maximum.z)*0.5f} : neomdl::model::Vec3{};
+    float eyeDepth;
+    if(retainedEyeDepth)eyeDepth=*retainedEyeDepth;
+    else {
+        // Posed mesh bounds supply the initial queue depth; late draws retain it.
+        neomdl::model::Bounds eyeBounds;
+        for(std::size_t n=0;n<mesh.vertices.size();++n)
+            extendBounds(eyeBounds,neomdl::model::transformPoint(parameters.modelView,
+                deformed ? deformed->positions[n] : mesh.vertices[n].position));
+        const neomdl::model::Vec3 center=eyeBounds.valid ? neomdl::model::Vec3{
+            (eyeBounds.minimum.x+eyeBounds.maximum.x)*0.5f,
+            (eyeBounds.minimum.y+eyeBounds.maximum.y)*0.5f,
+            (eyeBounds.minimum.z+eyeBounds.maximum.z)*0.5f} : neomdl::model::Vec3{};
+        eyeDepth=-center.z;
+    }
     if(options_.lighting) {
         if(options_.headlight) {
             auto& light=parameters.lights[parameters.lightCount++];
@@ -5830,7 +5840,6 @@ void ModelCanvas::drawMesh(const neomdl::model::Mesh& mesh,
             light.diffuse={{0.92f,0.92f,0.92f}};light.ambient={{0,0,0}};
         }
     }
-    const auto eye=center;
     auto& queue = targetQueue ? *targetQueue : renderQueue_;
     render::MeshSubmission submission;
     submission.mesh=&mesh;
@@ -5842,7 +5851,7 @@ void ModelCanvas::drawMesh(const neomdl::model::Mesh& mesh,
     if (k2Lights_ && !model::engineSceneStageOrder(game).empty())
         submission.lightOwner=lightOwner;
     submission.inspectionLightCount=parameters.lightCount;
-    submission.eyeDepth=-eye.z;
+    submission.eyeDepth=eyeDepth;
     submission.sceneOwner=sceneOwner;
     submission.ownerAlpha=ownerAlpha;
     submission.ownerModelClassification=ownerModelClassification;

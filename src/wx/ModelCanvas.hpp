@@ -557,7 +557,8 @@ private:
                   const OwnerVisualEffects* ownerEffects = nullptr,
                   const model::Mat4* engineOwnerFrame = nullptr,
                   std::optional<float> ownerTextureAngleDegrees = std::nullopt,
-                  const HitPartTransform* enginePartFrame = nullptr,std::string* failure = nullptr);
+                  const HitPartTransform* enginePartFrame = nullptr,std::string* failure = nullptr,
+                  std::optional<float> retainedEyeDepth = std::nullopt);
     const neomdl::model::Bounds& activeBounds() const noexcept;
 
     std::unique_ptr<wxGLContext> context_;

@@ -507,7 +507,7 @@ bool ShaderMeshRenderer::draw(const neomdl::model::Mesh& mesh,
     if(impl_->distortionActive) {
         p.selected=false;p.outlineOnly=false;
     }
-    auto nextMaterialState=impl_->materialState;
+    auto& nextMaterialState=impl_->materialState;
     error.clear(); if(!ready()) { error="Mesh shader backend is not initialized"; return false; }
     if(mesh.vertices.empty() || drawIndices.empty()) {
         if((p.material.k2PartTriMeshState||p.engineLightsaberMaterial)&&!p.inspectMaterial&&!p.outlineOnly&&
@@ -661,11 +661,6 @@ bool ShaderMeshRenderer::draw(const neomdl::model::Mesh& mesh,
         }
     }
     auto& i=*impl_; auto& a=i.api;
-    const auto priorError=a.GetError();
-    if(priorError!=g::NoError) {
-        error="OpenGL already had a pending error before mesh submission ("+std::to_string(priorError)+")";
-        return false;
-    }
     // PartSkin::Mat precedes the engine zero-displacement guard. Keep its
     // texture/alpha state, but do not run the VP, command34, or command0.
     if(p.skinEffect==SkinRenderEffect::MotionBlur &&
@@ -674,14 +669,13 @@ bool ShaderMeshRenderer::draw(const neomdl::model::Mesh& mesh,
             i.sceneState.alphaTest=p.material.alphaTest;
             i.sceneState.alphaReference=p.material.alphaCutoff;
         }
-        i.materialState=nextMaterialState;
         return true;
     }
     if(desktopFixedFragment && !i.prepareFixed(error))return false;
     const bool engineSkin=engineProgram==MaterialProgram::SkinBump || engineProgram==MaterialProgram::SkinBumpyShiny ||
             engineProgram==MaterialProgram::SkinFlat || engineProgram==MaterialProgram::SkinEnvironment;
     const bool k1Rigid=engineProgram==MaterialProgram::K1Rigid;
-    StateGuard restore(a,engineSkin || k1Rigid ? 15 : 9);
+    StateGuard restore(a,i.sceneActive ? 0 : (engineSkin || k1Rigid ? 15 : 9));
     if(enginePartMat&&p.enginePartMaterial) {
         i.desktopStandard.emission=p.enginePartMaterial->vertex[0];
         i.desktopStandard.diffuse=p.enginePartMaterial->vertex[1];
@@ -698,15 +692,15 @@ bool ShaderMeshRenderer::draw(const neomdl::model::Mesh& mesh,
     if(desktopFixedFragment)fixedRestore=std::make_unique<desktop_programs::LegacyGuard>(a,i.fixedApi);
     auto& u=desktopFixedFragment?i.fixedU:i.u;
     struct EngineTextureMatrixScope {
-        EngineMaterialState& current;EngineMaterialState& target;bool active;
+        EngineMaterialState& current;bool active;
         ~EngineTextureMatrixScope() {
             if(active) {
                 // RestoreTextureMatrix0xcc172 uses the EXIT active unit, not
                 // the entry unit. Preserve engine stack errors and history.
-                current.popTextureMatrix(current.fixedActiveTextureUnit);target=current;
+                current.popTextureMatrix(current.fixedActiveTextureUnit);
             }
         }
-    } textureMatrixScope{nextMaterialState,i.materialState,
+    } textureMatrixScope{nextMaterialState,
         forceSight && !p.material.engineHardware.arbFragmentPrograms && p.material.k2PartTriMeshState &&
         !p.engineAnimMesh && !p.inspectMaterial && !p.outlineOnly && p.textureAngleDegrees!=0.0f};
     if(textureMatrixScope.active)
@@ -714,9 +708,9 @@ bool ShaderMeshRenderer::draw(const neomdl::model::Mesh& mesh,
     // Cleanup belongs to the engine call even when a virtual Bind throws.
     // Host GL restoration remains the outer guard's separate responsibility.
     struct DirtyCleanup {
-        EngineMaterialState& target;EngineMaterialState& current;unsigned command;bool fixed{},active{};
-        ~DirtyCleanup(){if(active){if(!fixed)current.finishDirty(command);else current.fixedCurrentStage=0;target=current;}}
-    } dirtyCleanup{i.materialState,nextMaterialState,dirtyPlan.cleanupCommand,!p.material.engineHardware.arbFragmentPrograms};
+        EngineMaterialState& current;unsigned command;bool fixed{},active{};
+        ~DirtyCleanup(){if(active){if(!fixed)current.finishDirty(command);else current.fixedCurrentStage=0;}}
+    } dirtyCleanup{nextMaterialState,dirtyPlan.cleanupCommand,!p.material.engineHardware.arbFragmentPrograms};
     if(dirty) {
         dirtyCleanup.active=true;
         if(!prepareDirtyBindings(a,p,dirtyPlan,nextMaterialState,error))return false;
@@ -814,18 +808,6 @@ bool ShaderMeshRenderer::draw(const neomdl::model::Mesh& mesh,
             if(newGeometry || p.streamedGeometry || cache.count!=static_cast<g::Size>(geometry.indices.size()))
                 a.BufferData(g::ElementArrayBuffer,static_cast<g::Bytes>(geometry.indices.size()*sizeof(std::uint32_t)),
                              geometry.indices.data(),p.streamedGeometry ? g::DynamicDraw : g::StaticDraw);
-            const auto uploadError=a.GetError();
-            if(uploadError!=g::NoError) {
-                // A failed allocation/update must not be marked cached; retry
-                // creates fresh storage instead of drawing stale/unallocated data.
-                if(cache.vbo) a.DeleteBuffers(1,&cache.vbo);
-                if(cache.ebo) a.DeleteBuffers(1,&cache.ebo);
-                if(cache.skinVbo) a.DeleteBuffers(1,&cache.skinVbo);
-                if(cache.rigidVbo) a.DeleteBuffers(1,&cache.rigidVbo);
-                cache={};
-                error="OpenGL mesh buffer upload failed ("+std::to_string(uploadError)+")";
-                return false;
-            }
             cache.count=static_cast<g::Size>(geometry.indices.size()); cache.bytes=bytes;
             cache.vertices=mesh.vertices.data(); cache.indices=drawIndices.data();
             cache.vertexCount=mesh.vertices.size(); cache.indexCount=drawIndices.size();
@@ -871,7 +853,6 @@ bool ShaderMeshRenderer::draw(const neomdl::model::Mesh& mesh,
                     i.sceneState.alphaTest=nextMaterialState.alphaTestEnabled;
                     i.sceneState.alphaReference=nextMaterialState.alphaReference;
                 }
-                i.materialState=nextMaterialState;
                 return true;
             }
         }
@@ -887,7 +868,6 @@ bool ShaderMeshRenderer::draw(const neomdl::model::Mesh& mesh,
                 if(!cache.skinVbo){error="Cannot allocate engine skin source buffer";return false;}
                 a.BindBuffer(g::ArrayBuffer,cache.skinVbo);
                 a.BufferData(g::ArrayBuffer,static_cast<g::Bytes>(vertices.size()*sizeof(EngineSkinVertex)),vertices.data(),g::StaticDraw);
-                if(a.GetError()!=g::NoError){a.DeleteBuffers(1,&cache.skinVbo);cache.skinVbo=0;error="Engine skin source upload failed";return false;}
                 cache.skinNormalRevision=normalRevision;
                 ++i.stats.engineSkinUploads;
             }
@@ -1303,11 +1283,6 @@ bool ShaderMeshRenderer::draw(const neomdl::model::Mesh& mesh,
             nextMaterialState.bind(0,false,texture);
         }
         }
-        const auto drawError=a.GetError();
-        if(drawError!=g::NoError) {
-            error="OpenGL indexed mesh submission failed ("+std::to_string(drawError)+")";
-            return false;
-        }
     } catch(const std::exception& exception) { error=exception.what(); return false; }
     // The ordinary dispatch-32/37 cleanup disables targets, but does not
     // unbind 2D/cube objects. Skin dispatch-0 updates its bindings in the pass.
@@ -1374,7 +1349,6 @@ bool ShaderMeshRenderer::draw(const neomdl::model::Mesh& mesh,
                !p.material.skinEnvironmentAvailable && p.material.engineSkinBumpTangent &&
                p.material.engineHardware.nv1xLevelShaders && !p.material.engineAtiValidation)
                 for(unsigned unit=0;unit<4;++unit)nextMaterialState.bind(unit,false,0);
-            impl_->materialState=nextMaterialState;
         }
         if(cpuBumpFallback && impl_->sceneActive)impl_->sceneState.alphaTest=true;
         retainDesktopStandardVertexState(mesh,p,engineProgram,impl_->desktopStandard);

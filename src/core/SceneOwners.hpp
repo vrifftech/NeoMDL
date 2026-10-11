@@ -18,6 +18,7 @@ struct SceneOwnerView {
     const ModelDocument* sourceDocument{};
     const model::Pose* pose{};
     const model::DanglySimulationState* dangly{};
+    const SceneAnimationOwner* animationOwner{};
     model::EngineFrame frame{};
     model::Mat4 world{model::identityMatrix()};
     float scale{1.0f};

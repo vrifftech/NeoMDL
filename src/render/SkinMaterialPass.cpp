@@ -126,7 +126,7 @@ bool SkinMaterialPass::prepare(g::Api& a,const MeshDrawParameters& p,MaterialPro
         if(type==MaterialProgram::SkinBump && p.fog.mode!=model::FogMode::Disabled &&
            (!i.program(a,VP,skin_programs::Fog,error)||!i.program(a,FP,skin_programs::FogFragment,error)))return false;
     }
-    return a.GetError()==g::NoError;
+    return true;
 }
 bool SkinMaterialPass::draw(g::Api& a,const model::Mesh& mesh,const model::DeformedMesh& pose,
     const MeshDrawParameters& p,MaterialProgram type,EngineMaterialState& state,g::UInt normalization,
@@ -380,7 +380,6 @@ bool SkinMaterialPass::draw(g::Api& a,const model::Mesh& mesh,const model::Defor
         state.alphaTestEnabled=a.IsEnabled(g::AlphaTest)!=0;
         a.GetFloatv(g::AlphaTestRef,&state.alphaReference);
     }
-    const auto code=a.GetError();if(code!=g::NoError){error="Engine skin material submission failed ("+std::to_string(code)+")";return false;}
     return true;
 }
 void SkinMaterialPass::shutdown(){impl_->shutdown();}

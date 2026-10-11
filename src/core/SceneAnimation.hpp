@@ -69,7 +69,7 @@ public:
     void setHasAnimationRuns(std::function<bool()> callback) {state_->hasRuns=std::move(callback);}
     void setLookAt(std::function<void()> callback) {state_->lookAt=std::move(callback);}
     void setDynamicLights(bool value) noexcept {state_->dynamicLights=value;}
-    void setInViewVolume(bool value) noexcept {state_->inViewVolume=value;}
+    void setInViewVolume(bool value) const noexcept {state_->inViewVolume=value;}
     bool inViewVolume() const noexcept {return state_->inViewVolume;}
     void setInCutscene(bool value) noexcept {state_->inCutscene=value;}
     bool inCutscene() const noexcept {return state_->inCutscene;}
