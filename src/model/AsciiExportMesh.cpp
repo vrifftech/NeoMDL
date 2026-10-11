@@ -205,6 +205,10 @@ void materialFields(Writer& out,const Model& model,const Node& node,const Mesh& 
 
 ReconstructedMesh writeMesh(Writer& out,const Model& model,const Node& node,const Mesh& mesh) {
     materialFields(out,model,node,mesh);
+    if(node.lightsaber) {
+        writeLightsaber(out,node);
+        return {};
+    }
     const auto vertices=sourceVertices(mesh,node,out);
     const auto* animation=node.animmesh?&*node.animmesh:nullptr;
     if(animation && (mesh.mdxBitmap&2u)==0u)

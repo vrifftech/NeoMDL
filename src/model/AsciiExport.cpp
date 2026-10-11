@@ -254,7 +254,6 @@ void writeTree(Writer& writer,const Model& model,const std::vector<Node>& nodes,
                 const auto& mesh=model.meshes[*node.mesh];
                 const auto generated=writeMesh(writer,model,node,mesh);
                 if(mesh.skinned)writeSkin(writer,model,mesh,generated);
-                if(node.lightsaber)writeLightsaber(writer,model,node,mesh,generated);
             }
         } else if(node.animmesh) {
             // Typed animmesh animation nodes retain their own mesh extension;
