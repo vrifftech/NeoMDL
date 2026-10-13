@@ -41,6 +41,36 @@ std::uint32_t packedQuaternion(Quaternion value) noexcept {
 
 struct ComponentInterval {float lower,upper;};
 
+struct AxisAngle {Vec3 axis;float angle;};
+
+AxisAngle axisAngle(Quaternion value) {
+    const double length=std::sqrt(double(value.x)*value.x+
+        double(value.y)*value.y+double(value.z)*value.z);
+    return {length==0.0?Vec3{1.0f,0.0f,0.0f}:
+        Vec3{float(value.x/length),float(value.y/length),float(value.z/length)},
+        static_cast<float>(2.0*std::atan2(length,double(value.w)))};
+}
+
+std::string axisAngleText(Writer& writer,AxisAngle value) {
+    return writer.vector(value.axis)+" "+writer.scalar(value.angle);
+}
+
+double rotationDistance(Quaternion left,Quaternion right) {
+    std::array<double,4> a{{left.x,left.y,left.z,left.w}},
+        b{{right.x,right.y,right.z,right.w}};
+    double aa=0.0,bb=0.0,ab=0.0;
+    for(std::size_t i=0;i<a.size();++i) {
+        aa+=a[i]*a[i];bb+=b[i]*b[i];ab+=a[i]*b[i];
+    }
+    const double scaleA=1.0/std::sqrt(aa),scaleB=(ab<0.0?-1.0:1.0)/std::sqrt(bb);
+    double squared=0.0;
+    for(std::size_t i=0;i<a.size();++i) {
+        const double difference=a[i]*scaleA-b[i]*scaleB;
+        squared+=difference*difference;
+    }
+    return squared;
+}
+
 ComponentInterval componentInterval(std::uint32_t bin,float maximum) noexcept {
     const auto boundary=[&](bool after) {
         auto first=orderedFloat(-1.0f),last=orderedFloat(1.0f)+1u;
@@ -55,29 +85,23 @@ ComponentInterval componentInterval(std::uint32_t bin,float maximum) noexcept {
     return {orderedValue(boundary(false)),orderedValue(boundary(true)-1u)};
 }
 
-std::optional<std::string> packedAxisAngle(Writer& writer,std::uint32_t word) {
+std::optional<AxisAngle> packedAxisAngle(GameVersion game,std::uint32_t word) {
     const std::array<std::uint32_t,3> bins{{word&0x7ffu,(word>>11u)&0x7ffu,word>>22u}};
     if(bins[0]>2046u || bins[1]>2046u || bins[2]>1022u)return {};
 
-    const auto encode=[&](Quaternion value)->std::optional<std::string> {
-        const double length=std::sqrt(double(value.x)*value.x+
-            double(value.y)*value.y+double(value.z)*value.z);
-        const Vec3 axis=length==0.0?Vec3{1.0f,0.0f,0.0f}:
-            Vec3{float(value.x/length),float(value.y/length),float(value.z/length)};
-        float angle=static_cast<float>(2.0*std::atan2(length,double(value.w)));
-        auto reconstructed=ascii::engineAxisAngle(axis,angle);
-        if(packedQuaternion(reconstructed)==word)
-            return writer.vector(axis)+" "+writer.scalar(angle);
+    const auto encode=[&](Quaternion value)->std::optional<AxisAngle> {
+        auto result=axisAngle(value);
+        auto reconstructed=ascii::engineAxisAngle(result.axis,result.angle);
+        if(packedQuaternion(reconstructed)==word)return result;
         // Rounding pi upward changes the sign used by CompressQuaternionKey.
         if(reconstructed.w<0.0f) {
-            angle=std::nextafter(angle,0.0f);
-            reconstructed=ascii::engineAxisAngle(axis,angle);
-            if(packedQuaternion(reconstructed)==word)
-                return writer.vector(axis)+" "+writer.scalar(angle);
+            result.angle=std::nextafter(result.angle,0.0f);
+            reconstructed=ascii::engineAxisAngle(result.axis,result.angle);
+            if(packedQuaternion(reconstructed)==word)return result;
         }
         return {};
     };
-    if(auto text=encode(unpackEngineControllerQuaternion(word,writer.game())))return text;
+    if(auto value=encode(unpackEngineControllerQuaternion(word,game)))return value;
 
     const std::array<ComponentInterval,3> intervals{{componentInterval(bins[0],2046.0f),
         componentInterval(bins[1],2046.0f),componentInterval(bins[2],1022.0f)}};
@@ -90,7 +114,7 @@ std::optional<std::string> packedAxisAngle(Writer& writer,std::uint32_t word) {
         middleLength+=middle[i]*middle[i];
         nearestLength+=nearest[i]*nearest[i];
     }
-    const auto point=[&](const std::array<double,3>& components)->std::optional<std::string> {
+    const auto point=[&](const std::array<double,3>& components)->std::optional<AxisAngle> {
         Quaternion value{float(components[0]),float(components[1]),float(components[2]),0.0f};
         const double squared=double(value.x)*value.x+double(value.y)*value.y+
             double(value.z)*value.z;
@@ -117,6 +141,36 @@ std::optional<std::string> packedAxisAngle(Writer& writer,std::uint32_t word) {
         if(auto text=point(interior))return text;
     }
     return point(nearest);
+}
+
+AxisAngle approximatePackedAxisAngle(GameVersion game,std::uint32_t word) {
+    const auto target=unpackEngineControllerQuaternion(word,game);
+    auto result=axisAngle(target);
+    const auto original=ascii::engineAxisAngle(result.axis,result.angle);
+    const auto x=word&0x7ffu,y=(word>>11u)&0x7ffu,z=word>>22u;
+    // At a half-turn the opposite quaternion is the same rotation, but its
+    // quantization cell can intersect the unit sphere when this one cannot.
+    if(target.w==0.0f && x<=2046u && y<=2046u && z<=1022u) {
+        const auto mirrored=(2046u-x)|((2046u-y)<<11u)|((1022u-z)<<22u);
+        if(auto candidate=packedAxisAngle(game,mirrored)) {
+            const auto previous=unpackEngineControllerQuaternion(packedQuaternion(original),game);
+            if(rotationDistance(target,unpackEngineControllerQuaternion(mirrored,game))<
+               rotationDistance(target,previous)) {
+                result=*candidate;
+                const auto rebuilt=ascii::engineAxisAngle(result.axis,result.angle);
+                const double dot=double(original.x)*rebuilt.x+double(original.y)*rebuilt.y+
+                    double(original.z)*rebuilt.z+double(original.w)*rebuilt.w;
+                if(dot<0.0) {
+                    // Keep the previous input hemisphere for quaternion-key culling.
+                    const AxisAngle equivalent{{-result.axis.x,-result.axis.y,-result.axis.z},
+                        static_cast<float>(2.0*std::acos(-1.0)-result.angle)};
+                    if(packedQuaternion(ascii::engineAxisAngle(equivalent.axis,equivalent.angle))==mirrored)
+                        result=equivalent;
+                }
+            }
+        }
+    }
+    return result;
 }
 
 std::string controllerDescription(const Node& node,const Controller& controller) {
@@ -150,9 +204,12 @@ std::string rowValues(Writer& writer,const Node& node,const Controller& controll
     const auto start=static_cast<std::size_t>(controller.dataIndex)+row*width;
     if(controller.rawFlags==0x02u) {
         if(keyed) {
-            if(auto text=packedAxisAngle(writer,node.controllerDataWords[start]))return *text;
+            if(auto value=packedAxisAngle(writer.game(),node.controllerDataWords[start]))
+                return axisAngleText(writer,*value);
             writer.warning("Some packed rotation keys could not be reproduced by the ASCII "
                 "axis-angle constructor; their exported rotations can change stored words.");
+            return axisAngleText(writer,approximatePackedAxisAngle(writer.game(),
+                node.controllerDataWords[start]));
         }
         return writer.quaternion(unpackEngineControllerQuaternion(
             node.controllerDataWords[start],writer.game()));
