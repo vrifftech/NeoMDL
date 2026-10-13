@@ -19,6 +19,7 @@ ReconstructedSmoothing reconstructSmoothing(
     const std::vector<Vec3>* cornerTargets = nullptr,
     bool refine = true,
     const std::vector<bool>* ignoredCorners = nullptr,
-    const std::vector<std::uint32_t>* seedMasks = nullptr);
+    const std::vector<std::uint32_t>* seedMasks = nullptr,
+    bool useStoredRows = false);
 
 } // namespace neomdl::model::ascii_export

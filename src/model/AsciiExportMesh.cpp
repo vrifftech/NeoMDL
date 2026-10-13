@@ -465,7 +465,7 @@ void reconstructSkinSeamSmoothing(Writer& out,const Model& model) {
     })) return;
     auto frames=model;
     reconstructExportedNodeFrames(frames,out.job());
-    enum class PrecursorFit { Smooth,SplitOpposing,Unscored,RefineExisting };
+    enum class PrecursorFit { Smooth,SplitOpposing,Unscored,RefineExisting,RetainedVertices };
     const auto precursor=[&](const Plans& source,bool refine,PrecursorFit fit=PrecursorFit::Smooth) {
         // Saved normals can be outputs of ProcessSkinSeams. Reconstruct
         // geometric precursors only where that producer changes a corner.
@@ -530,10 +530,13 @@ void reconstructSkinSeamSmoothing(Writer& out,const Model& model) {
                 }
             if(adjusted) {
                 const auto& topology=plan.topology;
-                const bool ignoreSeams=fit==PrecursorFit::Unscored || fit==PrecursorFit::RefineExisting;
+                const bool ignoreSeams=fit==PrecursorFit::Unscored || fit==PrecursorFit::RefineExisting ||
+                    fit==PrecursorFit::RetainedVertices;
                 plan.smoothing=reconstructSmoothing(mesh,plan.vertices,topology.sourceVertices,
                     topology.sourceFaces,out.job(),&targets,refine,ignoreSeams?&ignored:nullptr,
-                    fit==PrecursorFit::RefineExisting?&plan.smoothing.masks:nullptr);
+                    fit==PrecursorFit::RefineExisting || fit==PrecursorFit::RetainedVertices?
+                        &plan.smoothing.masks:nullptr,
+                    fit==PrecursorFit::RetainedVertices);
             }
         }
         return candidate;
@@ -551,6 +554,7 @@ void reconstructSkinSeamSmoothing(Writer& out,const Model& model) {
     // the complete seam-output score below still judges every corner.
     alternatives.push_back(precursor(alternatives[2],true,PrecursorFit::Unscored));
     alternatives.push_back(precursor(alternatives[2],true,PrecursorFit::RefineExisting));
+    alternatives.push_back(precursor(alternatives[2],true,PrecursorFit::RetainedVertices));
     auto baseline=frames;
     const auto baselineRows=generateGeometry(baseline,model,plans,false,out.job());
     processAsciiSkinSeams(baseline,out.job());
@@ -571,6 +575,7 @@ void reconstructSkinSeamSmoothing(Writer& out,const Model& model) {
     double previous;
     do {
         previous=best;
+        consider(precursor(plans,true,PrecursorFit::RefineExisting));
         for(const auto& mesh:model.meshes)
             for(const auto& alternative:alternatives) {
                 const auto found=alternative.find(&mesh);
