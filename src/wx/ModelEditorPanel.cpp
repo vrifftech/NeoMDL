@@ -24,6 +24,7 @@
 #include <wx/aui/auibook.h>
 #include <wx/button.h>
 #include <wx/checkbox.h>
+#include <wx/collpane.h>
 #include <wx/checklst.h>
 #include <wx/dialog.h>
 #include <wx/dirdlg.h>
@@ -32,6 +33,7 @@
 #include <wx/choice.h>
 #include <wx/choicdlg.h>
 #include <wx/filedlg.h>
+#include <wx/filedlgcustomize.h>
 #include <wx/menu.h>
 #include <wx/msgdlg.h>
 #include <wx/notebook.h>
@@ -84,9 +86,13 @@ enum CommandId {
     ID_Open = wxID_HIGHEST + 23600,
     ID_ExportAscii,
     ID_ExportPacked,
-    ID_ExportOptions,
     ID_AdvancedSettings,
+    ID_DeveloperSettings,
+    ID_EngineGraphics,
+    ID_EngineReport,
+    ID_AreaReplay,
     ID_ResetView,
+    ID_ResetDisplay,
     ID_LoadArea,
     ID_ModuleArea,
     ID_ResourceProvenance,
@@ -132,6 +138,35 @@ enum CommandId {
     ID_DetonateEmitters,
 };
 
+enum PreviewFeature : unsigned {
+    PreviewArea = 1u,
+    PreviewParticles = 2u,
+    PreviewLightsabers = 4u,
+    PreviewDangly = 8u,
+    PreviewCameras = 16u,
+    PreviewReferences = 32u,
+    PreviewLights = 64u,
+};
+
+class AsciiExportControls final : public wxFileDialogCustomizeHook {
+public:
+    explicit AsciiExportControls(int mode) : normalMode(mode) {}
+    void AddCustomControls(wxFileDialogCustomize& customizer) override {
+        customizer.AddStaticText("ASCII mesh normals");
+        const wxString modes[] = {"Automatic", "Smoothing groups",
+            "Explicit normals (NeoMDL extension)", "Smoothing groups (adjust position rounding)"};
+        normals_ = customizer.AddChoice(4, modes);
+        normals_->SetSelection(normalMode);
+        customizer.AddStaticText("Automatic: preserve ASCII modes; use smoothing groups for binary models.");
+        customizer.AddStaticText("Explicit normals: NeoMDL extension; recalculate after geometry edits.");
+        customizer.AddStaticText("Position rounding may adjust coordinates by one float step.");
+    }
+    void TransferDataFromCustomControls() override { normalMode = normals_->GetSelection(); }
+    int normalMode{};
+private:
+    wxFileDialogChoice* normals_{};
+};
+
 class NodeItemData final : public wxTreeItemData {
 public:
     explicit NodeItemData(std::size_t value) : index(value) {}
@@ -148,6 +183,9 @@ public:
         auto* preview = new wxSplitterWindow(this, wxID_ANY, wxDefaultPosition, wxDefaultSize,
                                              wxSP_LIVE_UPDATE | wxSP_3D);
         auto* playback = new wxScrolledWindow(preview);
+        advancedAnimation_ = new wxCollapsiblePane(playback, wxID_ANY, "Advanced animation",
+            wxDefaultPosition, wxDefaultSize, wxCP_DEFAULT_STYLE | wxCP_NO_TLW_RESIZE);
+        auto* advanced = advancedAnimation_->GetPane();
         animationChoice_ = new wxChoice(playback, wxID_ANY, wxDefaultPosition,
                                         wxSize(FromDIP(190), wxDefaultCoord));
         animationChoice_->Append("Bind pose");
@@ -165,7 +203,7 @@ public:
         }
         animationChoice_->SetSelection(0);
 
-        runModeChoice_ = new wxChoice(playback, wxID_ANY);
+        runModeChoice_ = new wxChoice(advanced, wxID_ANY);
         runModeChoice_->Append("Base");
         runModeChoice_->Append("Queued");
         runModeChoice_->Append("Overlay");
@@ -178,77 +216,72 @@ public:
         rateSpin_->SetMinSize(wxSize(FromDIP(82), wxDefaultCoord));
         loopCheck_ = new wxCheckBox(playback, wxID_ANY, "Loop");
         loopCheck_->SetValue(true);
-        immediateCheck_ = new wxCheckBox(playback, wxID_ANY, "Immediate");
+        immediateCheck_ = new wxCheckBox(advanced, wxID_ANY, "Immediate");
         immediateCheck_->SetValue(false);
-        synchronizeCheck_ = new wxCheckBox(playback, wxID_ANY, "Sync time");
-        allowDuplicateCheck_ = new wxCheckBox(playback, wxID_ANY, "Allow duplicate");
-        reportLoopCheck_ = new wxCheckBox(playback, wxID_ANY, "Report loops");
-        startRunButton_ = new wxButton(playback, wxID_ANY, "Start Run");
+        synchronizeCheck_ = new wxCheckBox(advanced, wxID_ANY, "Sync time");
+        allowDuplicateCheck_ = new wxCheckBox(advanced, wxID_ANY, "Allow duplicate");
+        reportLoopCheck_ = new wxCheckBox(advanced, wxID_ANY, "Report loops");
+        startRunButton_ = new wxButton(advanced, wxID_ANY, "Add Animation");
         playButton_ = new wxToggleButton(playback, wxID_ANY, "Play");
-        clearRunsButton_ = new wxButton(playback, wxID_ANY, "Clear All");
+        clearRunsButton_ = new wxButton(playback, wxID_ANY, "Stop");
 
-        activeRunChoice_ = new wxChoice(playback, wxID_ANY, wxDefaultPosition,
+        activeRunChoice_ = new wxChoice(advanced, wxID_ANY, wxDefaultPosition,
                                         wxSize(FromDIP(250), wxDefaultCoord));
         activeRunChoice_->Append("No active runs");
         activeRunChoice_->SetSelection(0);
-        fadeRunButton_ = new wxButton(playback, wxID_ANY, "Fade Out");
-        removeRunButton_ = new wxButton(playback, wxID_ANY, "Remove");
+        fadeRunButton_ = new wxButton(advanced, wxID_ANY, "Fade Out");
+        removeRunButton_ = new wxButton(advanced, wxID_ANY, "Remove");
         timeline_ = new wxSlider(playback, wxID_ANY, 0, 0, 1000, wxDefaultPosition,
                                  wxDefaultSize, wxSL_HORIZONTAL);
         timeLabel_ = new wxStaticText(playback, wxID_ANY, "No active run");
         timeLabel_->SetMinSize(wxSize(FromDIP(150), wxDefaultCoord));
 
         animationChoice_->SetToolTip(
-            "Choose the clip used by Start Run. Selecting a clip does not replace existing runs.");
+            "Choose an animation to preview. In Advanced animation, Add Animation layers the selected clip.");
         runModeChoice_->SetToolTip(
             "Engine priority class: base replaces lower base runs, queued starts FIFO, overlay remains above them.");
         immediateCheck_->SetToolTip(
-            "Set engine AnimRun flag 0x2: start at full weight instead of using the clip transition time.");
+            "Start at full weight instead of fading in over the clip transition time.");
         synchronizeCheck_->SetToolTip(
-            "Set engine AnimRun flag 0x10: copy the next lower-priority run's current time when inserted.");
+            "Start at the current time of the next lower-priority animation.");
         allowDuplicateCheck_->SetToolTip(
-            "Set engine AnimRun flag 0x40: create another run even when the same animation is already active.");
+            "Allow another instance of an animation that is already playing.");
         reportLoopCheck_->SetToolTip(
-            "Set engine AnimRun flag 0x4 and record each loop callback in the runtime event log.");
+            "Include animation loop events in detailed diagnostics.");
         playButton_->SetToolTip(
-            "Advance or pause the complete animation-run list.");
+            "Play or pause the preview, including any layered animations.");
         fadeRunButton_->SetToolTip(
-            "Set engine force-stop flag 0x400. Runs with a transition fade out; immediate runs complete on the next animation update.");
+            "Fade out the selected animation using its transition time.");
         removeRunButton_->SetToolTip(
-            "Remove the selected run immediately (engine stop flag 0x80 semantics).");
+            "Remove the selected animation immediately.");
+        clearRunsButton_->SetToolTip("Stop all animations and return to the bind pose.");
 
         auto* clipRow = new wxWrapSizer(wxHORIZONTAL);
         clipRow->Add(new wxStaticText(playback, wxID_ANY, "Animation:"), 0,
                      wxALIGN_CENTER_VERTICAL | wxRIGHT | wxBOTTOM, FromDIP(5));
         clipRow->Add(animationChoice_, 0,
                      wxALIGN_CENTER_VERTICAL | wxRIGHT | wxBOTTOM, FromDIP(6));
-        clipRow->Add(new wxStaticText(playback, wxID_ANY, "Priority:"), 0,
-                     wxALIGN_CENTER_VERTICAL | wxRIGHT | wxBOTTOM, FromDIP(5));
-        clipRow->Add(runModeChoice_, 0,
-                     wxALIGN_CENTER_VERTICAL | wxRIGHT | wxBOTTOM, FromDIP(6));
-        clipRow->Add(new wxStaticText(playback, wxID_ANY, "Rate:"), 0,
+        clipRow->Add(new wxStaticText(playback, wxID_ANY, "Speed:"), 0,
                      wxALIGN_CENTER_VERTICAL | wxRIGHT | wxBOTTOM, FromDIP(5));
         clipRow->Add(rateSpin_, 0,
                      wxALIGN_CENTER_VERTICAL | wxRIGHT | wxBOTTOM, FromDIP(6));
         clipRow->Add(loopCheck_, 0,
-                     wxALIGN_CENTER_VERTICAL | wxRIGHT | wxBOTTOM, FromDIP(6));
-        clipRow->Add(immediateCheck_, 0,
-                     wxALIGN_CENTER_VERTICAL | wxRIGHT | wxBOTTOM, FromDIP(6));
-        clipRow->Add(synchronizeCheck_, 0,
-                     wxALIGN_CENTER_VERTICAL | wxRIGHT | wxBOTTOM, FromDIP(6));
-        clipRow->Add(allowDuplicateCheck_, 0,
-                     wxALIGN_CENTER_VERTICAL | wxRIGHT | wxBOTTOM, FromDIP(6));
-        clipRow->Add(reportLoopCheck_, 0,
-                     wxALIGN_CENTER_VERTICAL | wxRIGHT | wxBOTTOM, FromDIP(6));
-        clipRow->Add(startRunButton_, 0,
                      wxALIGN_CENTER_VERTICAL | wxRIGHT | wxBOTTOM, FromDIP(6));
         clipRow->Add(playButton_, 0,
                      wxALIGN_CENTER_VERTICAL | wxRIGHT | wxBOTTOM, FromDIP(6));
         clipRow->Add(clearRunsButton_, 0,
                      wxALIGN_CENTER_VERTICAL | wxBOTTOM, FromDIP(6));
 
-        auto* runRow = new wxBoxSizer(wxHORIZONTAL);
-        runRow->Add(new wxStaticText(playback, wxID_ANY, "Active run:"), 0,
+        auto* advancedLayout = new wxBoxSizer(wxVERTICAL);
+        auto* flags = new wxWrapSizer(wxHORIZONTAL);
+        flags->Add(new wxStaticText(advanced, wxID_ANY, "Priority:"), 0,
+                   wxALIGN_CENTER_VERTICAL | wxRIGHT | wxBOTTOM, FromDIP(5));
+        for (wxWindow* control : std::initializer_list<wxWindow*>{runModeChoice_, immediateCheck_,
+                synchronizeCheck_, allowDuplicateCheck_, reportLoopCheck_, startRunButton_})
+            flags->Add(control, 0, wxALIGN_CENTER_VERTICAL | wxRIGHT | wxBOTTOM, FromDIP(6));
+        advancedLayout->Add(flags, 0, wxEXPAND);
+        auto* runRow = new wxWrapSizer(wxHORIZONTAL);
+        runRow->Add(new wxStaticText(advanced, wxID_ANY, "Active animation:"), 0,
                     wxALIGN_CENTER_VERTICAL | wxRIGHT, FromDIP(5));
         runRow->Add(activeRunChoice_, 0,
                     wxALIGN_CENTER_VERTICAL | wxRIGHT, FromDIP(6));
@@ -256,13 +289,17 @@ public:
                     wxALIGN_CENTER_VERTICAL | wxRIGHT, FromDIP(6));
         runRow->Add(removeRunButton_, 0,
                     wxALIGN_CENTER_VERTICAL | wxRIGHT, FromDIP(6));
-        runRow->Add(timeline_, 1,
+        advancedLayout->Add(runRow, 0, wxEXPAND);
+        advanced->SetSizer(advancedLayout);
+        auto* timelineRow = new wxBoxSizer(wxHORIZONTAL);
+        timelineRow->Add(timeline_, 1,
                     wxALIGN_CENTER_VERTICAL | wxRIGHT, FromDIP(6));
-        runRow->Add(timeLabel_, 0, wxALIGN_CENTER_VERTICAL);
+        timelineRow->Add(timeLabel_, 0, wxALIGN_CENTER_VERTICAL);
 
         auto* playbackLayout = new wxBoxSizer(wxVERTICAL);
         playbackLayout->Add(clipRow, 0, wxEXPAND | wxALL, FromDIP(5));
-        playbackLayout->Add(runRow, 0, wxEXPAND | wxLEFT | wxRIGHT | wxBOTTOM, FromDIP(5));
+        playbackLayout->Add(timelineRow, 0, wxEXPAND | wxLEFT | wxRIGHT | wxBOTTOM, FromDIP(5));
+        playbackLayout->Add(advancedAnimation_, 0, wxEXPAND | wxLEFT | wxRIGHT | wxBOTTOM, FromDIP(5));
         playback->SetSizer(playbackLayout);
         playback->SetScrollRate(FromDIP(10), FromDIP(10));
 
@@ -273,28 +310,59 @@ public:
         tree_ = new wxTreeCtrl(inspector, wxID_ANY, wxDefaultPosition, wxDefaultSize,
                                wxTR_HAS_BUTTONS | wxTR_LINES_AT_ROOT | wxTR_SINGLE |
                                    wxTR_HIDE_ROOT);
-        details_ = new wxTextCtrl(inspector, wxID_ANY, wxEmptyString, wxDefaultPosition,
+        auto* detailsPanel = new wxPanel(inspector);
+        auto* detailsLayout = new wxBoxSizer(wxVERTICAL);
+        detailedDiagnostics_ = new wxCheckBox(detailsPanel, wxID_ANY, "Detailed diagnostics");
+        details_ = new wxTextCtrl(detailsPanel, wxID_ANY, wxEmptyString, wxDefaultPosition,
                                   wxDefaultSize, wxTE_MULTILINE | wxTE_READONLY | wxTE_RICH2);
+        detailsLayout->Add(detailedDiagnostics_, 0, wxALL, FromDIP(5));
+        detailsLayout->Add(details_, 1, wxEXPAND);
+        detailsPanel->SetSizer(detailsLayout);
+        const neosettings::AppSettings layoutSettings("NeoMDL");
         inspector->SetMinimumPaneSize(FromDIP(80));
-        inspector->SplitHorizontally(tree_, details_, FromDIP(compact ? 220 : 320));
+        inspector->SplitHorizontally(tree_, detailsPanel,
+            FromDIP(static_cast<int>(layoutSettings.readDouble("Layout/TreeHeight", compact ? 220 : 320))));
         inspector->SetSashGravity(0.6);
 
         canvas_ = new ModelCanvas(splitter_);
         canvas_->setDocument(document_.get());
         canvas_->setOptions(options);
         splitter_->SetMinimumPaneSize(FromDIP(160));
-        splitter_->SplitVertically(inspector, canvas_, FromDIP(compact ? 220 : 300));
+        splitter_->SplitVertically(inspector, canvas_,
+            FromDIP(static_cast<int>(layoutSettings.readDouble("Layout/InspectorWidth", compact ? 220 : 300))));
         splitter_->SetSashGravity(0.0);
         preview->SetMinimumPaneSize(FromDIP(60));
-        preview->SplitHorizontally(playback, splitter_, playback->GetBestSize().y);
+        preview->SplitHorizontally(playback, splitter_, FromDIP(static_cast<int>(
+            layoutSettings.readDouble("Layout/PlaybackHeight", ToDIP(playback->GetBestSize().y)))));
         preview->SetSashGravity(0.0);
+        const auto rememberPane = [this](wxSplitterWindow* pane, const char* key) {
+            pane->Bind(wxEVT_SPLITTER_SASH_POS_CHANGED, [this, key](wxSplitterEvent& event) {
+                neosettings::AppSettings("NeoMDL").writeDouble(key, ToDIP(event.GetSashPosition()));
+                event.StopPropagation();
+                event.Skip();
+            });
+        };
+        rememberPane(preview, "Layout/PlaybackHeight");
+        rememberPane(splitter_, "Layout/InspectorWidth");
+        rememberPane(inspector, "Layout/TreeHeight");
         auto* layout = new wxBoxSizer(wxVERTICAL);
         layout->Add(preview, 1, wxEXPAND);
         SetSizer(layout);
 
+        updatePreviewFeatures();
         populateTree();
         updateDetails(std::nullopt);
         updateAnimationControls();
+        detailedDiagnostics_->Bind(wxEVT_CHECKBOX, [this](wxCommandEvent&) {
+            updateDetails(selectedNode_);
+        });
+        advancedAnimation_->Bind(wxEVT_COLLAPSIBLEPANE_CHANGED,
+            [this, playback, preview](wxCollapsiblePaneEvent& event) {
+                if (event.GetCollapsed()) previewSelectedAnimation();
+                playback->FitInside();
+                preview->SetSashPosition(playback->GetBestSize().y);
+                updateAnimationControls();
+            });
         tree_->Bind(wxEVT_TREE_SEL_CHANGED, [this](wxTreeEvent& event) {
             auto* data = dynamic_cast<NodeItemData*>(tree_->GetItemData(event.GetItem()));
             selectedNode_ = data ? std::optional<std::size_t>(data->index) : std::nullopt;
@@ -303,6 +371,7 @@ public:
             event.Skip();
         });
         animationChoice_->Bind(wxEVT_CHOICE, [this](wxCommandEvent&) {
+            if (advancedAnimation_->IsCollapsed()) previewSelectedAnimation();
             updateAnimationControls();
             updateDetails(selectedNode_);
         });
@@ -395,6 +464,8 @@ public:
     }
 
     const ModelDocument& document() const noexcept { return *document_; }
+    const RenderOptions& options() const noexcept { return canvas_->options(); }
+    unsigned previewFeatures() const noexcept { return previewFeatures_; }
     ModelDocument& document() noexcept { return *document_; }
     void setResourceSession(std::shared_ptr<GameResourceSession> session) {resourceSession_=std::move(session);}
     ResourceResolver voiceResolver() const {
@@ -424,6 +495,7 @@ public:
     AreaScene prepareAreaLoad() { return canvas_->prepareAreaLoad(); }
     void installArea(AreaScene pending,PreparedSceneAudioPlayback sounds={}) {
         canvas_->installArea(std::move(pending),std::move(sounds));
+        updatePreviewFeatures();
     }
     void configureSceneAudio(std::optional<ExoRandom::State> state) {canvas_->configureSceneAudio(state);}
 
@@ -445,7 +517,7 @@ public:
     std::string engineExecutionReport() const {return canvas_->engineExecutionReport();}
     void setSceneShadowInputs(SceneShadowInputs inputs) {canvas_->setSceneShadowInputs(std::move(inputs));}
     void setSceneCasterEnabled(LightOwnerId owner,bool enabled) {canvas_->setSceneCasterEnabled(owner,enabled);}
-    void clearArea() { canvas_->clearArea(); }
+    void clearArea() { canvas_->clearArea(); updatePreviewFeatures(); }
     const AreaScene& areaScene() const noexcept { return canvas_->areaScene(); }
     void setAreaRoom(std::optional<LightRoomId> id) { canvas_->setAreaRoom(id); }
     void useReplayedAreaRoom() {canvas_->useReplayedAreaRoom();}
@@ -675,28 +747,70 @@ private:
         activeRunChoice_->Enable(!runChoiceIds_.empty());
     }
 
+    void updatePreviewFeatures() {
+        previewFeatures_ = canvas_->areaScene().empty() ? 0u : PreviewArea;
+        const auto scanModel = [this](const model::Model& asset) {
+            for (const auto& node : asset.nodes) {
+                if (node.emitter) previewFeatures_ |= PreviewParticles;
+                if (node.lightsaber) previewFeatures_ |= PreviewLightsabers;
+                if (node.camera) previewFeatures_ |= PreviewCameras;
+                if (node.light) previewFeatures_ |= PreviewLights;
+            }
+            for (const auto& mesh : asset.meshes)
+                if (mesh.dangly) previewFeatures_ |= PreviewDangly;
+        };
+        const auto scanDocument = [&](const ModelDocument& document) {
+            if (!document.references().empty()) previewFeatures_ |= PreviewReferences;
+            const auto scanAsset = [&](const model::Model& asset) {
+                scanModel(asset);
+                for (const auto& node : asset.nodes)
+                    if (node.emitter && !node.emitter->chunkName.empty())
+                        if (const auto* chunk = document.chunkModel(node.emitter->chunkName)) {
+                            scanModel(chunk->model());
+                            for (const auto& reference : chunk->references()) scanModel(reference.model);
+                        }
+            };
+            scanAsset(document.model());
+            for (const auto& reference : document.references()) scanAsset(reference.model);
+        };
+        scanDocument(*document_);
+        for (const auto& object : canvas_->areaScene().objects())
+            scanDocument(*object->document());
+        if (hasCameraHook() || !canvas_->cameraScene().areaCameras().empty()) previewFeatures_ |= PreviewCameras;
+    }
+
+    void previewSelectedAnimation() {
+        const bool resume = playing_;
+        canvas_->clearAnimationRuns();
+        stopPlayback();
+        eventLog_.clear();
+        if (startAnimationRun() && resume) startPlayback();
+        updateDetails(selectedNode_);
+    }
+
     bool startAnimationRun() {
         const auto animation = selectedAnimation();
         if (!animation) return false;
 
-        std::uint32_t flags = 0u;
+        const bool advanced = advancedAnimation_->IsExpanded();
+        std::uint32_t flags = advanced ? 0u : neomdl::model::kAnimationRunImmediate;
         if (!loopCheck_->GetValue())
             flags |= neomdl::model::kAnimationRunNonLooping;
-        if (immediateCheck_->GetValue())
+        if (advanced && immediateCheck_->GetValue())
             flags |= neomdl::model::kAnimationRunImmediate;
-        if (synchronizeCheck_->GetValue())
+        if (advanced && synchronizeCheck_->GetValue())
             flags |= neomdl::model::kAnimationRunSynchronizeTime;
-        if (allowDuplicateCheck_->GetValue())
+        if (advanced && allowDuplicateCheck_->GetValue())
             flags |= neomdl::model::kAnimationRunAllowDuplicate;
-        if (reportLoopCheck_->GetValue())
+        if (advanced && reportLoopCheck_->GetValue())
             flags |= neomdl::model::kAnimationRunReportLoop;
 
         const bool engineRuntime = neomdl::model::engineAnimationRuntimeSupported(
             document_->model().game);
         if (engineRuntime) {
-            if (runModeChoice_->GetSelection() == 1)
+            if (advanced && runModeChoice_->GetSelection() == 1)
                 flags |= neomdl::model::kAnimationRunQueued;
-            else if (runModeChoice_->GetSelection() == 2)
+            else if (advanced && runModeChoice_->GetSelection() == 2)
                 flags |= neomdl::model::kAnimationRunOverlay;
         } else {
             // Keep an immediate-run fallback for unsupported model types.
@@ -819,12 +933,13 @@ private:
             if (!run->outOfOrder()) loopCheck_->SetValue(run->looping());
             std::ostringstream label;
             label << std::fixed << std::setprecision(3)
-                  << time << " / " << length << " s  w "
-                  << std::setprecision(2) << run->weight;
+                  << time << " / " << length << " s";
+            if (advancedAnimation_->IsExpanded())
+                label << "  weight " << std::setprecision(2) << run->weight;
             timeLabel_->SetLabel(wxui::toWx(label.str()));
         } else {
             timeline_->SetValue(0);
-            timeLabel_->SetLabel("No active run");
+            timeLabel_->SetLabel("Bind pose");
         }
 
         if (playing_ && !hasRuns) playing_ = false;
@@ -872,6 +987,39 @@ private:
     }
 
     void updateDetails(std::optional<std::size_t> selected) {
+        if (detailedDiagnostics_->GetValue()) {
+            updateDetailedDiagnostics(selected);
+        } else {
+            std::ostringstream text;
+            if (selected) {
+                const auto& node = document_->model().nodes[*selected];
+                text << node.name << "\n" << model::nodeFlagsText(node.flags) << "\n\n"
+                     << "Position: " << node.position.x << ", " << node.position.y << ", " << node.position.z << "\n";
+                if (node.mesh) {
+                    const auto& mesh = document_->model().meshes[*node.mesh];
+                    text << "Vertices: " << mesh.vertices.size() << "\n"
+                         << "Triangles: " << (mesh.animated ? mesh.faces.size() : mesh.indices.size() / 3u) << "\n"
+                         << "Texture: " << (mesh.texture0.empty() ? "(none)" : mesh.texture0) << "\n"
+                         << "Secondary texture: " << (mesh.texture1.empty() ? "(none)" : mesh.texture1) << "\n"
+                         << "Render flag: " << (mesh.render ? "on" : "off") << "\n";
+                }
+                text << "\n";
+            }
+            text << model::modelSummary(document_->model()) << "\n"
+                 << "Textures: " << document_->loadedTextureCount() << "\n"
+                 << "Animations: " << document_->animations().size() << "\n";
+            if (const auto animation = selectedAnimation()) {
+                const auto& clip = document_->animation(*animation);
+                text << "\nSelected animation: " << clip.name << "\nLength: " << clip.length << " s\n"
+                     << "Source: " << document_->animationModel(*animation).name << "\n";
+            }
+            if (!document_->messages().empty())
+                text << "\n" << document_->messages().size() << " load note(s); see Detailed diagnostics.\n";
+            details_->ChangeValue(wxui::toWx(text.str()));
+        }
+    }
+
+    void updateDetailedDiagnostics(std::optional<std::size_t> selected) {
         std::ostringstream text;
         text << neomdl::model::modelSummary(document_->model()) << "\n";
         if (document_->model().game == neomdl::model::GameVersion::Kotor2) {
@@ -1408,10 +1556,13 @@ private:
     }
 
     std::unique_ptr<ModelDocument> document_;
+    unsigned previewFeatures_{};
     wxSplitterWindow* splitter_{};
     wxTreeCtrl* tree_{};
     wxTextCtrl* details_{};
+    wxCheckBox* detailedDiagnostics_{};
     ModelCanvas* canvas_{};
+    wxCollapsiblePane* advancedAnimation_{};
     wxChoice* animationChoice_{};
     wxChoice* runModeChoice_{};
     wxSpinCtrlDouble* rateSpin_{};
@@ -2166,45 +2317,52 @@ private:
         if(resetTime->GetValue())page->resetWorldTime();
     }
 
-    void chooseAreaEnvironment() {
+    void chooseAreaEnvironment() { chooseAreaReplay(false); }
+
+    void chooseAreaReplay(bool developer = true) {
         auto* page=activePage();
         if(!page||page->areaScene().empty())return;
+        auto options=page->options();
         const auto& area=page->areaScene();
         const auto& environment=area.environment();
         auto replay=environment.replay();
-        wxDialog dialog(this,wxID_ANY,"Area Environment / Camera Replay",wxDefaultPosition,
+        wxDialog dialog(this,wxID_ANY,developer ? "Area Camera Replay" : "Area Environment",wxDefaultPosition,
                         wxDefaultSize,wxDEFAULT_DIALOG_STYLE|wxRESIZE_BORDER);
         auto* root=new wxBoxSizer(wxVERTICAL);
         root->Add(new wxStaticText(&dialog,wxID_ANY,
-            "ARE day/night tuples color the scoped gidy_sun light model and fog state.\n"
-            "Room selection follows the camera's WOK query unless a manual or replay room is selected."),
+            "Lighting and fog for the current area preview."),
             0,wxEXPAND|wxALL,10);
-        auto* useEnvironment=new wxCheckBox(&dialog,wxID_ANY,"Use loaded area environment instead of manual fog/ambient overrides");
-        useEnvironment->SetValue(options_.useLoadedAreaEnvironment);root->Add(useEnvironment,0,wxLEFT|wxRIGHT|wxBOTTOM,10);
+        auto* useEnvironment=new wxCheckBox(&dialog,wxID_ANY,"Use the area's lighting and fog");
+        useEnvironment->SetValue(options.useLoadedAreaEnvironment);root->Add(useEnvironment,0,wxLEFT|wxRIGHT|wxBOTTOM,10);
         auto* useCamera=new wxCheckBox(&dialog,wxID_ANY,"Use replay camera when active (authored model camera retains priority)");
-        useCamera->SetValue(options_.useAreaReplayCamera);root->Add(useCamera,0,wxLEFT|wxRIGHT|wxBOTTOM,10);
+        useCamera->SetValue(options.useAreaReplayCamera);root->Add(useCamera,0,wxLEFT|wxRIGHT|wxBOTTOM,10);
         auto* followScene=new wxCheckBox(&dialog,wxID_ANY,"Use replay camera position as the shadow fade/scene anchor");
-        followScene->SetValue(options_.shadowScenePositionFromAreaCamera);root->Add(followScene,0,wxLEFT|wxRIGHT|wxBOTTOM,10);
+        followScene->SetValue(options.shadowScenePositionFromAreaCamera);root->Add(followScene,0,wxLEFT|wxRIGHT|wxBOTTOM,10);
         auto* followCasters=new wxCheckBox(&dialog,wxID_ANY,"Use replay camera position as the shadow caster-region anchor");
-        followCasters->SetValue(options_.shadowCasterRegionFromAreaCamera);root->Add(followCasters,0,wxLEFT|wxRIGHT|wxBOTTOM,10);
+        followCasters->SetValue(options.shadowCasterRegionFromAreaCamera);root->Add(followCasters,0,wxLEFT|wxRIGHT|wxBOTTOM,10);
 
+        root->Show(useCamera,developer);
+        root->Show(followScene,developer);
+        root->Show(followCasters,developer);
         auto* grid=new wxFlexGridSizer(2,6,10);grid->AddGrowableCol(1,1);
         const auto add=[&](const char* label,wxWindow* control) {
             grid->Add(new wxStaticText(&dialog,wxID_ANY,label),0,wxALIGN_CENTER_VERTICAL);
             grid->Add(control,1,wxEXPAND);
         };
         auto* phase=new wxChoice(&dialog,wxID_ANY);
-        for(const auto* label:{"Module clock / authored endpoint","Day","Night","Dawn (night to day)","Dusk (day to night)"})phase->Append(label);
+        for(const auto* label:{"From area","Day","Night","Dawn","Dusk"})phase->Append(label);
         if(!replay.phase)phase->SetSelection(0);
         else phase->SetSelection(*replay.phase==AreaTimeOfDay::Day?1:*replay.phase==AreaTimeOfDay::Night?2:
                                  *replay.phase==AreaTimeOfDay::Dawn?3:4);
-        add("Time-of-day state",phase);
+        add("Time of day",phase);
         auto* transition=new wxSpinCtrlDouble(&dialog,wxID_ANY,wxEmptyString,wxDefaultPosition,wxDefaultSize,
-            wxSP_ARROW_KEYS,0.0,1.0,replay.transition,0.01);transition->SetDigits(3);add("Dawn/dusk transition",transition);
-        auto* fogOverride=new wxChoice(&dialog,wxID_ANY);fogOverride->Append("Authored endpoint");fogOverride->Append("Force disabled");fogOverride->Append("Force enabled");
-        fogOverride->SetSelection(!replay.fogEnabled?0:*replay.fogEnabled?2:1);add("Fog enable state",fogOverride);
-        auto* shadowOverride=new wxChoice(&dialog,wxID_ANY);shadowOverride->Append("Authored endpoint");shadowOverride->Append("Force disabled");shadowOverride->Append("Force enabled");
-        shadowOverride->SetSelection(!replay.shadowsEnabled?0:*replay.shadowsEnabled?2:1);add("Shadow enable state",shadowOverride);
+            wxSP_ARROW_KEYS,0.0,1.0,replay.transition,0.01);transition->SetDigits(3);add("Dawn/dusk progress",transition);
+        auto* fogOverride=new wxChoice(&dialog,wxID_ANY);fogOverride->Append("From area");fogOverride->Append("Off");fogOverride->Append("On");
+        fogOverride->SetSelection(!replay.fogEnabled?0:*replay.fogEnabled?2:1);add("Fog",fogOverride);
+        auto* shadowOverride=new wxChoice(&dialog,wxID_ANY);shadowOverride->Append("From area");shadowOverride->Append("Off");shadowOverride->Append("On");
+        shadowOverride->SetSelection(!replay.shadowsEnabled?0:*replay.shadowsEnabled?2:1);add("Shadows",shadowOverride);
+        root->Add(grid,0,wxEXPAND|wxLEFT|wxRIGHT,10);
+        grid=new wxFlexGridSizer(2,6,10);grid->AddGrowableCol(1,1);
         auto* forceBright=new wxCheckBox(&dialog,wxID_ANY,"Set diffuse to black and global ambient to white");
         forceBright->SetValue(replay.forceBrightSunAndMoon);add("Engine ForceBrightSunAndMoon",forceBright);
 
@@ -2236,20 +2394,21 @@ private:
         cameraRoom->SetSelection(roomSelection(camera.currentRoom));add("Camera-supplied room",cameraRoom);
         auto* clearReplay=new wxCheckBox(&dialog,wxID_ANY,"Clear all explicit environment/camera replay state");add("Reset",clearReplay);
         root->Add(grid,1,wxEXPAND|wxLEFT|wxRIGHT,10);
-        root->Add(new wxStaticText(&dialog,wxID_ANY,
+        root->Show(grid,developer);
+        if(developer)root->Add(new wxStaticText(&dialog,wxID_ANY,
             "This dialog edits camera position only. Existing replay orientation is retained; a new camera uses identity orientation.\n"
             "The core API accepts the complete rigid camera transform for captured traces."),0,wxEXPAND|wxALL,10);
         root->Add(dialog.CreateButtonSizer(wxOK|wxCANCEL),0,wxEXPAND|wxALL,10);
         dialog.SetSizerAndFit(root);
         while(dialog.ShowModal()==wxID_OK) {
-            options_.useLoadedAreaEnvironment=useEnvironment->GetValue();
-            options_.useAreaReplayCamera=useCamera->GetValue();
-            options_.shadowScenePositionFromAreaCamera=followScene->GetValue();
-            options_.shadowCasterRegionFromAreaCamera=followCasters->GetValue();
+            options.useLoadedAreaEnvironment=useEnvironment->GetValue();
+            options.useAreaReplayCamera=useCamera->GetValue();
+            options.shadowScenePositionFromAreaCamera=followScene->GetValue();
+            options.shadowCasterRegionFromAreaCamera=followCasters->GetValue();
             if(clearReplay->GetValue()) {
                 page->clearAreaEnvironmentReplay();
                 if(followReplayRoom->GetValue())page->useReplayedAreaRoom();
-                applyOptions();break;
+                applyPreviewOptions(options);break;
             }
             AreaEnvironmentReplayState state;
             switch(phase->GetSelection()) {
@@ -2279,7 +2438,7 @@ private:
                 wxMessageBox(wxui::toWx(error),"Area replay not applied",wxOK|wxICON_WARNING,&dialog);continue;
             }
             if(followReplayRoom->GetValue())page->useReplayedAreaRoom();
-            applyOptions();break;
+            applyPreviewOptions(options);break;
         }
     }
 
@@ -3125,27 +3284,6 @@ private:
             openFile(neosettings::pathFromWx(dialog.GetPath()));
     }
 
-    void showExportOptions() {
-        wxDialog dialog(this,wxID_ANY,"Export Options");
-        auto* root=new wxBoxSizer(wxVERTICAL);
-        root->Add(new wxStaticText(&dialog,wxID_ANY,"ASCII mesh normals"),0,wxALL,10);
-        wxArrayString modes;
-        modes.Add("Automatic");modes.Add("Smoothing groups");
-        modes.Add("Explicit normals (NeoMDL extension)");
-        modes.Add("Smoothing groups (adjust position rounding)");
-        auto* choice=new wxChoice(&dialog,wxID_ANY,wxDefaultPosition,wxDefaultSize,modes);
-        choice->SetSelection(asciiNormalMode_);root->Add(choice,0,wxEXPAND|wxLEFT|wxRIGHT,10);
-        auto* note=new wxStaticText(&dialog,wxID_ANY,
-            "Automatic uses smoothing groups for binary models and preserves existing ASCII mesh modes.\n\n"
-            "Explicit normals preserve current normals and may need recalculation after geometry edits.\n"
-            "Adjust position rounding allows selected coordinates to move by one float step to improve shading.\n\n"
-            "These options apply to subsequent exports in this session. Packed exports use the document's game version.");
-        note->Wrap(dialog.FromDIP(560));root->Add(note,0,wxALL,10);
-        root->Add(dialog.CreateButtonSizer(wxOK|wxCANCEL),0,wxEXPAND|wxALL,10);
-        dialog.SetSizerAndFit(root);
-        if(dialog.ShowModal()==wxID_OK)asciiNormalMode_=choice->GetSelection();
-    }
-
     void exportAsciiModel() {
         auto* page=activePage();
         if(!page || !page->document().hasModelOwner()) return;
@@ -3154,10 +3292,13 @@ private:
         auto stem=document.path().stem();
         if(stem.empty()) stem=std::filesystem::u8path(document.model().name);
         const auto filename=neoshared::pathToUtf8(stem)+"-ascii.mdl";
+        AsciiExportControls controls(asciiNormalMode_);
         wxFileDialog file(this,"Export ASCII MDL",neosettings::pathToWx(document.path().parent_path()),
             wxui::toWx(filename),"ASCII models (*.mdl)|*.mdl|All files (*.*)|*.*",
             wxFD_SAVE|wxFD_OVERWRITE_PROMPT);
+        file.SetCustomizeHook(controls);
         if(file.ShowModal()!=wxID_OK) return;
+        asciiNormalMode_=controls.normalMode;
         model::AsciiExportOptions options;
         if(asciiNormalMode_!=0 || !document.model().asciiBuilt)options.explicitNormals=asciiNormalMode_==2;
         options.refineTangentRounding=asciiNormalMode_==3;
@@ -3196,8 +3337,8 @@ private:
         const auto& document=page->document();
         auto protectedInputs=document.openPaths();
         const auto filename=neoshared::pathToUtf8(document.path().stem())+"-packed.mdl";
-        wxFileDialog file(this,"Export packed MDL/MDX",neosettings::pathToWx(document.path().parent_path()),
-            wxui::toWx(filename),"Packed models (*.mdl)|*.mdl",
+        wxFileDialog file(this,"Export Binary MDL/MDX",neosettings::pathToWx(document.path().parent_path()),
+            wxui::toWx(filename),"Binary models (*.mdl)|*.mdl",
             wxFD_SAVE|wxFD_OVERWRITE_PROMPT);
         if(file.ShowModal()!=wxID_OK) return;
         try {
@@ -3208,7 +3349,7 @@ private:
             neoshared::checkResourceOutput(companion,protectedInputs);
             if(std::filesystem::exists(companion) && wxMessageBox(
                     "Replace the companion file "+wxui::toWx(neoshared::pathToUtf8(companion))+"?",
-                    "Export packed MDL/MDX",wxYES_NO|wxNO_DEFAULT|wxICON_QUESTION,this)!=wxYES) return;
+                    "Export Binary MDL/MDX",wxYES_NO|wxNO_DEFAULT|wxICON_QUESTION,this)!=wxYES) return;
             model::PackedExportResult exported;
             if(!runJob("Compiling packed model",[&](const neoshared::bif::JobControl& job) {
                 job.check();
@@ -3218,9 +3359,9 @@ private:
             })) return;
             neoshared::texture::writeFileBytes(companion,exported.mdx);
             neoshared::texture::writeFileBytes(output,exported.mdl);
-            setModuleStatusText("Packed MDL/MDX exported to "+wxui::toWx(neoshared::pathToUtf8(output)),0);
+            setModuleStatusText("Binary MDL/MDX exported to "+wxui::toWx(neoshared::pathToUtf8(output)),0);
         } catch(const std::exception& error) {
-            wxMessageBox(wxui::toWx(error.what()),"Packed model not exported",wxOK|wxICON_ERROR,this);
+            wxMessageBox(wxui::toWx(error.what()),"Binary model not exported",wxOK|wxICON_ERROR,this);
         }
     }
 
@@ -3279,12 +3420,57 @@ private:
         updateState();
     }
 
-    void applyOptions() {
+    static void copyDisplayOptions(RenderOptions& target, const RenderOptions& source) {
+        for (auto member : {&RenderOptions::textures, &RenderOptions::lightmaps, &RenderOptions::wireframe,
+                &RenderOptions::lighting, &RenderOptions::showHidden, &RenderOptions::cullBackfaces,
+                &RenderOptions::danglySimulation, &RenderOptions::nodeHelpers, &RenderOptions::previewLights,
+                &RenderOptions::fogEnabled, &RenderOptions::previewEmitters, &RenderOptions::showCameras,
+                &RenderOptions::showReferences, &RenderOptions::previewLightsabers,
+                &RenderOptions::previewAabbs, &RenderOptions::previewTriggers})
+            target.*member = source.*member;
+        for (auto member : {&RenderOptions::grid, &RenderOptions::axes, &RenderOptions::headlight})
+            target.*member = source.*member;
+    }
+
+    static void copyHardwareOptions(RenderOptions& target, const RenderOptions& source) {
+        target.engineHardware = source.engineHardware;
+        target.engineUseVertexPrograms = source.engineUseVertexPrograms;
+        target.gobNewSorting = source.gobNewSorting;
+        target.procedureMipPath = source.procedureMipPath;
+    }
+
+    void applyDisplayOptions() {
         for (std::size_t index = 0; index < tabs_->GetPageCount(); ++index) {
-            pageAt(index)->setOptions(options_);
-            pageAt(index)->refreshDetails();
+            auto* page = pageAt(index);
+            auto options = page->options();
+            copyDisplayOptions(options, options_);
+            page->setOptions(options);
+            page->refreshDetails();
         }
         updateMenuChecks();
+    }
+
+    void applyPreviewOptions(const RenderOptions& options) {
+        activePage()->setOptions(options);
+        activePage()->refreshDetails();
+        updateMenuChecks();
+    }
+
+    template<class T>
+    void setPreviewOption(T RenderOptions::*member, T value) {
+        auto options = activePage()->options();
+        options.*member = value;
+        applyPreviewOptions(options);
+    }
+
+    void applyHardwareOptions() {
+        for (std::size_t index = 0; index < tabs_->GetPageCount(); ++index) {
+            auto* page = pageAt(index);
+            auto options = page->options();
+            copyHardwareOptions(options, options_);
+            page->setOptions(options);
+            page->refreshDetails();
+        }
     }
 
     void buildMenus() {
@@ -3303,8 +3489,7 @@ private:
         file->Append(ID_ModuleArea, "Load Module Area...");
         file->AppendSeparator();
         file->Append(ID_ExportAscii, "Export &ASCII MDL...");
-        file->Append(ID_ExportPacked, "Export &Packed MDL/MDX...");
-        file->Append(ID_ExportOptions, "Export Options...");
+        file->Append(ID_ExportPacked, "Export &Binary MDL/MDX...");
         file->AppendSeparator();
         file->Append(ID_CloseModel, "&Close Model\tCtrl+W");
         file->Append(ID_CloseAll, "Close &All");
@@ -3316,12 +3501,17 @@ private:
         bar->Append(viewMenu_, "&View");
         sceneMenu_ = new wxMenu;
         bar->Append(sceneMenu_, "&Scene");
-        buildPreviewMenus(false);
+        buildPreviewMenus(0u);
 
         auto* tools = new wxMenu;
         tools->Append(ID_ResourceProvenance, "Resource Scope and Load Report...");
-        tools->Append(ID_AdvancedSettings, "Advanced / Diagnostics...");
         bar->Append(tools, "&Tools");
+
+        developerMenu_ = new wxMenu;
+        developerMenu_->Append(ID_EngineGraphics, "Hardware Emulation...");
+        developerMenu_->Append(ID_DeveloperSettings, "Rendering Diagnostics...");
+        developerMenu_->Append(ID_EngineReport, "Save Rendering Report...");
+        bar->Append(developerMenu_, "&Developer");
 
         helpMenu_ = new wxMenu;
         helpMenu_->Append(ID_About, "&About NeoMDL");
@@ -3330,22 +3520,25 @@ private:
         updateMenuChecks();
     }
 
-    void buildPreviewMenus(bool area) {
-        areaMenus_ = area;
+    void buildPreviewMenus(unsigned features) {
+        previewMenuFeatures_ = features;
+        const bool area = (features & PreviewArea) != 0u;
         for (auto* menu : {viewMenu_, sceneMenu_})
             while (menu->GetMenuItemCount() != 0u)
                 menu->Destroy(menu->FindItemByPosition(0));
 
         auto* view = viewMenu_;
         view->Append(ID_FrameModel, "&Frame Model\tF");
-        auto* camera = new wxMenu;
-        camera->Append(ID_ViewSelectedCamera, "View Through Selected Camera");
-        camera->Append(ID_ViewCameraHook, "Attach to Camera Hook");
-        if (area) camera->Append(ID_ViewAreaCamera, "View Through Area Camera...");
-        camera->Append(ID_OrbitCamera, "Return to Orbit Camera");
-        camera->AppendSeparator();
-        camera->Append(ID_CameraSettings, "Projection Settings...");
-        view->AppendSubMenu(camera, "&Camera");
+        if (features & PreviewCameras) {
+            auto* camera = new wxMenu;
+            camera->Append(ID_ViewSelectedCamera, "View Through Selected Camera");
+            camera->Append(ID_ViewCameraHook, "Attach to Camera Hook");
+            if (area) camera->Append(ID_ViewAreaCamera, "View Through Area Camera...");
+            camera->Append(ID_OrbitCamera, "Return to Orbit Camera");
+            camera->AppendSeparator();
+            camera->Append(ID_CameraSettings, "Projection Settings...");
+            view->AppendSubMenu(camera, "&Camera");
+        }
         view->AppendSeparator();
         view->AppendCheckItem(ID_Textures, "Show &Textures");
         view->AppendCheckItem(ID_Lightmaps, "Show &Lightmaps");
@@ -3353,30 +3546,34 @@ private:
         view->AppendCheckItem(ID_CullBackfaces, "Cull &Backfaces");
         view->AppendCheckItem(ID_Lighting, "&Lighting");
         view->AppendCheckItem(ID_Headlight, "Preview Key Light");
-        view->AppendCheckItem(ID_PreviewLights, "Authored Model Lights");
+        if (features & PreviewLights) view->AppendCheckItem(ID_PreviewLights, "Authored Model Lights");
         if (area) view->AppendCheckItem(ID_EngineShadows, "Area Shadows");
         view->AppendCheckItem(ID_Fog, "Show Fog");
         view->Append(ID_LightingSettings, "Lighting and Fog Settings...");
-        view->AppendSeparator();
-        view->AppendCheckItem(ID_ShowReferences, "Referenced Models");
-        view->AppendCheckItem(ID_PreviewEmitters, "Particles");
-        view->AppendCheckItem(ID_PreviewLightsabers, "Lightsabers");
-        view->AppendCheckItem(ID_DanglySimulation, "Simulate &Dangly Meshes");
+        if (features & (PreviewReferences | PreviewParticles | PreviewLightsabers | PreviewDangly))
+            view->AppendSeparator();
+        if (features & PreviewReferences) view->AppendCheckItem(ID_ShowReferences, "Referenced Models");
+        if (features & PreviewParticles) view->AppendCheckItem(ID_PreviewEmitters, "Particles");
+        if (features & PreviewLightsabers) view->AppendCheckItem(ID_PreviewLightsabers, "Lightsabers");
+        if (features & PreviewDangly) view->AppendCheckItem(ID_DanglySimulation, "Simulate &Dangly Meshes");
         view->AppendSeparator();
         view->AppendCheckItem(ID_Grid, "Show &Grid");
         view->AppendCheckItem(ID_Axes, "Show &Axes");
         auto* inspection = new wxMenu;
         inspection->AppendCheckItem(ID_ShowHidden, "Show Meshes with Render Flag Off");
         inspection->AppendCheckItem(ID_NodeHelpers, "Node Helpers");
-        inspection->AppendCheckItem(ID_ShowCameras, "Camera Markers");
+        if (features & PreviewCameras) inspection->AppendCheckItem(ID_ShowCameras, "Camera Markers");
         inspection->AppendCheckItem(ID_PreviewAabbs, "Collision Geometry");
         if (area) inspection->AppendCheckItem(ID_PreviewTriggers, "Trigger Volumes");
         view->AppendSubMenu(inspection, "&Inspection");
         view->AppendSeparator();
-        view->Append(ID_ResetView, "Reset View Settings");
+        view->Append(ID_ResetView, "Reset Current Preview Rendering");
+        view->Append(ID_ResetDisplay, "Reset Shared Display Preferences");
 
         auto* scene = sceneMenu_;
+        scene->Append(ID_AdvancedSettings, "Preview Settings...");
         if (area) {
+            scene->AppendSeparator();
             scene->Append(ID_AreaRoom, "Current Area Room...");
             scene->Append(ID_ClearArea, "Clear Area Context");
             scene->Append(ID_LoadGrass, "Load Grass from ARE...");
@@ -3390,18 +3587,21 @@ private:
             scene->Append(ID_SceneAudio, "Scene Audio...");
             scene->Append(ID_AreaWeather, "Area Weather...");
         }
-        scene->Append(ID_DetonateEmitters, "Detonate Explosion Emitters");
+        if (features & PreviewParticles)
+            scene->Append(ID_DetonateEmitters, "Detonate Explosion Emitters");
     }
 
-    void showAdvancedSettings() {
+    void showAdvancedSettings(bool developer = false) {
         const auto* active=activePage();
+        const auto& options=active->options();
+        const auto features=active->previewFeatures();
         const bool area=!active->areaScene().empty();
         const bool k2=active->document().model().game==model::GameVersion::Kotor2;
-        wxDialog dialog(this,wxID_ANY,"Advanced / Diagnostics",wxDefaultPosition,wxDefaultSize,
+        wxDialog dialog(this,wxID_ANY,developer ? "Rendering Diagnostics" : "Preview Settings",wxDefaultPosition,wxDefaultSize,
                         wxDEFAULT_DIALOG_STYLE|wxRESIZE_BORDER);
         auto* root=new wxBoxSizer(wxVERTICAL);
         root->Add(new wxStaticText(&dialog,wxID_ANY,
-            "Rendering settings for the active preview."),0,wxALL,10);
+            "These settings affect only the current tab. Hardware emulation and shared display preferences apply to all tabs."),0,wxALL,10);
         auto* notebook=new wxNotebook(&dialog,wxID_ANY);
         const auto tab=[&](const char* title) {
             auto* panel=new wxPanel(notebook);
@@ -3419,51 +3619,62 @@ private:
         };
         const auto toggle=[&](wxPanel* panel,const char* label,bool RenderOptions::*member,bool enabled=true) {
             auto* control=new wxCheckBox(panel,wxID_ANY,label);
-            control->SetValue(options_.*member);control->Enable(enabled);
+            control->SetValue(options.*member);control->Enable(enabled);
             control->Bind(wxEVT_CHECKBOX,[this,member](wxCommandEvent& event) {
-                options_.*member=event.IsChecked();applyOptions();
+                setPreviewOption(member,event.IsChecked());
             });
             panel->GetSizer()->Add(control,0,wxALL,8);
         };
         auto* rendering=tab("Rendering");
-        toggle(rendering,"K2 nearest-light object-only mode",&RenderOptions::nearestLightsOnlyGobs,k2&&!area);
-        if (area) {
-            toggle(rendering,"Two-sided shadow stencil",&RenderOptions::engineTwoSidedShadows);
-            rendering->GetSizer()->Add(new wxStaticText(rendering,wxID_ANY,"Shadow rendering"),0,wxLEFT|wxTOP,8);
-            wxArrayString shadows;
-            shadows.Add("Hard shadows");shadows.Add("Soft shadows (ARB)");shadows.Add("Soft shadows (ATI compatibility)");
-            auto* shadow=new wxChoice(rendering,wxID_ANY,wxDefaultPosition,wxDefaultSize,shadows);
-            shadow->SetSelection(!options_.engineSoftShadows?0:
-                options_.engineSoftShadowMode==render::EngineSoftShadowMode::DesktopARB?1:2);
-            shadow->Bind(wxEVT_CHOICE,[this,shadow](wxCommandEvent&) {
-                options_.engineSoftShadows=shadow->GetSelection()!=0;
-                options_.engineSoftShadowMode=shadow->GetSelection()==2
-                    ?render::EngineSoftShadowMode::DesktopATI:render::EngineSoftShadowMode::DesktopARB;
-                applyOptions();
+        if (developer) {
+            toggle(rendering,"K2 nearest-light object-only mode",&RenderOptions::nearestLightsOnlyGobs,k2&&!area);
+            if (area) {
+                toggle(rendering,"Two-sided shadow stencil",&RenderOptions::engineTwoSidedShadows);
+                rendering->GetSizer()->Add(new wxStaticText(rendering,wxID_ANY,"Shadow rendering"),0,wxLEFT|wxTOP,8);
+                wxArrayString shadows;
+                shadows.Add("Hard shadows");shadows.Add("Soft shadows (ARB)");shadows.Add("Soft shadows (ATI compatibility)");
+                auto* shadow=new wxChoice(rendering,wxID_ANY,wxDefaultPosition,wxDefaultSize,shadows);
+                shadow->SetSelection(!options.engineSoftShadows?0:
+                    options.engineSoftShadowMode==render::EngineSoftShadowMode::DesktopARB?1:2);
+                shadow->Bind(wxEVT_CHOICE,[this,shadow](wxCommandEvent&) {
+                    auto options=activePage()->options();
+                    options.engineSoftShadows=shadow->GetSelection()!=0;
+                    options.engineSoftShadowMode=shadow->GetSelection()==2
+                        ?render::EngineSoftShadowMode::DesktopATI:render::EngineSoftShadowMode::DesktopARB;
+                    applyPreviewOptions(options);
+                });
+                rendering->GetSizer()->Add(shadow,0,wxEXPAND|wxALL,8);
+                toggle(rendering,"Inspect mesh projection volumes",&RenderOptions::inspectMeshProjections,k2);
+            }
+            rendering->GetSizer()->Add(new wxStaticText(rendering,wxID_ANY,"Object light-query radius"),0,wxLEFT|wxTOP,8);
+            auto* radius=new wxSpinCtrlDouble(rendering,wxID_ANY,wxEmptyString,wxDefaultPosition,wxDefaultSize,
+                wxSP_ARROW_KEYS,0,1000000,options.objectLightRadius,0.1);
+            radius->SetDigits(4);
+            radius->SetToolTip("External Gob +0x164 state. The engine constructor initializes it to 1; this is not the mesh AABB radius.");
+            radius->Bind(wxEVT_SPINCTRLDOUBLE,[this](wxSpinDoubleEvent& event) {
+                setPreviewOption(&RenderOptions::objectLightRadius,static_cast<float>(event.GetValue()));
             });
-            rendering->GetSizer()->Add(shadow,0,wxEXPAND|wxALL,8);
-            toggle(rendering,"Inspect mesh projection volumes",&RenderOptions::inspectMeshProjections,k2);
+            rendering->GetSizer()->Add(radius,0,wxEXPAND|wxALL,8);
+        } else {
+            action(rendering,"Lighting and Fog...",&ModelEditorPanelImpl::showLightingSettings);
+            if (features & PreviewCameras)
+                action(rendering,"Camera Projection...",&ModelEditorPanelImpl::showCameraSettings);
+            if (features & PreviewLightsabers)
+                action(rendering,"Lightsaber Rendering...",&ModelEditorPanelImpl::showLightsaberSettings);
+            if (features & (PreviewParticles | PreviewDangly))
+                action(rendering,features & PreviewParticles ? "Particle and Wind Settings..." : "Wind Settings...",
+                    &ModelEditorPanelImpl::showParticleSettings);
         }
-        rendering->GetSizer()->Add(new wxStaticText(rendering,wxID_ANY,"Object light-query radius"),0,wxLEFT|wxTOP,8);
-        auto* radius=new wxSpinCtrlDouble(rendering,wxID_ANY,wxEmptyString,wxDefaultPosition,wxDefaultSize,
-            wxSP_ARROW_KEYS,0,1000000,options_.objectLightRadius,0.1);
-        radius->SetDigits(4);
-        radius->SetToolTip("External Gob +0x164 state. The engine constructor initializes it to 1; this is not the mesh AABB radius.");
-        radius->Bind(wxEVT_SPINCTRLDOUBLE,[this](wxSpinDoubleEvent& event) {
-            options_.objectLightRadius=static_cast<float>(event.GetValue());applyOptions();
-        });
-        rendering->GetSizer()->Add(radius,0,wxEXPAND|wxALL,8);
-        action(rendering,"Lightsaber Rendering...",&ModelEditorPanelImpl::showLightsaberSettings);
-        action(rendering,"Particle Settings...",&ModelEditorPanelImpl::showParticleSettings);
-        action(rendering,"Graphics and Texture Uploads...",&ModelEditorPanelImpl::showEngineExecution);
-        action(rendering,"Save Engine Execution Report...",&ModelEditorPanelImpl::saveEngineExecutionReport);
 
         if (area) {
             auto* scene=tab("Scene");
-            action(scene,"Area Environment / Camera Replay...",&ModelEditorPanelImpl::chooseAreaEnvironment);
-            action(scene,"Shadow Inputs...",&ModelEditorPanelImpl::chooseSceneShadows);
-            action(scene,"Shadow Casters...",&ModelEditorPanelImpl::chooseShadowCasters);
-            action(scene,"Grass Settings...",&ModelEditorPanelImpl::chooseGrassOptions);
+            if (developer) {
+                action(scene,"Shadow Inputs...",&ModelEditorPanelImpl::chooseSceneShadows);
+                action(scene,"Shadow Casters...",&ModelEditorPanelImpl::chooseShadowCasters);
+            } else {
+                action(scene,"Area Environment...",&ModelEditorPanelImpl::chooseAreaEnvironment);
+                action(scene,"Grass Settings...",&ModelEditorPanelImpl::chooseGrassOptions);
+            }
         }
         root->Add(notebook,1,wxEXPAND|wxLEFT|wxRIGHT,10);
         root->Add(new wxButton(&dialog,wxID_OK,"Close"),0,wxALIGN_RIGHT|wxALL,10);
@@ -3491,7 +3702,7 @@ private:
         setCheck(ID_DanglySimulation, options_.danglySimulation);
         setCheck(ID_NodeHelpers, options_.nodeHelpers);
         setCheck(ID_PreviewLights, options_.previewLights);
-        setCheck(ID_EngineShadows, options_.engineShadows.value_or(active && active->areaScene().currentRoom().has_value()));
+        setCheck(ID_EngineShadows, active && active->options().engineShadows.value_or(active->areaScene().currentRoom().has_value()));
         setCheck(ID_PreviewEmitters, options_.previewEmitters);
         setCheck(ID_ShowCameras, options_.showCameras);
         setCheck(ID_ShowReferences, options_.showReferences);
@@ -3560,7 +3771,7 @@ private:
         if(!page->setTriggerClientVisualState(index,state)) {
             wxMessageBox("The selected trigger is no longer available.","GIT Trigger Visual State",wxOK|wxICON_ERROR,this);return;
         }
-        if(state.displayEnabled&&!options_.previewTriggers) {options_.previewTriggers=true;applyOptions();}
+        if(state.displayEnabled&&!options_.previewTriggers) {options_.previewTriggers=true;applyDisplayOptions();}
         updateState();
     }
 
@@ -3891,13 +4102,12 @@ private:
     }
 
     void showCameraSettings() {
+        auto options=activePage()->options();
         wxDialog dialog(this, wxID_ANY, "Authored Camera Projection");
         auto* root = new wxBoxSizer(wxVERTICAL);
         root->Add(new wxStaticText(&dialog, wxID_ANY,
-            "The camera node has no private FOV field or controller.\n"
-            "These values belong to the external CAurCamera attached to the model part.\n"
-            "SetAnimatedCamera uses 0.1 / 10000 clipping; the Camera default FOV is 45 degrees.\n"
-            "Loaded GIT CameraList views use their authored FOV and these explicit near/far clips."),
+            "Camera projection for this tab. Area cameras retain their authored FOV;\n"
+            "the near and far clipping distances apply to all authored-camera views."),
             0, wxALL, 10);
 
         auto* grid = new wxFlexGridSizer(2, 6, 10);
@@ -3910,19 +4120,19 @@ private:
 
         auto* fov = new wxSpinCtrlDouble(
             &dialog, wxID_ANY, wxEmptyString, wxDefaultPosition, wxSize(160, -1),
-            wxSP_ARROW_KEYS, 1.0, 179.0, options_.cameraSettings.viewAngle, 1.0);
+            wxSP_ARROW_KEYS, 1.0, 179.0, options.cameraSettings.viewAngle, 1.0);
         fov->SetDigits(2);
         add("Vertical FOV (degrees)", fov);
 
         auto* nearClip = new wxSpinCtrlDouble(
             &dialog, wxID_ANY, wxEmptyString, wxDefaultPosition, wxSize(160, -1),
-            wxSP_ARROW_KEYS, 0.0001, 1000000.0, options_.cameraSettings.nearClip, 0.1);
+            wxSP_ARROW_KEYS, 0.0001, 1000000.0, options.cameraSettings.nearClip, 0.1);
         nearClip->SetDigits(4);
         add("Near clip", nearClip);
 
         auto* farClip = new wxSpinCtrlDouble(
             &dialog, wxID_ANY, wxEmptyString, wxDefaultPosition, wxSize(160, -1),
-            wxSP_ARROW_KEYS, 0.001, 100000000.0, options_.cameraSettings.farClip, 100.0);
+            wxSP_ARROW_KEYS, 0.001, 100000000.0, options.cameraSettings.farClip, 100.0);
         farClip->SetDigits(3);
         add("Far clip", farClip);
 
@@ -3948,24 +4158,26 @@ private:
                     "Invalid camera projection", wxOK | wxICON_WARNING, &dialog);
                 continue;
             }
-            options_.cameraSettings = settings;
-            applyOptions();
+            options.cameraSettings = settings;
+            applyPreviewOptions(options);
             break;
         }
     }
 
     void showParticleSettings() {
-        wxDialog dialog(this,wxID_ANY,"Particle Scene Settings");
+        auto options=activePage()->options();
+        const bool particles=(activePage()->previewFeatures() & PreviewParticles)!=0u;
+        wxDialog dialog(this,wxID_ANY,particles ? "Particle and Wind Settings" : "Wind Settings");
         auto* root=new wxBoxSizer(wxVERTICAL);
         root->Add(new wxStaticText(&dialog,wxID_ANY,
-            "Preview-world inputs, not changes to the MDL. All targeted emitters use this target.\n"
-            "Wind uses the KOTOR II scene WindManager; particles and DanglyMesh share each sample."),0,wxALL,10);
+            "Preview settings for this tab.\n"
+            "Wind affects both particles and dangly meshes. The MDL file is unchanged."),0,wxALL,10);
         auto* grid=new wxFlexGridSizer(2,6,10);grid->AddGrowableCol(1,1);
         const auto add=[&](const char* label,wxWindow* c) {
             grid->Add(new wxStaticText(&dialog,wxID_ANY,label),0,wxALIGN_CENTER_VERTICAL);
             grid->Add(c,1,wxEXPAND);
         };
-        auto settings=options_.particleSettings;
+        auto settings=options.particleSettings;
         auto* target=new wxCheckBox(&dialog,wxID_ANY,"Enable point-to-point target");
         target->SetValue(settings.targetEnabled);add("Target",target);
         auto* node=new wxTextCtrl(&dialog,wxID_ANY,wxui::toWx(settings.targetNode));add("Target node (optional)",node);
@@ -3983,12 +4195,14 @@ private:
         const auto position=vector("World target X / Y / Z",{p.x,p.y,p.z});
         const auto rotation=settings.targetOrientation;
         const auto orientation=vector("Target quaternion X / Y / Z / W",{rotation.x,rotation.y,rotation.z,rotation.w});
+        root->Add(grid,0,wxEXPAND|wxLEFT|wxRIGHT,10);root->Show(grid,particles);
+        grid=new wxFlexGridSizer(2,6,10);grid->AddGrowableCol(1,1);
         auto* windPreset=new wxChoice(&dialog,wxID_ANY);
         windPreset->Append("Custom");
-        windPreset->Append("K2 area wind 0 (none)");
-        windPreset->Append("K2 area wind 1 (light)");
-        windPreset->Append("K2 area wind 2 (strong)");
-        windPreset->SetSelection(0);add("Area wind preset",windPreset);
+        windPreset->Append("K2 wind: none");
+        windPreset->Append("K2 wind: light");
+        windPreset->Append("K2 wind: strong");
+        windPreset->SetSelection(0);add("Wind preset",windPreset);
         const auto wind=vector("Global wind X / Y / Z",{q.x,q.y,q.z});
         const auto windDeviation=vector("Maximum deviation Z / X (degrees)",
             {settings.windMaximumDeviationZDegrees,settings.windMaximumDeviationXDegrees});
@@ -4017,10 +4231,14 @@ private:
             windDeviation[0]->SetValue(preset->maximumDeviationZDegrees);
             windDeviation[1]->SetValue(preset->maximumDeviationXDegrees);
         });
+        root->Add(grid,0,wxEXPAND|wxLEFT|wxRIGHT,10);
+        grid=new wxFlexGridSizer(2,6,10);grid->AddGrowableCol(1,1);
         const auto tint=settings.objectTint;
         const auto objectTint=vector("Object tint R / G / B",{tint.x,tint.y,tint.z});
         const auto objectAlpha=vector("Object alpha",{settings.objectAlpha});
-        const auto tileAlpha=vector("Resolved tile alpha",{settings.tileAlpha});
+        const bool area=!activePage()->areaScene().empty();
+        std::vector<wxSpinCtrlDouble*> tileAlpha;
+        if(area)tileAlpha=vector("Tile opacity",{settings.tileAlpha});
         auto* blast=new wxCheckBox(&dialog,wxID_ANY,"Enable explosion point-source winds");
         blast->SetValue(settings.blastWind);add("Blast wind",blast);
         auto* bounce=new wxChoice(&dialog,wxID_ANY);
@@ -4036,7 +4254,8 @@ private:
         node->Bind(wxEVT_TEXT,[refresh](wxCommandEvent&){refresh();});
         refresh();
         root->Add(grid,0,wxEXPAND|wxLEFT|wxRIGHT,10);
-        root->Add(new wxStaticText(&dialog,wxID_ANY,"Applying changed settings resets particles and replays the current animation time."),0,wxALL,10);
+        root->Show(grid,particles);
+        root->Add(new wxStaticText(&dialog,wxID_ANY,"Applying changes updates the preview at the current animation time."),0,wxALL,10);
         root->Add(dialog.CreateButtonSizer(wxOK|wxCANCEL),0,wxEXPAND|wxALL,10);dialog.SetSizerAndFit(root);
         while(dialog.ShowModal()==wxID_OK) {
             const auto value=[](wxSpinCtrlDouble* c){return static_cast<float>(c->GetValue());};
@@ -4048,17 +4267,19 @@ private:
             settings.windMaximumDeviationXDegrees=value(windDeviation[1]);
             settings.windInterpolationPeriod=value(windPeriod[0]);
             settings.objectTint={value(objectTint[0]),value(objectTint[1]),value(objectTint[2])};
-            settings.objectAlpha=value(objectAlpha[0]);settings.tileAlpha=value(tileAlpha[0]);
+            settings.objectAlpha=value(objectAlpha[0]);
+            if(area)settings.tileAlpha=value(tileAlpha[0]);
             settings.blastWind=blast->GetValue();
             settings.bounceMode=bounce->GetSelection()==1?neomdl::model::ParticleBounceMode::Reflection:neomdl::model::ParticleBounceMode::Legacy;
             if(!validParticleSceneSettings(settings)) {
                 wxMessageBox("Use finite values, a positive wind interpolation period, and a nonzero quaternion.","Invalid particle settings",wxOK|wxICON_WARNING,&dialog);continue;
             }
-            options_.particleSettings=settings;applyOptions();break;
+            options.particleSettings=settings;applyPreviewOptions(options);break;
         }
     }
 
     void showLightsaberSettings() {
+        auto options=activePage()->options();
         wxDialog dialog(this, wxID_ANY, "Lightsaber Render Settings");
         auto* root = new wxBoxSizer(wxVERTICAL);
         root->Add(new wxStaticText(&dialog, wxID_ANY,
@@ -4066,7 +4287,7 @@ private:
             "The engine bucket keeps owner insertion order and renders after particle emitters."),
             0, wxALL, 10);
 
-        auto settings = options_.lightsaberSettings;
+        auto settings = options.lightsaberSettings;
         auto* additive = new wxCheckBox(&dialog, wxID_ANY,
             "Additive blur (GL_ONE, GL_ONE; no depth writes)");
         additive->SetValue(settings.additiveBlur);
@@ -4102,8 +4323,8 @@ private:
         settings.wireframe = wireframe->GetValue();
         settings.renderPieces = pieces->GetValue();
         settings.renderFrontHalf = front->GetValue();
-        options_.lightsaberSettings = settings;
-        applyOptions();
+        options.lightsaberSettings = settings;
+        applyPreviewOptions(options);
     }
 
     void showRuntimeTextureRotation() {
@@ -4180,10 +4401,10 @@ private:
     }
     void showEngineExecution() {
         if(!activePage())return;
-        wxDialog dialog(this,wxID_ANY,"Engine graphics");
+        wxDialog dialog(this,wxID_ANY,"Hardware Emulation");
         auto* box=new wxBoxSizer(wxVERTICAL);
         box->Add(new wxStaticText(&dialog,wxID_ANY,
-            "Changing upload capabilities resets context-owned textures and controller history."),0,wxALL,10);
+            "Hardware emulation applies to all tabs and newly opened models. Changes reload preview textures."),0,wxALL,10);
         auto* ati=new wxCheckBox(&dialog,wxID_ANY,"Use ATI fragment shaders (engine capability setting)");
         ati->SetValue((options_.engineHardware.useAtiFragmentShaders&1)!=0);box->Add(ati,0,wxEXPAND|wxALL,10);
         auto* skinVp=new wxCheckBox(&dialog,wxID_ANY,"Use engine skin vertex programs when available");
@@ -4210,11 +4431,11 @@ private:
         if(nv->GetValue())options_.engineHardware.existingExtensions|=nvBits;
         options_.gobNewSorting=newSorting->GetValue();
         options_.procedureMipPath=static_cast<render::ProcedureMipPath>(mip->GetSelection());
-        try {applyOptions();}
+        try {applyHardwareOptions();}
         catch(const std::exception& error) {
             options_=previous;
             std::string diagnostic=error.what();
-            try {applyOptions();}
+            try {applyHardwareOptions();}
             catch(const std::exception& rollback) {diagnostic+="\nCould not restore every tab: ";diagnostic+=rollback.what();}
             wxMessageBox(wxui::toWx(diagnostic),"Engine graphics",wxOK|wxICON_ERROR,this);
         }
@@ -4527,6 +4748,7 @@ private:
     }
 
     void showK2SkinSettings() {
+        auto options=activePage()->options();
         wxDialog dialog(this, wxID_ANY, "Manual Skin Blur Diagnostic");
         auto* root = new wxBoxSizer(wxVERTICAL);
         root->Add(new wxStaticText(&dialog, wxID_ANY,
@@ -4535,7 +4757,7 @@ private:
             "Bumped-out shells are configured per owner in Owner Visual Effects."),
             0, wxALL, 10);
 
-        auto settings = options_.skinSettings;
+        auto settings = options.skinSettings;
         auto* blur = new wxCheckBox(&dialog, wxID_ANY,
             "Preview translation motion blur");
         blur->SetValue(settings.motionBlur);
@@ -4626,13 +4848,14 @@ private:
                     "Invalid Skin Settings", wxOK | wxICON_WARNING, &dialog);
                 continue;
             }
-            options_.skinSettings = settings;
-            applyOptions();
+            options.skinSettings = settings;
+            applyPreviewOptions(options);
             break;
         }
     }
 
     void showLightingSettings() {
+        auto options=activePage()->options();
         wxDialog dialog(this,wxID_ANY,"Scene Lighting and Fog");
         auto* root=new wxBoxSizer(wxVERTICAL);
         auto* note=new wxStaticText(&dialog,wxID_ANY,
@@ -4650,27 +4873,27 @@ private:
                 static_cast<unsigned char>(std::clamp(g,0.0f,1.0f)*255),
                 static_cast<unsigned char>(std::clamp(b,0.0f,1.0f)*255));
         };
-        auto* ambient=new wxColourPickerCtrl(&dialog,wxID_ANY,toColor(options_.sceneAmbient[0],options_.sceneAmbient[1],options_.sceneAmbient[2]));
+        auto* ambient=new wxColourPickerCtrl(&dialog,wxID_ANY,toColor(options.sceneAmbient[0],options.sceneAmbient[1],options.sceneAmbient[2]));
         add("Scene ambient",ambient);
         auto* mode=new wxChoice(&dialog,wxID_ANY);
         for(const auto* name:{"Disabled","Linear","Exponential","Exponential squared"}) mode->Append(name);
-        mode->SetSelection(static_cast<int>(options_.fog.mode));add("Fog mode",mode);
-        auto* color=new wxColourPickerCtrl(&dialog,wxID_ANY,toColor(options_.fog.color.x,options_.fog.color.y,options_.fog.color.z));
+        mode->SetSelection(static_cast<int>(options.fog.mode));add("Fog mode",mode);
+        auto* color=new wxColourPickerCtrl(&dialog,wxID_ANY,toColor(options.fog.color.x,options.fog.color.y,options.fog.color.z));
         add("Fog color",color);
         const auto number=[&](double value,double min,double max,double increment) {
             auto* control=new wxSpinCtrlDouble(&dialog,wxID_ANY,wxEmptyString,wxDefaultPosition,wxDefaultSize,
                 wxSP_ARROW_KEYS,min,max,value,increment);control->SetDigits(4);return control;
         };
-        auto* start=number(options_.fog.start,0,1000000,1);add("Linear fog start",start);
-        auto* end=number(options_.fog.end,0.001,1000001,1);add("Linear fog end",end);
-        auto* density=number(options_.fog.density,0,1000,0.005);add("Exponential density",density);
+        auto* start=number(options.fog.start,0,1000000,1);add("Linear fog start",start);
+        auto* end=number(options.fog.end,0.001,1000001,1);add("Linear fog end",end);
+        auto* density=number(options.fog.density,0,1000,0.005);add("Exponential density",density);
         auto* respect=new wxCheckBox(&dialog,wxID_ANY,"Respect each model's fog flag");
-        respect->SetValue(options_.fog.respectModelFlag);add("Fog eligibility",respect);
+        respect->SetValue(options.fog.respectModelFlag);add("Fog eligibility",respect);
         root->Add(grid,1,wxEXPAND|wxLEFT|wxRIGHT|wxBOTTOM,10);
         root->Add(dialog.CreateButtonSizer(wxOK|wxCANCEL),0,wxEXPAND|wxALL,10);
         dialog.SetSizerAndFit(root);
         while(dialog.ShowModal()==wxID_OK) {
-            auto fog=options_.fog;
+            auto fog=options.fog;
             fog.mode=static_cast<neomdl::model::FogMode>(mode->GetSelection());
             fog.start=static_cast<float>(start->GetValue());fog.end=static_cast<float>(end->GetValue());
             fog.density=static_cast<float>(density->GetValue());fog.respectModelFlag=respect->GetValue();
@@ -4679,9 +4902,9 @@ private:
                 wxMessageBox("Fog values must be finite and nonnegative.","Invalid fog",wxOK|wxICON_WARNING,&dialog);
                 continue;
             }
-            options_.fog=fog;const auto a=ambient->GetColour();
-            options_.sceneAmbient={{a.Red()/255.0f,a.Green()/255.0f,a.Blue()/255.0f}};
-            applyOptions();break;
+            options.fog=fog;const auto a=ambient->GetColour();
+            options.sceneAmbient={{a.Red()/255.0f,a.Green()/255.0f,a.Blue()/255.0f}};
+            applyPreviewOptions(options);break;
         }
     }
 
@@ -4702,9 +4925,16 @@ private:
             case ID_Open: chooseAndOpenModel(); return;
             case ID_ExportAscii: exportAsciiModel(); return;
             case ID_ExportPacked: exportPackedModel(); return;
-            case ID_ExportOptions: showExportOptions(); return;
             case ID_AdvancedSettings: showAdvancedSettings(); return;
-            case ID_ResetView: options_=RenderOptions{};applyOptions();return;
+            case ID_DeveloperSettings: showAdvancedSettings(true); return;
+            case ID_EngineGraphics: showEngineExecution(); return;
+            case ID_EngineReport: saveEngineExecutionReport(); return;
+            case ID_AreaReplay: chooseAreaReplay(); return;
+            case ID_ResetView:
+                activePage()->clearAreaEnvironmentReplay();
+                applyPreviewOptions(options_);
+                return;
+            case ID_ResetDisplay: copyDisplayOptions(options_,RenderOptions{});applyDisplayOptions();return;
             case ID_LoadArea: chooseArea(); return;
             case ID_ModuleArea: chooseModuleArea(); return;
             case ID_ResourceProvenance: showResourceProvenance(); return;
@@ -4722,32 +4952,32 @@ private:
             case ID_CloseModel: closePage(tabs_->GetSelection()); return;
             case ID_CloseAll: closeAll(); return;
             case ID_FrameModel: if (auto* page = activePage()) page->frameModel(); return;
-            case ID_Textures: options_.textures = event.IsChecked(); applyOptions(); return;
-            case ID_Lightmaps: options_.lightmaps = event.IsChecked(); applyOptions(); return;
-            case ID_Wireframe: options_.wireframe = event.IsChecked(); applyOptions(); return;
-            case ID_Lighting: options_.lighting = event.IsChecked(); applyOptions(); return;
-            case ID_Headlight: options_.headlight=event.IsChecked();applyOptions();return;
+            case ID_Textures: options_.textures = event.IsChecked(); applyDisplayOptions(); return;
+            case ID_Lightmaps: options_.lightmaps = event.IsChecked(); applyDisplayOptions(); return;
+            case ID_Wireframe: options_.wireframe = event.IsChecked(); applyDisplayOptions(); return;
+            case ID_Lighting: options_.lighting = event.IsChecked(); applyDisplayOptions(); return;
+            case ID_Headlight: options_.headlight=event.IsChecked();applyDisplayOptions();return;
             case ID_Fog:
                 options_.fogEnabled=event.IsChecked();
-                applyOptions();return;
+                applyDisplayOptions();return;
             case ID_LightingSettings: showLightingSettings();return;
-            case ID_Grid: options_.grid = event.IsChecked(); applyOptions(); return;
-            case ID_Axes: options_.axes = event.IsChecked(); applyOptions(); return;
-            case ID_ShowHidden: options_.showHidden = event.IsChecked(); applyOptions(); return;
-            case ID_CullBackfaces: options_.cullBackfaces = event.IsChecked(); applyOptions(); return;
+            case ID_Grid: options_.grid = event.IsChecked(); applyDisplayOptions(); return;
+            case ID_Axes: options_.axes = event.IsChecked(); applyDisplayOptions(); return;
+            case ID_ShowHidden: options_.showHidden = event.IsChecked(); applyDisplayOptions(); return;
+            case ID_CullBackfaces: options_.cullBackfaces = event.IsChecked(); applyDisplayOptions(); return;
             case ID_DanglySimulation:
-                options_.danglySimulation = event.IsChecked(); applyOptions(); return;
+                options_.danglySimulation = event.IsChecked(); applyDisplayOptions(); return;
             case ID_NodeHelpers:
-                options_.nodeHelpers = event.IsChecked(); applyOptions(); return;
+                options_.nodeHelpers = event.IsChecked(); applyDisplayOptions(); return;
             case ID_EngineShadows:
-                options_.engineShadows = event.IsChecked(); applyOptions(); return;
+                setPreviewOption(&RenderOptions::engineShadows,std::optional<bool>{event.IsChecked()}); return;
             case ID_PreviewLights:
-                options_.previewLights = event.IsChecked(); applyOptions(); return;
+                options_.previewLights = event.IsChecked(); applyDisplayOptions(); return;
             case ID_DetonateEmitters: if(auto* page=activePage()) page->detonateEmitters();return;
             case ID_PreviewEmitters:
-                options_.previewEmitters = event.IsChecked(); applyOptions(); return;
+                options_.previewEmitters = event.IsChecked(); applyDisplayOptions(); return;
             case ID_ShowCameras:
-                options_.showCameras = event.IsChecked(); applyOptions(); return;
+                options_.showCameras = event.IsChecked(); applyDisplayOptions(); return;
             case ID_ViewSelectedCamera:
                 if (auto* page = activePage();
                     !page || !page->viewThroughSelectedCamera()) {
@@ -4773,13 +5003,13 @@ private:
                 return;
             case ID_CameraSettings: showCameraSettings(); return;
             case ID_ShowReferences:
-                options_.showReferences = event.IsChecked(); applyOptions(); return;
+                options_.showReferences = event.IsChecked(); applyDisplayOptions(); return;
             case ID_PreviewLightsabers:
-                options_.previewLightsabers = event.IsChecked(); applyOptions(); return;
+                options_.previewLightsabers = event.IsChecked(); applyDisplayOptions(); return;
             case ID_PreviewAabbs:
-                options_.previewAabbs = event.IsChecked(); applyOptions(); return;
+                options_.previewAabbs = event.IsChecked(); applyDisplayOptions(); return;
             case ID_PreviewTriggers:
-                options_.previewTriggers = event.IsChecked(); applyOptions(); return;
+                options_.previewTriggers = event.IsChecked(); applyDisplayOptions(); return;
             case ID_About:
                 wxMessageBox("NeoMDL is a model viewer and ASCII / binary MDL converter for Knights of the Old Republic I and II.\n\nInspect geometry, materials, animations, particles, lightsabers and area layouts. Model dependencies resolve through the model directory, the active resource session or a discovered game installation.",
                              "About NeoMDL", wxOK | wxICON_INFORMATION, this);
@@ -4798,7 +5028,12 @@ private:
         const auto* active = activePage();
         const bool hasDocument = active != nullptr;
         const bool area = active && !active->areaScene().empty();
-        if (area != areaMenus_) buildPreviewMenus(area);
+        const unsigned features = active ? active->previewFeatures() : 0u;
+        if (features != previewMenuFeatures_) buildPreviewMenus(features);
+        if (area && !developerMenu_->FindItem(ID_AreaReplay))
+            developerMenu_->Append(ID_AreaReplay, "Area Camera Replay...");
+        else if (!area && developerMenu_->FindItem(ID_AreaReplay))
+            developerMenu_->Destroy(ID_AreaReplay);
         enableModuleCommand(ID_ExportAscii,activePage()&&activePage()->document().hasModelOwner());
         enableModuleCommand(ID_ExportPacked,activePage()&&activePage()->document().hasModelOwner()&&
             activePage()->document().model().asciiBuilt);
@@ -4823,6 +5058,11 @@ private:
         enableModuleCommand(ID_DoorState,active&&std::any_of(active->areaScene().objects().begin(),
             active->areaScene().objects().end(),[](const auto& object){return object->kind()==AreaObjectKind::Door;}));
         enableModuleCommand(ID_AdvancedSettings,engineScene);
+        enableModuleCommand(ID_DeveloperSettings,engineScene);
+        enableModuleCommand(ID_EngineGraphics,engineScene);
+        enableModuleCommand(ID_EngineReport,engineScene);
+        enableModuleCommand(ID_ResetView,hasDocument);
+        enableModuleCommand(ID_LightingSettings,hasDocument);
         enableModuleCommand(ID_EngineShadows,active&&active->areaScene().currentRoom().has_value());
         enableModuleCommand(ID_ViewSelectedCamera,
                             active && active->canViewThroughSelectedCamera());
@@ -4857,7 +5097,8 @@ private:
     wxMenu* fileMenu_{};
     wxMenu* viewMenu_{};
     wxMenu* sceneMenu_{};
-    bool areaMenus_{};
+    wxMenu* developerMenu_{};
+    unsigned previewMenuFeatures_{};
     wxMenu* helpMenu_{};
     std::unique_ptr<neogames::OpenGameDirectoryMenu> gameDirectoryMenu_;
     std::map<std::string, std::shared_ptr<GameResourceSession>> installationSessions_;
