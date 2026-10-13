@@ -236,7 +236,8 @@ void materialFields(Writer& out,const Model& model,const Node& node,const Mesh& 
     }
 }
 
-MeshReconstruction reconstructMesh(Writer& out,const Node& node,const Mesh& mesh,bool refine=true) {
+MeshReconstruction reconstructMesh(Writer& out,const Node& node,const Mesh& mesh,
+                                   bool refine=true,bool finalNormals=true) {
     auto vertices=sourceVertices(mesh,node,out);
     const auto* animation=node.animmesh?&*node.animmesh:nullptr;
     if(animation && (mesh.mdxBitmap&2u)==0u)
@@ -361,13 +362,13 @@ MeshReconstruction reconstructMesh(Writer& out,const Node& node,const Mesh& mesh
             candidate=reconstructSmoothing(mesh,vertices,topology.sourceVertices,topology.sourceFaces,out.job(),nullptr,refine);
         else candidate.masks.assign(mesh.faces.size(),animation?1u:0u);
         const auto candidateSphereError=sphereError(mesh,vertices,topology);
-        // Source identity is not retained uniquely. A point-join candidate
-        // must improve a stored result without worsening the other one.
-        // Explicit normals are independent of these source-position joins.
-        if(i==0u || ((explicitNormals || candidate.squaredNormalError<=reconstructed.squaredNormalError) &&
-                     candidateSphereError<=selectedSphereError &&
-                     ((!explicitNormals && candidate.squaredNormalError<reconstructed.squaredNormalError) ||
-                      candidateSphereError<selectedSphereError))) {
+        // Prefer final normals over the source-duplication-dependent sphere.
+        // Skin-seam precursors still need both scores preserved: a closer
+        // local normal fit need not improve the final seam output.
+        if(i==0u || (!explicitNormals && candidate.squaredNormalError<reconstructed.squaredNormalError &&
+                    (finalNormals || candidateSphereError<=selectedSphereError)) ||
+           ((explicitNormals || candidate.squaredNormalError==reconstructed.squaredNormalError) &&
+            candidateSphereError<selectedSphereError)) {
             selected=i;
             selectedSphereError=candidateSphereError;
             reconstructed=std::move(candidate);
@@ -2261,7 +2262,7 @@ void reconstructSkinSeamSmoothing(Writer& out,const Model& model) {
         Plans result;
         for(const auto& mesh:model.meshes) {
             const auto& node=model.nodes[mesh.nodeIndex];
-            if(!node.lightsaber) result.emplace(&mesh,reconstructMesh(out,node,mesh,refine));
+            if(!node.lightsaber) result.emplace(&mesh,reconstructMesh(out,node,mesh,refine,false));
         }
         return result;
     };
