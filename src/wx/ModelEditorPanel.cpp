@@ -84,6 +84,8 @@ namespace {
 
 enum CommandId {
     ID_Open = wxID_HIGHEST + 23600,
+    ID_Reload,
+    ID_ModelResources,
     ID_ExportAscii,
     ID_ExportPacked,
     ID_AdvancedSettings,
@@ -103,6 +105,8 @@ enum CommandId {
     ID_DoorState,
     ID_AreaWeather,
     ID_SceneAudio,
+    ID_AreaWeatherInputs,
+    ID_SceneAudioInputs,
     ID_LoadGrass,
     ID_CloseModel,
     ID_CloseAll,
@@ -359,8 +363,7 @@ public:
             updateDetails(selectedNode_);
         });
         advancedAnimation_->Bind(wxEVT_COLLAPSIBLEPANE_CHANGED,
-            [this, playback, preview](wxCollapsiblePaneEvent& event) {
-                if (event.GetCollapsed()) previewSelectedAnimation();
+            [this, playback, preview](wxCollapsiblePaneEvent&) {
                 playback->FitInside();
                 preview->SetSashPosition(playback->GetBestSize().y);
                 updateAnimationControls();
@@ -473,11 +476,20 @@ public:
     const RenderOptions& options() const noexcept { return canvas_->options(); }
     unsigned previewFeatures() const noexcept { return previewFeatures_; }
     ModelDocument& document() noexcept { return *document_; }
-    void setResourceSession(std::shared_ptr<GameResourceSession> session) {resourceSession_=std::move(session);}
+    void setResourceSession(std::shared_ptr<GameResourceSession> session) {
+        resourceSession_=std::move(session);
+        updateDetails(selectedNode_);
+    }
+    const char* sourceFormat() const {
+        if (!document_->hasModelOwner()) return "Area scene";
+        return document_->sourceModel().asciiBuilt ? "ASCII MDL" : "Binary MDL/MDX";
+    }
     ResourceResolver voiceResolver() const {
         return resourceSession_?resourceSession_->voiceResolver():ResourceResolver{};
     }
     const std::shared_ptr<GameResourceSession>& resourceSession() const {return resourceSession_;}
+    void setFileResources(ResourceResolver resolver) { fileResources_ = std::move(resolver); }
+    const ResourceResolver& fileResources() const { return fileResources_; }
     void setOptions(const RenderOptions& options) {
         canvas_->setOptions(options);
         updateAnimationControls();
@@ -566,9 +578,12 @@ public:
     void chooseDialogueReply(std::size_t reply) {canvas_->chooseDialogueReply(reply);}
     const DialogueRuntime& dialogue() const noexcept {return canvas_->dialogue();}
     void configureWeather(PreparedWeatherPlayback prepared,WeatherFrameInput input,bool camera,
-                          std::optional<std::uint8_t> command) {canvas_->configureWeather(std::move(prepared),input,camera,command);}
+                          std::optional<std::uint8_t> command,bool viewerPosition) {
+        canvas_->configureWeather(std::move(prepared),input,camera,command,viewerPosition);
+    }
     const WeatherFrameInput& weatherInputs() const noexcept {return canvas_->weatherInputs();}
     bool weatherUsesViewerCamera() const noexcept {return canvas_->weatherUsesViewerCamera();}
+    bool weatherUsesViewerPosition() const noexcept {return canvas_->weatherUsesViewerPosition();}
     float weatherShadowAlpha() const noexcept {return canvas_->weatherShadowAlpha();}
     std::optional<std::size_t> applyCreatureAppearance(std::size_t instance,
         const CreatureAppearanceState& state,std::string& error) {
@@ -604,6 +619,7 @@ public:
         return canvas_->authoredCameraActive();
     }
     bool freeFlyCameraActive() const noexcept { return canvas_->freeFlyCameraActive(); }
+    float freeFlySpeed() const noexcept { return canvas_->freeFlySpeed(); }
     const CameraScene& cameraScene() const noexcept {return canvas_->cameraScene();}
     const TriggerScene& triggerScene() const noexcept {return canvas_->triggerScene();}
     TriggerMinePreviewInputs triggerMineInputs(std::size_t source) const {return canvas_->triggerMineInputs(source);}
@@ -1012,8 +1028,16 @@ private:
                 text << "\n";
             }
             text << model::modelSummary(document_->model()) << "\n"
+                 << "Format: " << sourceFormat() << "\n"
                  << "Textures: " << document_->loadedTextureCount() << "\n"
                  << "Animations: " << document_->animations().size() << "\n";
+            if (resourceSession_)
+                text << "Resources from: " << resourceSession_->installation()->displayName << "\n";
+            else if (!document_->path().empty())
+                text << "Resources from: model directory\n"
+                     << "Choose a game installation in Tools > Model Resource Installation.\n";
+            if (document_->hasModelOwner() && !document_->sourceModel().asciiBuilt)
+                text << "To compile: export ASCII, then open the exported model.\n";
             if (const auto animation = selectedAnimation()) {
                 const auto& clip = document_->animation(*animation);
                 text << "\nSelected animation: " << clip.name << "\nLength: " << clip.length << " s\n"
@@ -1027,7 +1051,10 @@ private:
 
     void updateDetailedDiagnostics(std::optional<std::size_t> selected) {
         std::ostringstream text;
-        text << neomdl::model::modelSummary(document_->model()) << "\n";
+        text << neomdl::model::modelSummary(document_->model()) << "\n"
+             << "Format: " << sourceFormat() << "\n";
+        if (resourceSession_)
+            text << "Resources from: " << neoshared::pathToUtf8(resourceSession_->installation()->installPath) << "\n";
         if (document_->model().game == neomdl::model::GameVersion::Kotor2) {
             const auto& seams = document_->model().skinSeams;
             text << "K2 ProcessSkinSeams: "
@@ -1594,6 +1621,7 @@ private:
     bool playing_{};
     unsigned loadingSuspensions_{};
     std::shared_ptr<GameResourceSession> resourceSession_;
+    ResourceResolver fileResources_;
 };
 
 class ModelEditorPanelImpl final : public ModelEditorPanel {
@@ -1606,9 +1634,9 @@ public:
         auto* layout = new wxBoxSizer(wxVERTICAL);
         layout->Add(tabs_, 1, wxEXPAND);
         SetSizer(layout);
-        createModuleStatusBar(2);
-        int widths[] = {-3, -2};
-        moduleStatusBar()->SetStatusWidths(2, widths);
+        createModuleStatusBar(3);
+        int widths[] = {-3, -2, FromDIP(220)};
+        moduleStatusBar()->SetStatusWidths(3, widths);
         buildMenus();
         bindEvents();
         updateState();
@@ -1688,7 +1716,7 @@ public:
             }
 
             if (activateResource(document->identity())) return true;
-            addDocument(std::move(document),installationSession);
+            addDocument(std::move(document),installationSession,combined);
             return true;
         } catch (const neoshared::bif::JobCancelled&) {
             return false;
@@ -1756,6 +1784,58 @@ public:
     }
 
 private:
+    void reloadModel(ResourceResolver resources, std::shared_ptr<GameResourceSession> session) {
+        auto* page = activePage();
+        try {
+            auto document = std::make_unique<ModelDocument>();
+            std::optional<model::GameVersion> game = page->document().model().game;
+            if (!loadModelWithGame("Reloading model", game,
+                [&](const neoshared::bif::JobControl& job, std::optional<model::GameVersion> target) {
+                    document->openFile(page->document().path(), resources, job, target);
+                })) return;
+            addDocument(std::move(document), std::move(session), std::move(resources), page);
+        } catch (const std::exception& error) {
+            wxui::showError(this, error);
+        }
+    }
+
+    void chooseModelResources() {
+        const auto* page = activePage();
+        const auto* definition = neogames::findGame(gameIdForModel(page->document().model().game));
+        auto installs = neogames::resolver().settings().readSaved(*definition);
+        const auto& current = page->resourceSession();
+        if (current) neogames::upsertInstall(installs, *definition, *current->installation());
+        wxArrayString choices;
+        choices.Add("Model directory only");
+        int selected = 0;
+        for (const auto& install : installs) {
+            choices.Add(wxui::toWx(install.displayName + " — " + neoshared::pathToUtf8(install.installPath)));
+            if (current && neoshared::sameResourcePath(install.installPath, current->installation()->installPath))
+                selected = static_cast<int>(choices.size()) - 1;
+        }
+        wxSingleChoiceDialog dialog(this,
+            "Choose resources for this model. Files beside the model take precedence.\n"
+            "Applying reloads the model and resets its preview.\n\n"
+            "Manage installations under File > Open Model from Saved Directory.",
+            "Model Resource Installation", choices);
+        dialog.SetSelection(selected);
+        if (dialog.ShowModal() != wxID_OK) return;
+        try {
+            std::shared_ptr<GameResourceSession> session;
+            if (dialog.GetSelection() != 0) {
+                session = std::make_shared<GameResourceSession>();
+                const auto& install = installs[static_cast<std::size_t>(dialog.GetSelection() - 1)];
+                if (!runJob("Indexing model resources", [&](const neoshared::bif::JobControl& job) {
+                    std::string error;
+                    if (!session->open(install, error, job)) throw std::runtime_error(error);
+                })) return;
+            }
+            reloadModel(session ? session->resolver() : ResourceResolver{}, session);
+        } catch (const std::exception& error) {
+            wxui::showError(this, error);
+        }
+    }
+
     template<class Work>
     bool runJob(const wxString& title, Work work) {
         if (jobRunning_) return false;
@@ -2605,29 +2685,32 @@ private:
         if(!page->setDoorOpenState(instances.at(static_cast<std::size_t>(selected)),static_cast<std::uint8_t>(state),selector->GetValue(),error))
             wxMessageBox(wxui::toWx(error),"Door state not applied",wxOK|wxICON_ERROR,this);
     }
-    void showSceneAudio() {
+    void showSceneAudio(bool developer = false) {
         auto* page=activePage();if(!page)return;
-        wxDialog dialog(this,wxID_ANY,"Scene Audio");auto* box=new wxBoxSizer(wxVERTICAL);
+        wxDialog dialog(this,wxID_ANY,developer ? "Scene Audio Inputs" : "Scene Audio");auto* box=new wxBoxSizer(wxVERTICAL);
         box->Add(new wxStaticText(&dialog,wxID_ANY,wxui::toWx(page->sceneAudioStatus())),0,wxALL,10);
-        wxArrayString commands;commands.Add("Run loaded sound objects");commands.Add("Prepare sound events");commands.Add("Stop scene sounds");
+        wxArrayString commands;commands.Add("Play area sounds");commands.Add("Enable animation sounds");commands.Add("Stop all scene sounds");
         auto* action=new wxChoice(&dialog,wxID_ANY,wxDefaultPosition,wxDefaultSize,commands);action->SetSelection(0);
         box->Add(action,0,wxEXPAND|wxALL,10);
-        std::string stateText;
-        if(const auto state=page->sceneAudioRandomState())for(auto value:*state) {
-            if(!stateText.empty())stateText+=' ';
-            stateText+=std::to_string(value);
+        wxTextCtrl* state = nullptr;
+        if (developer) {
+            std::string stateText;
+            if(const auto captured=page->sceneAudioRandomState())for(auto value:*captured) {
+                if(!stateText.empty())stateText+=' ';
+                stateText+=std::to_string(value);
+            }
+            box->Add(new wxStaticText(&dialog,wxID_ANY,
+                "CExoRand state: four captured unsigned words, after engine construction.\n"
+                "Required for authored interval variation. Leave blank to retain the current state."),0,wxALL,10);
+            state=new wxTextCtrl(&dialog,wxID_ANY,wxui::toWx(stateText),wxDefaultPosition,wxSize(600,-1));
+            box->Add(state,0,wxEXPAND|wxALL,10);
         }
-        box->Add(new wxStaticText(&dialog,wxID_ANY,
-            "CExoRand state: four captured unsigned words, after engine construction.\n"
-            "Required for authored interval variation. Leave blank to retain the current state."),0,wxALL,10);
-        auto* state=new wxTextCtrl(&dialog,wxID_ANY,wxui::toWx(stateText),wxDefaultPosition,wxSize(600,-1));
-        box->Add(state,0,wxEXPAND|wxALL,10);
         box->Add(dialog.CreateButtonSizer(wxOK|wxCANCEL),0,wxALL|wxALIGN_RIGHT,10);dialog.SetSizerAndFit(box);
         if(dialog.ShowModal()!=wxID_OK)return;
         try {
             if(action->GetSelection()==2){page->stopSceneAudio();return;}
             std::optional<ExoRandom::State> captured;
-            if(action->GetSelection()==0&&!state->GetValue().empty()) {
+            if(developer&&action->GetSelection()==0&&!state->GetValue().empty()) {
                 ExoRandom::State words{};std::istringstream text(state->GetValue().ToStdString());
                 for(auto& word:words) {
                     std::uint64_t value{};
@@ -2640,11 +2723,11 @@ private:
             else page->ensureSceneAudioProvider();
         }catch(const std::exception& error){wxui::showError(this,error);}
     }
-    void showAreaWeather() {
+    void showAreaWeather(bool developer = false) {
         auto* page=activePage();if(!page||page->areaScene().empty())return;
         const bool k1=page->areaScene().game()==model::GameVersion::Kotor1;
         const auto current=page->weatherInputs();
-        wxDialog dialog(this,wxID_ANY,"Engine area weather");auto* box=new wxBoxSizer(wxVERTICAL);
+        wxDialog dialog(this,wxID_ANY,developer ? "Area Weather Inputs" : "Area Weather");auto* box=new wxBoxSizer(wxVERTICAL);
         auto* grid=new wxFlexGridSizer(2,6,10);grid->AddGrowableCol(1);
         const auto add=[&](const char* label,wxWindow* control) {
             grid->Add(new wxStaticText(&dialog,wxID_ANY,label),0,wxALIGN_CENTER_VERTICAL);grid->Add(control,1,wxEXPAND);
@@ -2652,41 +2735,63 @@ private:
         const auto check=[&](const char* label,bool value) {
             auto* control=new wxCheckBox(&dialog,wxID_ANY,wxEmptyString);control->SetValue(value);add(label,control);return control;
         };
-        auto* enabled=check("Run engine weather",current.enabled);
-        auto* schedule=check("Run the engine area weather schedule",current.serverSchedule);
-        auto* supplyPlayer=check("Supply player position",bool(current.playerPosition));
-        const auto position=current.playerPosition.value_or(model::Vec3{});
+        auto* enabled=check("Preview weather",current.enabled);
+        auto* schedule=check("Use area weather schedule",current.serverSchedule);
         const auto number=[&](const char* label,float value) {
             auto* field=new wxTextCtrl(&dialog,wxID_ANY,wxString::Format("%.9g",double(value)));add(label,field);return field;
         };
-        auto* x=number("Player world X",position.x);auto* y=number("Player world Y",position.y);auto* z=number("Player world Z",position.z);
-        auto* camera=check("Supply viewer camera as module camera",page->weatherUsesViewerCamera());
-        auto* roomDisabled=check("Player-room weather-disabled result",current.roomWeatherDisabled);
-        auto* thunder=check("Ambient weather sound enabled",current.thunderEnabled);
-        roomDisabled->Enable(!k1);thunder->Enable(!k1);
-        auto* overrideType=new wxSpinCtrl(&dialog,wxID_ANY,wxEmptyString,wxDefaultPosition,wxDefaultSize,wxSP_ARROW_KEYS,0,255,current.serverOverride);
-        add("Captured server override (255 allows scheduling)",overrideType);
-        auto* shadow=number("Engine shadowalpha replay state",page->weatherShadowAlpha());
+        wxCheckBox *supplyPlayer = nullptr, *camera = nullptr, *roomDisabled = nullptr;
+        wxTextCtrl *x = nullptr, *y = nullptr, *z = nullptr, *shadow = nullptr, *sounds = nullptr;
+        wxSpinCtrl* overrideType = nullptr;
+        wxChoice* placement = nullptr;
+        if (developer) {
+            supplyPlayer=check("Supply player position",bool(current.playerPosition));
+            const auto position=current.playerPosition.value_or(model::Vec3{});
+            x=number("Player world X",position.x);y=number("Player world Y",position.y);z=number("Player world Z",position.z);
+            camera=check("Supply viewer camera as module camera",page->weatherUsesViewerCamera());
+            roomDisabled=check("Player-room weather-disabled result",current.roomWeatherDisabled);
+            roomDisabled->Enable(!k1);
+            overrideType=new wxSpinCtrl(&dialog,wxID_ANY,wxEmptyString,wxDefaultPosition,wxDefaultSize,wxSP_ARROW_KEYS,0,255,current.serverOverride);
+            add("Captured server override (255 allows scheduling)",overrideType);
+            shadow=number("Engine shadowalpha replay state",page->weatherShadowAlpha());
+            sounds=new wxTextCtrl(&dialog,wxID_ANY);add("Thunder resource directory (optional)",sounds);sounds->Enable(!k1);
+        } else {
+            placement=new wxChoice(&dialog,wxID_ANY);
+            placement->Append("Viewport camera");placement->Append("Captured positions (Developer)");
+            placement->SetSelection(page->weatherUsesViewerPosition() ? 0 : 1);
+            add("Weather placement",placement);
+        }
+        auto* thunder=check("Play thunder sounds",current.thunderEnabled);thunder->Enable(!k1);
         wxArrayString commands;commands.Add("Keep current transition");commands.Add("Start rain");commands.Add("Start snow");commands.Add("Stop weather");
-        auto* command=new wxChoice(&dialog,wxID_ANY,wxDefaultPosition,wxDefaultSize,commands);command->SetSelection(0);add("Engine command",command);
-        auto* sounds=new wxTextCtrl(&dialog,wxID_ANY);add("Explicit thunder resource directory (optional)",sounds);sounds->Enable(!k1);
+        auto* command=new wxChoice(&dialog,wxID_ANY,wxDefaultPosition,wxDefaultSize,commands);command->SetSelection(0);add("Weather",command);
+        if (!developer) command->Bind(wxEVT_CHOICE,[command,schedule,enabled](wxCommandEvent&) {
+            if (command->GetSelection() != 0) schedule->SetValue(false);
+            if (command->GetSelection() == 1 || command->GetSelection() == 2) enabled->SetValue(true);
+        });
         box->Add(grid,1,wxEXPAND|wxALL,10);
         const auto& state=page->areaScene().weather();
-        box->Add(new wxStaticText(&dialog,wxID_ANY,wxString::Format("Current type %u, density %.6g, transition %u ms.",
-            unsigned(state.currentType()),double(state.density()),unsigned(state.transitionMilliseconds()))),0,wxALL,10);
-        box->Add(new wxStaticText(&dialog,wxID_ANY,
+        const wxString weather = state.currentType() == 0 ? "Clear" : state.currentType() == 1 ? "Rain" : "Snow";
+        box->Add(new wxStaticText(&dialog,wxID_ANY,wxString::Format("Current weather: %s, density %.3g, transition %.3g s.",
+            weather,double(state.density()),double(state.transitionMilliseconds()) / 1000.0)),0,wxALL,10);
+        box->Add(new wxStaticText(&dialog,wxID_ANY,developer ?
             "Player and module-camera inputs are independent. Weather placement requires both.\n"
             "The server override gates scheduling; use the engine command separately to change client weather.\n"
-            "Disabling playback destroys weather Gobs. The engine shadowalpha has no renderer consumer in the engine."),0,wxALL,10);
+            "Applying uses these captured positions. Engine shadowalpha has no renderer consumer." :
+            "Viewport placement follows the camera.\n"
+            "Choosing rain, snow or stop switches off the area schedule.\n"
+            "Captured positions and replay inputs are in Developer > Area Weather Inputs."),0,wxALL,10);
         box->Add(dialog.CreateButtonSizer(wxOK|wxCANCEL),0,wxALL|wxALIGN_RIGHT,10);dialog.SetSizerAndFit(box);
         if(dialog.ShowModal()!=wxID_OK)return;
         try {
             const auto read=[](wxTextCtrl* field) {double value=0;if(!field->GetValue().ToDouble(&value))throw std::runtime_error("Enter numeric weather inputs.");return static_cast<float>(value);};
             WeatherFrameInput input=current;input.enabled=enabled->GetValue();input.serverSchedule=schedule->GetValue();
-            input.playerPosition.reset();if(supplyPlayer->GetValue())input.playerPosition=model::Vec3{read(x),read(y),read(z)};
-            input.roomWeatherDisabled=roomDisabled->GetValue();input.thunderEnabled=thunder->GetValue();
-            input.serverOverride=static_cast<std::uint8_t>(overrideType->GetValue());input.shadowAlpha=read(shadow);
-            const auto soundDirectory=neosettings::pathFromWx(sounds->GetValue());
+            input.thunderEnabled=thunder->GetValue();input.shadowAlpha=page->weatherShadowAlpha();
+            if (developer) {
+                input.playerPosition.reset();if(supplyPlayer->GetValue())input.playerPosition=model::Vec3{read(x),read(y),read(z)};
+                input.roomWeatherDisabled=roomDisabled->GetValue();
+                input.serverOverride=static_cast<std::uint8_t>(overrideType->GetValue());input.shadowAlpha=read(shadow);
+            }
+            const auto soundDirectory=developer ? neosettings::pathFromWx(sounds->GetValue()) : std::filesystem::path{};
             const auto resolver=page->areaScene().resourceResolver();
             const auto asciiResources=page->areaScene().asciiResourceResolver();
             PreparedWeatherPlayback prepared;
@@ -2704,7 +2809,9 @@ private:
             }))return;
             std::optional<std::uint8_t> requested;
             if(command->GetSelection()>0)requested=command->GetSelection()==3?0u:static_cast<std::uint8_t>(command->GetSelection());
-            page->configureWeather(std::move(prepared),input,camera->GetValue(),requested);
+            const bool viewerPosition = !developer && placement->GetSelection() == 0;
+            const bool viewerCamera = developer ? camera->GetValue() : page->weatherUsesViewerCamera();
+            page->configureWeather(std::move(prepared),input,viewerCamera,requested,viewerPosition);
             if(!missing.empty()) {
                 std::string message="Unavailable thunder resources:\n";for(const auto& name:missing)message+=name+"\n";
                 wxMessageBox(wxui::toWx(message),"Weather resource report",wxOK|wxICON_INFORMATION,this);
@@ -3345,7 +3452,7 @@ private:
         const auto& document=page->document();
         auto protectedInputs=document.openPaths();
         const auto filename=neoshared::pathToUtf8(document.path().stem())+"-packed.mdl";
-        wxFileDialog file(this,"Export Binary MDL/MDX",neosettings::pathToWx(document.path().parent_path()),
+        wxFileDialog file(this,"Compile ASCII to Binary MDL/MDX",neosettings::pathToWx(document.path().parent_path()),
             wxui::toWx(filename),"Binary models (*.mdl)|*.mdl",
             wxFD_SAVE|wxFD_OVERWRITE_PROMPT);
         if(file.ShowModal()!=wxID_OK) return;
@@ -3402,15 +3509,19 @@ private:
         return selected == wxNOT_FOUND ? nullptr : pageAt(static_cast<std::size_t>(selected));
     }
 
-    void addDocument(std::unique_ptr<ModelDocument> document,std::shared_ptr<GameResourceSession> session={}) {
+    void addDocument(std::unique_ptr<ModelDocument> document, std::shared_ptr<GameResourceSession> session = {},
+                     ResourceResolver fileResources = {}, ModelPage* replacement = nullptr) {
         const auto title = wxui::toWx(document->title());
-        auto* page = new ModelPage(tabs_, std::move(document), options_, context_.compact);
+        auto* page = new ModelPage(tabs_, std::move(document), replacement ? replacement->options() : options_, context_.compact);
         page->setResourceSession(std::move(session));
+        page->setFileResources(std::move(fileResources));
         page->setAppearance(dark_);
-        if (!tabs_->AddPage(page, title, true)) {
+        const auto index = replacement ? static_cast<std::size_t>(tabs_->GetPageIndex(replacement)) : tabs_->GetPageCount();
+        if (!tabs_->InsertPage(index, page, title, true)) {
             page->Destroy();
             throw std::runtime_error("Unable to create a NeoMDL document tab.");
         }
+        if (replacement) tabs_->DeletePage(index + 1u);
         updateState();
     }
 
@@ -3485,6 +3596,7 @@ private:
         fileMenu_ = new wxMenu;
         auto* file = fileMenu_;
         file->Append(ID_Open, "&Open Model...\tCtrl+O");
+        file->Append(ID_Reload, "&Reload Model\tCtrl+R", "Reload the model from disk and reset its preview.");
         gameDirectoryMenu_ = neogames::appendOpenGameDirectoryMenu(
             *this, *file,
             [this](const neogames::SavedGameDirectory& directory) {
@@ -3496,7 +3608,8 @@ private:
         file->Append(ID_ModuleArea, "Load Module Area...");
         file->AppendSeparator();
         file->Append(ID_ExportAscii, "Export &ASCII MDL...");
-        file->Append(ID_ExportPacked, "Export &Binary MDL/MDX...");
+        file->Append(ID_ExportPacked, "Compile ASCII to &Binary...",
+                     "Compile an opened ASCII model to MDL/MDX. Export binary models to ASCII and open that file first.");
         file->AppendSeparator();
         file->Append(ID_CloseModel, "&Close Model\tCtrl+W");
         file->Append(ID_CloseAll, "Close &All");
@@ -3511,6 +3624,8 @@ private:
         buildPreviewMenus(0u);
 
         auto* tools = new wxMenu;
+        tools->Append(ID_ModelResources, "Model Resource Installation...",
+                      "Choose the game installation supplying textures and supermodels for this model.");
         tools->Append(ID_ResourceProvenance, "Resource Scope and Load Report...");
         bar->Append(tools, "&Tools");
 
@@ -4925,6 +5040,18 @@ private:
     }
 
     void bindEvents() {
+        Bind(wxEVT_IDLE, [this](wxIdleEvent& event) {
+            wxString navigation;
+            if (const auto* page = activePage()) {
+                if (page->authoredCameraActive()) navigation = "Authored Camera";
+                else if (page->freeFlyCameraActive())
+                    navigation = wxString::Format("Free Fly | %.3g units/s", double(page->freeFlySpeed()));
+                else navigation = "Orbit";
+            }
+            if (moduleStatusBar()->GetStatusText(2) != navigation)
+                setModuleStatusText(navigation, 2);
+            event.Skip();
+        });
         tabs_->Bind(wxEVT_AUINOTEBOOK_PAGE_CHANGED, [this](wxAuiNotebookEvent& event) {
             updateState();
             event.Skip();
@@ -4939,6 +5066,8 @@ private:
             if (jobRunning_) return;
             switch (event.GetId()) {
             case ID_Open: chooseAndOpenModel(); return;
+            case ID_Reload: reloadModel(activePage()->fileResources(), activePage()->resourceSession()); return;
+            case ID_ModelResources: chooseModelResources(); return;
             case ID_ExportAscii: exportAsciiModel(); return;
             case ID_ExportPacked: exportPackedModel(); return;
             case ID_AdvancedSettings: showAdvancedSettings(); return;
@@ -4961,6 +5090,8 @@ private:
             case ID_AreaRoom: chooseAreaRoom(); return;
             case ID_AreaWeather: showAreaWeather(); return;
             case ID_SceneAudio: showSceneAudio(); return;
+            case ID_AreaWeatherInputs: showAreaWeather(true); return;
+            case ID_SceneAudioInputs: showSceneAudio(true); return;
             case ID_AreaAnimation: chooseAreaAnimation(); return;
             case ID_RoomScriptAnimation: chooseRoomScriptAnimation(); return;
             case ID_DoorState: chooseDoorState(); return;
@@ -5068,22 +5199,34 @@ private:
         const bool area = active && !active->areaScene().empty();
         const unsigned features = active ? active->previewFeatures() : 0u;
         if (features != previewMenuFeatures_) buildPreviewMenus(features);
-        if (area && !developerMenu_->FindItem(ID_AreaReplay))
-            developerMenu_->Append(ID_AreaReplay, "Area Camera Replay...");
-        else if (!area && developerMenu_->FindItem(ID_AreaReplay))
-            developerMenu_->Destroy(ID_AreaReplay);
+        const std::pair<int, const char*> areaCommands[] = {
+            {ID_AreaReplay, "Area Camera Replay..."},
+            {ID_SceneAudioInputs, "Scene Audio Inputs..."},
+            {ID_AreaWeatherInputs, "Area Weather Inputs..."},
+        };
+        for (const auto& command : areaCommands) {
+            if (area && !developerMenu_->FindItem(command.first))
+                developerMenu_->Append(command.first, command.second);
+            else if (!area && developerMenu_->FindItem(command.first))
+                developerMenu_->Destroy(command.first);
+        }
         enableModuleCommand(ID_ExportAscii,activePage()&&activePage()->document().hasModelOwner());
         enableModuleCommand(ID_ExportPacked,activePage()&&activePage()->document().hasModelOwner()&&
             activePage()->document().model().asciiBuilt);
         enableModuleCommand(ID_ResourceProvenance,hasDocument);
+        const bool looseModel = active && !active->document().path().empty() && !area;
+        enableModuleCommand(ID_Reload, looseModel);
+        enableModuleCommand(ID_ModelResources, looseModel);
         enableModuleCommand(ID_LoadArea,hasDocument&&engineAreaRuntimeSupported(activePage()->document().model().game));
         enableModuleCommand(ID_ClearArea,hasDocument&&!activePage()->areaScene().empty());
         enableModuleCommand(ID_AreaAnimation,hasDocument&&!activePage()->areaScene().objects().empty());
         enableModuleCommand(ID_AreaRoom,activePage()&&!activePage()->areaScene().empty());
         enableModuleCommand(ID_SceneAudio,activePage()&&!activePage()->areaScene().empty());
+        enableModuleCommand(ID_SceneAudioInputs,area);
         enableModuleCommand(ID_RoomScriptAnimation,activePage()&&!activePage()->areaScene().rooms().empty());
         enableModuleCommand(ID_AreaWeather,activePage()&&!activePage()->areaScene().empty()&&
             weatherRuntimeSupported(activePage()->areaScene().game()));
+        enableModuleCommand(ID_AreaWeatherInputs,area&&weatherRuntimeSupported(active->areaScene().game()));
         enableModuleCommand(ID_CloseModel, hasDocument);
         enableModuleCommand(ID_CloseAll, tabs_->GetPageCount() != 0u);
         enableModuleCommand(ID_FrameModel, hasDocument);
@@ -5112,7 +5255,7 @@ private:
         updateMenuChecks();
         if (const auto* page = active) {
             const auto& document = page->document();
-            setModuleStatusText(neomdl::model::modelSummary(document.model()), 0);
+            setModuleStatusText(std::string(page->sourceFormat()) + " | " + neomdl::model::modelSummary(document.model()), 0);
             std::ostringstream right;
             right << document.loadedTextureCount() << " texture(s)";
             if (document.supermodelCount() != 0u)

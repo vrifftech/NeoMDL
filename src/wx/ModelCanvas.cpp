@@ -646,7 +646,7 @@ void ModelCanvas::configureSceneAudio(std::optional<ExoRandom::State> capturedSt
         if(!clock)throw std::runtime_error("GIT sound scheduling requires the module world clock");
         if(!sceneAudioExo_&&std::any_of(areaScene_.sounds().begin(),areaScene_.sounds().end(),
             [](const auto& sound){return sound.interval&&sound.intervalVariation;}))
-            throw std::runtime_error("Sound interval variation requires the captured CExoRand state in Scene Audio");
+            throw std::runtime_error("These sounds use interval variation. Supply the captured random state in Developer > Scene Audio Inputs.");
         sceneAudioRuntime_.load(areaScene_.sounds(),*clock,{
             [this]{return particleScene_.runtimeRandom().next();},
             [this]{return sceneAudioExo_.value().next();}
@@ -1606,7 +1606,7 @@ void ModelCanvas::initializeAreaObject(AreaObject& object) {
     object.lightsabers().setSettings({options_.lightsaberSettings.renderPieces,options_.lightsaberSettings.renderFrontHalf});
 }
 void ModelCanvas::configureWeather(PreparedWeatherPlayback prepared,WeatherFrameInput input,bool viewerCamera,
-                                  std::optional<std::uint8_t> command) {
+                                  std::optional<std::uint8_t> command,bool viewerPosition) {
     if(input.enabled&&areaScene_.game()==model::GameVersion::Kotor2) {
         mergeSceneAudioAssets(std::move(prepared.thunder));
         if(input.thunderEnabled)ensureSceneAudioProvider();
@@ -1614,6 +1614,7 @@ void ModelCanvas::configureWeather(PreparedWeatherPlayback prepared,WeatherFrame
     areaScene_.installWeatherResources(std::move(prepared.resources));
     weatherInput_=input;
     weatherShadowAlpha_=input.shadowAlpha;weatherUseViewerCamera_=viewerCamera;
+    weatherUseViewerPosition_=viewerPosition;
     if(!input.enabled) {
         areaScene_.setWeatherImmediate(0,0,[this](AreaObject& object){initializeAreaObject(object);});
     } else if(command) {
@@ -1631,7 +1632,10 @@ void ModelCanvas::advanceWeather() {
     auto input=weatherInput_;
     input.worldTime=worldClock_.worldTime();
     input.dayMilliseconds=worldClock_.dayMilliseconds();
-    if(weatherUseViewerCamera_)input.cameraFrame=sceneCameraFrame();
+    if(weatherUseViewerPosition_) {
+        input.cameraFrame=sceneCameraFrame();
+        input.playerPosition=input.cameraFrame->position;
+    } else if(weatherUseViewerCamera_)input.cameraFrame=sceneCameraFrame();
     input.shadowAlpha=weatherShadowAlpha_;
     const auto output=areaScene_.advanceWeather(input,[this](AreaObject& object){initializeAreaObject(object);});
     if(output.shadowAlphaWrite)weatherShadowAlpha_=*output.shadowAlphaWrite;

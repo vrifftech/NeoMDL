@@ -343,9 +343,10 @@ public:
     const DialogueRuntime& dialogue() const noexcept {return dialogueRuntime_;}
     std::vector<std::string> takeDialogueMessages();
     void configureWeather(PreparedWeatherPlayback prepared,WeatherFrameInput input,bool viewerCamera,
-                          std::optional<std::uint8_t> command);
+                          std::optional<std::uint8_t> command,bool viewerPosition=false);
     const WeatherFrameInput& weatherInputs() const noexcept {return weatherInput_;}
     bool weatherUsesViewerCamera() const noexcept {return weatherUseViewerCamera_;}
+    bool weatherUsesViewerPosition() const noexcept {return weatherUseViewerPosition_;}
     float weatherShadowAlpha() const noexcept {return weatherShadowAlpha_;}
     std::optional<std::size_t> applyCreatureAppearance(std::size_t instance,
         const CreatureAppearanceState&,std::string& error);
@@ -423,6 +424,7 @@ public:
     bool activateAreaCameraId(std::int32_t cameraId);
     void useViewerCamera(bool freeFly);
     bool freeFlyCameraActive() const noexcept { return freeFly_ && !authoredCameraActive(); }
+    float freeFlySpeed() const noexcept { return flySpeed_; }
     bool authoredCameraActive() const noexcept { return cameraScene_.anyActive()||dialogueCameraActive_||dialogueActorCameraActive_||activeAreaReplayCamera(); }
     ReferenceReattachResult reattachReferences(
         std::optional<std::size_t> ownerReference,
@@ -613,6 +615,7 @@ private:
     std::vector<model::TriggerPlane> lastScenePlanes_;
     WeatherFrameInput weatherInput_;
     bool weatherUseViewerCamera_{};
+    bool weatherUseViewerPosition_{true};
     float weatherShadowAlpha_{0.5f};
     PreparedSceneAudioPlayback sceneAudioAssets_;
     std::unique_ptr<SceneAudioDevice> sceneAudioProvider_;
