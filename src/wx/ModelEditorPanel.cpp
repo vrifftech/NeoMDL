@@ -451,7 +451,11 @@ public:
         timer_.Start(16);
     }
 
-    ~ModelPage() override { timer_.Stop(); }
+    ~ModelPage() override {
+        timer_.Stop();
+        // The canvas borrows document_, so destroy it before the document.
+        DestroyChildren();
+    }
 
     void suspendLoadingPlayback() {
         ++loadingSuspensions_;
@@ -886,12 +890,10 @@ private:
         for(auto& message:canvas_->takeDialogueMessages()) {
             eventLog_.push_back(std::move(message));eventsChanged=true;
         }
-        if(eventsChanged)recordEvents({});
-        if (playing_ && canvas_->animationRuns().empty()) stopPlayback();
         if (playing_ || eventsChanged) {
-            rebuildRunChoice();
             updateAnimationControls();
-            updateDetails(selectedNode_);
+            if (detailedDiagnostics_->GetValue())
+                updateDetailedDiagnostics(selectedNode_);
         }
     }
 
@@ -1632,16 +1634,14 @@ public:
 
     bool openFile(const std::filesystem::path& path) override {
         if (jobRunning_) return false;
-        for (std::size_t index = 0; index < tabs_->GetPageCount(); ++index) {
-            const auto* page = pageAt(index);
-            for (const auto& openPath : page->document().openPaths()) {
-                if (neoshared::sameResourcePath(openPath, path)) {
+        try {
+            for (std::size_t index = 0; index < tabs_->GetPageCount(); ++index) {
+                const auto* page = pageAt(index);
+                if (neoshared::sameResourcePath(page->document().path(), path)) {
                     tabs_->SetSelection(index);
                     return true;
                 }
             }
-        }
-        try {
             // Packed headers identify the game. ASCII construction uses the
             // explicitly selected engine rules before resolving dependencies.
             auto document = std::make_unique<ModelDocument>();
@@ -3313,12 +3313,9 @@ private:
             model::AsciiExportResult exported;
             std::vector<std::uint8_t> bytes;
             if(!runJob("Exporting ASCII model",[&](const neoshared::bif::JobControl& job) {
-                // Documents stay open while runJob owns the modal operation.
-                // Copy the decoded asset on the worker, not the live pose or
-                // any area/creature assembly maintained by the canvas.
+                // runJob keeps documents alive and suspends scene updates.
                 job.check();
-                const auto snapshot=document.sourceModel();
-                exported=model::exportAsciiModel(snapshot,job,options);
+                exported=model::exportAsciiModel(document.sourceModel(),job,options);
                 bytes.assign(exported.text.begin(),exported.text.end());
                 job.check();
             })) return;
@@ -3357,8 +3354,7 @@ private:
             model::PackedExportResult exported;
             if(!runJob("Compiling packed model",[&](const neoshared::bif::JobControl& job) {
                 job.check();
-                const auto snapshot=document.sourceModel();
-                exported=model::exportPackedModel(snapshot,job);
+                exported=model::exportPackedModel(document.sourceModel(),job);
                 job.check();
             })) return;
             neoshared::texture::writeFileBytes(companion,exported.mdx);
