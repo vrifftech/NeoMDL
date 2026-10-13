@@ -1,5 +1,6 @@
 add_library(neomdl_model
     Model.cpp
+    AabbBuild.cpp
     ModelInstance.cpp
     AsciiModel.cpp
     AsciiMesh.cpp
@@ -36,7 +37,7 @@ add_library(neomdl_model
 )
 add_library(neomdl::model ALIAS neomdl_model)
 target_include_directories(neomdl_model PUBLIC "${CMAKE_CURRENT_SOURCE_DIR}/..")
-target_link_libraries(neomdl_model PUBLIC neoshared::path)
+target_link_libraries(neomdl_model PUBLIC neoshared::path neoshared::bwm)
 target_compile_features(neomdl_model PUBLIC cxx_std_17)
 if(MSVC)
     target_compile_options(neomdl_model PRIVATE /W4 /permissive- /utf-8 /fp:strict)

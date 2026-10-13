@@ -45,7 +45,7 @@ std::string modelResourceExtension(std::uint16_t type) {
     switch (type) {
     case kMdlResourceType: case kMdxResourceType: case kTpcResourceType:
     case kTxbResourceType: case kTgaResourceType: case kDdsResourceType:
-    case kTxiResourceType: return "." + resourceExtension(type);
+    case kTxiResourceType: case 0x7e0: case 0x804: case 0x805: return "." + resourceExtension(type);
     default: return {};
     }
 }
@@ -232,7 +232,7 @@ bool ModelDocument::openResource(neoshared::ResourceDocument resource,
                                  const neoshared::bif::JobControl& job,
                                  std::optional<model::GameVersion> asciiGame,
                                  const model::AsciiResourceResolver& asciiResources,
-                                 bool includeAnimations) {
+                                 bool includeAnimations, bool includeCollisions) {
     const ResourceLoadScope loading(job);
     job.update(0u, 0u, "Resolving model companions: " + resource.fileName);
     auto trace=std::make_shared<ResourceTrace>();
@@ -294,6 +294,7 @@ bool ModelDocument::openResource(neoshared::ResourceDocument resource,
     originalAscii_ = nextModel.asciiBuilt
         ? std::optional<std::string>{std::string(mdlResource.bytes.begin(), mdlResource.bytes.end())}
         : std::nullopt;
+    collisions_=includeCollisions?loadCollisions(stem,resolver,job):CollisionSet{};
     asciiResources_=loadResources;
     runtimeScopePinned_=true;resolver_=resolver;trace_=std::move(trace);
     resourceParent_.reset();
@@ -415,7 +416,8 @@ std::unique_ptr<ModelDocument> ModelDocument::rebuildAscii(const std::string& te
     resource.protectedInputs = openPaths();
     auto result = std::make_unique<ModelDocument>();
     result->openResource(std::move(resource), resolver_, job, game.value_or(model_.game),
-                         asciiResources_, includeAnimations);
+                         asciiResources_, includeAnimations, false);
+    result->collisions_=collisions_;
     result->path_ = path_;
     result->runtimeScopePinned_ = runtimeScopePinned_;
     return result;
@@ -989,7 +991,7 @@ void ModelDocument::loadChunkModels(const ResourceResolver& resolver) {
             if(resource->fileName.empty()) resource->fileName=name.second+".mdl";
             resource->type=kMdlResourceType;
             auto chunk=std::make_shared<ModelDocument>();chunk->allowChunkModels_=false;
-            chunk->openResource(std::move(*resource),resolver,resourceLoadJob(),model_.game,asciiResources_);
+            chunk->openResource(std::move(*resource),resolver,resourceLoadJob(),model_.game,asciiResources_,true,false);
             const auto queue=[&](const neomdl::model::Model& model) {
                 for(const auto& node:model.nodes) if(node.emitter) {
                     const auto child=hierarchyResref(node.emitter->chunkName);

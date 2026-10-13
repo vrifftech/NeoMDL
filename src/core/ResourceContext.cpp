@@ -93,7 +93,7 @@ std::string resourceExtension(std::uint16_t t) {
     case 0x7d2: case 0xbc0: case 0xbbf: case 0xbbe: case 3: case 0x7f1:
     case 0x7e6: case 0x7dc: case 0x7de: case 0x7e1: case 0x7e7: case 0x7eb:
     case 0x7fc: case 0x7fa: case 0x7f0: case 0x7e9: case 0xbb8: case 0xbb9:
-    case 4: case 8: case 0x7ed: case 0xbbc:
+    case 4: case 8: case 0x7ed: case 0xbbc: case 0x7e0: case 0x804: case 0x805:
         return neoshared::bif::resourceTypeExtension(t,neoshared::bif::GameProfile::KotOR);
     default:return {};
     }

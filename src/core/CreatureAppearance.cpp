@@ -350,7 +350,7 @@ std::shared_ptr<ModelDocument> assembleCreatureAppearance(const CreatureAppearan
     ResourceLoadScope work(job);job.update(0,0,"Assembling creature "+appearance.bodyModel);
     const auto load=[&](const std::string& name) {
         const auto resource=resolver(name,kMdlResourceType);require(bool(resource),"missing scoped object model: "+name);
-        auto document=std::make_shared<ModelDocument>();document->openResource(*resource,resolver,job,appearance.game,asciiResources);
+        auto document=std::make_shared<ModelDocument>();document->openResource(*resource,resolver,job,appearance.game,asciiResources,true,false);
         require(document->model().game==appearance.game,"GIT object game differs from the selected area: "+name);return document;
     };
     const auto body=load(appearance.bodyModel);std::vector<VisualModelAttachment> attachments;

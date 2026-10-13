@@ -1,4 +1,5 @@
 #include <model/AsciiModelInternal.hpp>
+#include <model/AabbBuild.hpp>
 #include <model/AsciiFixedString.hpp>
 #include <model/UvAnimation.hpp>
 
@@ -382,6 +383,7 @@ void parseNode(const Line& header, Reader& reader, Model& model,
 
         buildMesh(model,raw,index,reader.job());
         auto& mesh=*raw.mesh;
+        if(raw.node.aabb && !raw.node.aabb->root) raw.node.aabb=buildAabbTree(mesh,reader.job());
         if(mesh.mdxRowSize!=0u) {
             mesh.asciiMdxAllocation=model.asciiMdxAllocations.size();
             model.asciiMdxAllocations.push_back({mesh.enginePrelightVertexCount,

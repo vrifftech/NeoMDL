@@ -19,6 +19,7 @@ namespace neomdl::ui {
 AsciiEditor::AsciiEditor(wxWindow* parent, std::shared_ptr<const ModelDocument> source,
     std::function<void(std::unique_ptr<ModelDocument>)> apply, std::function<void()> changed)
     : wxPanel(parent), source_(std::move(source)), apply_(std::move(apply)), changed_(std::move(changed)) {
+    collisions_=source_->collisions();
     auto* layout = new wxBoxSizer(wxVERTICAL);
     auto* toolbar = new wxBoxSizer(wxHORIZONTAL);
     format_ = new wxChoice(this, wxID_ANY);
@@ -95,7 +96,7 @@ void AsciiEditor::cancelAndWait() {
     if (worker_.valid()) worker_.wait();
 }
 
-bool AsciiEditor::modified() const { return editor_->GetModify(); }
+bool AsciiEditor::modified() const { return editor_->GetModify() || collisionsModified_; }
 
 std::string AsciiEditor::text() const {
     const auto bytes = editor_->GetTextRaw();
@@ -258,23 +259,40 @@ bool AsciiEditor::save(bool choosePath) {
     if (choosePath || path.empty()) {
         const auto name = path.empty() ? source_->sourceModel().name + "-ascii.mdl"
                                        : neoshared::pathToUtf8(path.filename());
-        wxFileDialog dialog(this, "Save ASCII MDL", neosettings::pathToWx(source_->path().parent_path()),
+        wxFileDialog dialog(this, "Save ASCII Model and Companions", neosettings::pathToWx(source_->path().parent_path()),
             wxui::toWx(name), "ASCII models (*.mdl)|*.mdl", wxFD_SAVE | wxFD_OVERWRITE_PROMPT);
         if (dialog.ShowModal() != wxID_OK) return false;
         path = neosettings::pathFromWx(dialog.GetPath());
     }
     try {
         auto protectedInputs = source_->openPaths();
+        for(const auto& [kind,asset]:collisions_) {
+            protectedInputs.insert(protectedInputs.end(),asset.inputs.begin(),asset.inputs.end());
+            if(asset.asciiPath)
+                protectedInputs.erase(std::remove_if(protectedInputs.begin(),protectedInputs.end(),[&](const auto& input) {
+                    return neoshared::sameResourcePath(input,*asset.asciiPath);
+                }),protectedInputs.end());
+        }
         if (source_->originalAscii()) {
             protectedInputs.erase(std::remove_if(protectedInputs.begin(), protectedInputs.end(), [&](const auto& input) {
                 return neoshared::sameResourcePath(input, source_->path());
             }), protectedInputs.end());
         }
         neoshared::checkResourceOutput(path, protectedInputs);
+        protectedInputs.push_back(path);
+        auto outputs=collisionOutputs(collisions_,path,false);
+        std::vector<std::filesystem::path> companions;
+        for(const auto& output:outputs) {
+            neoshared::checkResourceOutput(output.path,protectedInputs);protectedInputs.push_back(output.path);
+            companions.push_back(output.path);
+        }
+        if((choosePath || savePath_.empty()) && !confirmCompanionOverwrite(this,companions)) return false;
         const auto buffer = text();
         neoshared::texture::writeFileBytes(path, std::vector<std::uint8_t>(buffer.begin(), buffer.end()));
+        for(const auto& output:outputs) neoshared::texture::writeFileBytes(output.path,output.bytes);
         savePath_ = path;
         editor_->SetSavePoint();
+        collisionsModified_=false;
         changed_();
         return true;
     } catch (const std::exception& error) {

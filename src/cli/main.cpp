@@ -7,7 +7,10 @@
 #include <neoshared/game/Installation.hpp>
 #include <neoshared/texture/FileUtil.hpp>
 
+#include <algorithm>
 #include <iostream>
+#include <iterator>
+#include <sstream>
 #include <string_view>
 
 int main(int argc, char** argv) {
@@ -23,6 +26,11 @@ int main(int argc, char** argv) {
                      "--refine-tangent-rounding allows smoothing export to move selected source coordinates by one float step to improve tangents.\n"
                      "--refine-normal-rounding allows the same position adjustment to improve normals on overlapping opposite-wound triangles.\n"
                      "Packed export compiles ASCII input to an x86 MDL and same-name MDX pair.\n";
+        std::cout << "PWK, _dwk0/1/2.DWK and WOK companions load and export with the model; --model-only omits them.\n"
+                     "--collision-from=wok|pwk|dwk0|dwk1|dwk2:NODE creates/replaces a companion from a model mesh.\n"
+                     "--layout=area.lyt or --placement=X,Y,Z supplies room placement for --collision-from=wok:NODE.\n"
+                     "--rebuild-aabb regenerates every MDL AABB tree from its collision faces.\n"
+                     "A standalone .wok, .pwk or .dwk input also supports --export-ascii and --export-packed.\n";
     };
     if (argc == 2 && (std::string_view(argv[1]) == "--help" || std::string_view(argv[1]) == "-h")) {
         printUsage();
@@ -32,12 +40,24 @@ int main(int argc, char** argv) {
     std::optional<std::filesystem::path> asciiOutput;
     std::optional<std::filesystem::path> packedOutput;
     neomdl::model::AsciiExportOptions asciiOptions;
+    bool includeCollisions=true,rebuildAabb=false;
+    std::optional<std::filesystem::path> layout;
+    neomdl::model::Vec3 placement;
+    std::vector<std::string> collisionSources;
     std::vector<std::filesystem::path> paths;
     for(int i=1;i<argc;++i) {
         const std::string_view argument(argv[i]);
         if(argument=="--game=k1")game=neomdl::model::GameVersion::Kotor1;
         else if(argument=="--game=k2")game=neomdl::model::GameVersion::Kotor2;
         else if(argument=="--geometry-only")asciiOptions.includeAnimations=false;
+        else if(argument=="--model-only")includeCollisions=false;
+        else if(argument=="--rebuild-aabb")rebuildAabb=true;
+        else if(argument.substr(0,17)=="--collision-from=")collisionSources.emplace_back(argument.substr(17));
+        else if(argument.substr(0,9)=="--layout=")layout=std::filesystem::u8path(std::string(argument.substr(9)));
+        else if(argument.substr(0,12)=="--placement=") {
+            auto value=std::string(argument.substr(12));std::replace(value.begin(),value.end(),',',' ');
+            std::istringstream(value)>>placement.x>>placement.y>>placement.z;
+        }
         else if(argument=="--advanced-ascii")asciiOptions.advanced=true;
         else if(argument=="--explicit-normals")asciiOptions.explicitNormals=true;
         else if(argument=="--smoothing-groups")asciiOptions.explicitNormals=false;
@@ -63,6 +83,39 @@ int main(int argc, char** argv) {
         return 2;
     }
     try {
+        const auto extension=neomdl::resourceKey(neoshared::texture::pathToUtf8(paths[0].extension()));
+        if(extension==".wok" || extension==".pwk" || extension==".dwk") {
+            auto kind=extension==".wok"?neomdl::CollisionKind::Room:
+                extension==".pwk"?neomdl::CollisionKind::Placeable:neomdl::CollisionKind::DoorClosed;
+            const auto stem=neomdl::resourceKey(neoshared::texture::pathToUtf8(paths[0].stem()));
+            for(int state=1;state<=2;++state) {
+                const auto suffix="_dwk"+std::to_string(state);
+                if(extension==".dwk" && stem.size()>=suffix.size() &&
+                   stem.compare(stem.size()-suffix.size(),suffix.size(),suffix)==0)
+                    kind=static_cast<neomdl::CollisionKind>(state+1);
+            }
+            neoshared::ResourceDocument resource;resource.fileName=neoshared::texture::pathToUtf8(paths[0].filename());
+            resource.bytes=neomdl::readResourceFile(paths[0]);resource.protectedInputs=paths;
+            const auto collision=neomdl::readCollision(resource,kind);
+            std::vector<neomdl::CollisionOutput> outputs;
+            if(asciiOutput) {
+                outputs.push_back({*asciiOutput,{collision.text.begin(),collision.text.end()}});
+            }
+            if(packedOutput) {
+                auto mesh=neomdl::readCollisionAscii(collision.text,kind);
+                neoshared::bwm::buildBwm(mesh.mesh,mesh.walkableMaterials);
+                outputs.push_back({*packedOutput,neoshared::bwm::writeBwm(mesh.mesh)});
+            }
+            auto protectedPaths=paths;
+            for(const auto& output:outputs) {
+                neoshared::checkResourceOutput(output.path,protectedPaths);protectedPaths.push_back(output.path);
+            }
+            for(const auto& output:outputs) {
+                neoshared::texture::writeFileBytes(output.path,output.bytes);
+                std::cout<<"Collision exported to "<<neoshared::texture::pathToUtf8(output.path)<<'\n';
+            }
+            return 0;
+        }
         std::optional<std::filesystem::path> mdx;
         if (paths.size() == 2u) mdx = paths[1];
         neomdl::ModelDocument document;
@@ -79,9 +132,38 @@ int main(int argc, char** argv) {
             model=neomdl::model::readModelFile(paths[0], mdx, {}, game, {},asciiOptions.includeAnimations);
             if(asciiOutput) neomdl::model::processAsciiSkinSeams(model);
         }
+        if(rebuildAabb) neomdl::model::rebuildAabbTrees(model);
+        auto collisions=packedOutput?document.collisions():neomdl::loadCollisions(
+            neoshared::texture::pathToUtf8(paths[0].stem()),neomdl::directoryResources(std::filesystem::absolute(paths[0]).parent_path()));
+        if(layout) {
+            const auto bytes=neomdl::readResourceFile(*layout);
+            placement=neomdl::collisionLayout(std::string(bytes.begin(),bytes.end())).at(neomdl::resourceKey(model.name));
+        }
+        const std::map<std::string,neomdl::CollisionKind> collisionKinds{
+            {"wok",neomdl::CollisionKind::Room},{"pwk",neomdl::CollisionKind::Placeable},
+            {"dwk0",neomdl::CollisionKind::DoorClosed},{"dwk1",neomdl::CollisionKind::DoorOpen1},{"dwk2",neomdl::CollisionKind::DoorOpen2}};
+        std::map<std::string,std::size_t> nodes;
+        for(std::size_t i=0;i<model.nodes.size();++i) if(model.nodes[i].mesh)
+            nodes.emplace(neomdl::resourceKey(model.nodes[i].name),i);
+        for(const auto& source:collisionSources) {
+            const auto colon=source.find(':');
+            const auto kind=collisionKinds.at(source.substr(0,colon));
+            auto mesh=neomdl::collisionFromModel(model,nodes.at(neomdl::resourceKey(source.substr(colon+1))),kind,
+                kind==neomdl::CollisionKind::Room?placement:neomdl::model::Vec3{});
+            if(collisions.count(kind)) {
+                const auto previous=neomdl::readCollisionAscii(collisions.at(kind).text,kind);
+                mesh.mesh.usePoints=previous.mesh.usePoints;mesh.mesh.doorUsePoints=previous.mesh.doorUsePoints;
+                mesh.walkableMaterials=previous.walkableMaterials;
+            }
+            collisions[kind].text=neomdl::writeCollisionAscii(mesh,kind);
+        }
         std::cout << neomdl::model::modelSummary(model) << '\n';
         for (const auto& warning : model.warnings) std::cout << "warning: " << warning << '\n';
         auto protectedPaths=packedOutput?document.openPaths():paths;
+        for(const auto& [kind,collision]:collisions)
+            protectedPaths.insert(protectedPaths.end(),collision.inputs.begin(),collision.inputs.end());
+        if(layout) protectedPaths.push_back(*layout);
+        if(!includeCollisions) collisions.clear();
         if(asciiOutput&&!packedOutput&&!mdx) {
             auto companion=paths[0];companion.replace_extension(".mdx");
             companion=neoshared::game::findExistingPathCaseInsensitive(companion);
@@ -97,6 +179,16 @@ int main(int argc, char** argv) {
             protectedPaths.push_back(*packedOutput);
             packedCompanion=*packedOutput;packedCompanion.replace_extension(".mdx");
             neoshared::checkResourceOutput(packedCompanion,protectedPaths);
+            protectedPaths.push_back(packedCompanion);
+        }
+        std::vector<neomdl::CollisionOutput> companionOutputs;
+        if(asciiOutput) companionOutputs=neomdl::collisionOutputs(collisions,*asciiOutput,false);
+        if(packedOutput) {
+            auto binary=neomdl::collisionOutputs(collisions,*packedOutput,true);
+            companionOutputs.insert(companionOutputs.end(),std::make_move_iterator(binary.begin()),std::make_move_iterator(binary.end()));
+        }
+        for(const auto& output:companionOutputs) {
+            neoshared::checkResourceOutput(output.path,protectedPaths);protectedPaths.push_back(output.path);
         }
         if(asciiOutput) {
             const auto exported=neomdl::model::exportAsciiModel(model,{},asciiOptions);
@@ -111,6 +203,10 @@ int main(int argc, char** argv) {
             neoshared::texture::writeFileBytes(*packedOutput,exported.mdl);
             std::cout<<"Packed model exported to "<<neoshared::texture::pathToUtf8(*packedOutput)
                      <<" and "<<neoshared::texture::pathToUtf8(packedCompanion)<<'\n';
+        }
+        for(const auto& output:companionOutputs) {
+            neoshared::texture::writeFileBytes(output.path,output.bytes);
+            std::cout<<"Collision companion exported to "<<neoshared::texture::pathToUtf8(output.path)<<'\n';
         }
         return 0;
     } catch (const std::exception& error) {

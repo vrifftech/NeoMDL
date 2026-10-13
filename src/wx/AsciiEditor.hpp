@@ -18,6 +18,8 @@ class wxTextCtrl;
 
 namespace neomdl::ui {
 
+bool confirmCompanionOverwrite(wxWindow* parent,const std::vector<std::filesystem::path>& paths);
+
 class AsciiEditor final : public wxPanel {
 public:
     AsciiEditor(wxWindow* parent, std::shared_ptr<const ModelDocument> source,
@@ -37,6 +39,10 @@ public:
     void setAppearance(bool dark);
     void cancelAndWait();
     bool save(bool choosePath = false);
+    const CollisionSet& collisions() const noexcept { return collisions_; }
+    void editCollisions(const model::Model& model);
+    void useRoomCollision(const model::Model& model,std::size_t node,
+                         const CollisionMesh& collision,model::Vec3 placement);
     void editNode(const model::Model& model, std::size_t nodeIndex);
     void editVertices(const model::Model& model, std::size_t nodeIndex);
     void editControllers(const model::Model& model, std::size_t nodeIndex);
@@ -74,6 +80,8 @@ private:
     bool advanced_{}, generationAdvanced_{};
     std::optional<bool> requestedFormat_;
     std::filesystem::path savePath_;
+    CollisionSet collisions_;
+    bool collisionsModified_{};
 };
 
 } // namespace neomdl::ui

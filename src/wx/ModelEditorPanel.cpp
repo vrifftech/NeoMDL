@@ -95,6 +95,7 @@ enum CommandId {
     ID_NodeProperties,
     ID_VertexProperties,
     ID_ControllerProperties,
+    ID_CollisionCompanions,
     ID_ModelProperties,
     ID_RenameTexture,
     ID_ExportTextures,
@@ -3154,7 +3155,7 @@ private:
                 if(resources&&!prepared.dialogue.cameraModel.empty()) {
                     if(auto camera=resources(prepared.dialogue.cameraModel,0x7d2)) {
                         prepared.cameraModel=std::make_unique<ModelDocument>();
-                        prepared.cameraModel->openResource(std::move(*camera),resources,job,game);
+                        prepared.cameraModel->openResource(std::move(*camera),resources,job,game,{},true,false);
                     } else diagnostics.push_back("CameraModel is unavailable: "+prepared.dialogue.cameraModel);
                 }
             }))return;
@@ -3592,13 +3593,15 @@ private:
     void exportAsciiModel() {
         auto* page=activePage();
         const auto& document=page->document();
-        const auto protectedInputs=document.openPaths();
+        auto protectedInputs=document.openPaths();
         auto stem=document.path().stem();
         if(stem.empty()) stem=std::filesystem::u8path(document.model().name);
         const auto filename=neoshared::pathToUtf8(stem)+"-ascii.mdl";
         const auto* editor = page->asciiEditor();
+        for(const auto& [kind,asset]:editor->collisions())
+            protectedInputs.insert(protectedInputs.end(),asset.inputs.begin(),asset.inputs.end());
         AsciiExportControls controls(asciiNormalMode_, editor->advanced());
-        wxFileDialog file(this,"Export ASCII MDL",neosettings::pathToWx(document.path().parent_path()),
+        wxFileDialog file(this,"Export ASCII Model and Companions",neosettings::pathToWx(document.path().parent_path()),
             wxui::toWx(filename),"ASCII models (*.mdl)|*.mdl|All files (*.*)|*.*",
             wxFD_SAVE|wxFD_OVERWRITE_PROMPT);
         file.SetCustomizeHook(controls);
@@ -3613,6 +3616,14 @@ private:
         try {
             const auto output=neosettings::pathFromWx(file.GetPath());
             neoshared::checkResourceOutput(output,protectedInputs);
+            protectedInputs.push_back(output);
+            const auto collisions=collisionOutputs(editor->collisions(),output,false);
+            std::vector<std::filesystem::path> companionPaths;
+            for(const auto& collision:collisions) {
+                neoshared::checkResourceOutput(collision.path,protectedInputs);
+                protectedInputs.push_back(collision.path);
+                companionPaths.push_back(collision.path);
+            }
             model::AsciiExportResult exported;
             std::vector<std::uint8_t> bytes;
             const auto text = editor->text();
@@ -3628,8 +3639,10 @@ private:
                 bytes.assign(exported.text.begin(),exported.text.end());
                 job.check();
             })) return;
+            if(!confirmCompanionOverwrite(this,companionPaths)) return;
             neoshared::texture::writeFileBytes(output,bytes);
-            setModuleStatusText("ASCII model exported to "+wxui::toWx(neoshared::pathToUtf8(output)),0);
+            for(const auto& collision:collisions) neoshared::texture::writeFileBytes(collision.path,collision.bytes);
+            setModuleStatusText("ASCII model and companions exported to "+wxui::toWx(neoshared::pathToUtf8(output)),0);
             if(!exported.warnings.empty()) {
                 std::ostringstream message;
                 message<<"The ASCII model was exported with the following notes:\n";
@@ -3645,9 +3658,12 @@ private:
         auto* page=activePage();
         const auto& document=page->document();
         auto protectedInputs=document.openPaths();
+        const auto* editor = page->asciiEditor();
+        for(const auto& [kind,asset]:editor->collisions())
+            protectedInputs.insert(protectedInputs.end(),asset.inputs.begin(),asset.inputs.end());
         const auto filename=document.model().name+"-packed.mdl";
         PackedExportControls controls(page->outputGame());
-        wxFileDialog file(this,"Compile ASCII to Binary MDL/MDX",neosettings::pathToWx(document.path().parent_path()),
+        wxFileDialog file(this,"Compile Model and Companions",neosettings::pathToWx(document.path().parent_path()),
             wxui::toWx(filename),"Binary models (*.mdl)|*.mdl",
             wxFD_SAVE|wxFD_OVERWRITE_PROMPT);
         file.SetCustomizeHook(controls);
@@ -3659,21 +3675,28 @@ private:
             neoshared::checkResourceOutput(output,protectedInputs);
             protectedInputs.push_back(output);
             neoshared::checkResourceOutput(companion,protectedInputs);
-            if(std::filesystem::exists(companion) && wxMessageBox(
-                    "Replace the companion file "+wxui::toWx(neoshared::pathToUtf8(companion))+"?",
-                    "Export Binary MDL/MDX",wxYES_NO|wxNO_DEFAULT|wxICON_QUESTION,this)!=wxYES) return;
+            protectedInputs.push_back(companion);
             model::PackedExportResult exported;
-            const auto* editor = page->asciiEditor();
+            std::vector<CollisionOutput> collisions;
             const auto text = editor->text();
             if(!runJob("Compiling packed model",[&](const neoshared::bif::JobControl& job) {
                 job.check();
                 const auto edited = editor->source()->rebuildAscii(text, job, controls.game, controls.includeAnimations);
                 exported=model::exportPackedModel(edited->sourceModel(),job);
+                collisions=collisionOutputs(editor->collisions(),output,true,job);
                 job.check();
             })) return;
+            std::vector<std::filesystem::path> companionPaths{companion};
+            for(const auto& collision:collisions) {
+                neoshared::checkResourceOutput(collision.path,protectedInputs);
+                protectedInputs.push_back(collision.path);
+                companionPaths.push_back(collision.path);
+            }
+            if(!confirmCompanionOverwrite(this,companionPaths)) return;
             neoshared::texture::writeFileBytes(companion,exported.mdx);
             neoshared::texture::writeFileBytes(output,exported.mdl);
-            setModuleStatusText("Binary MDL/MDX exported to "+wxui::toWx(neoshared::pathToUtf8(output)),0);
+            for(const auto& collision:collisions) neoshared::texture::writeFileBytes(collision.path,collision.bytes);
+            setModuleStatusText("Binary model and companions exported to "+wxui::toWx(neoshared::pathToUtf8(output)),0);
         } catch(const std::exception& error) {
             wxMessageBox(wxui::toWx(error.what()),"Binary model not exported",wxOK|wxICON_ERROR,this);
         }
@@ -3826,6 +3849,7 @@ private:
         edit->Append(ID_NodeProperties, "Selected Node Properties...", "Edit the selected node through its ASCII source.");
         edit->Append(ID_VertexProperties, "Selected Mesh Vertex Properties...", "Edit vertex values and corner assignments in source-index tables.");
         edit->Append(ID_ControllerProperties, "Selected Node Controller Properties...", "Edit base controllers and animation keys for the selected node.");
+        edit->Append(ID_CollisionCompanions, "Collision Companions...", "Edit PWK, door DWK states and room WOK geometry, hooks and links.");
         edit->Append(ID_ModelProperties, "Model Properties...", "Choose the animation root and head link.");
         edit->Append(ID_RenameTexture, "Rename Texture Throughout Model...", "Change matching texture references in this model.");
         bar->Append(edit, "&Edit");
@@ -5291,6 +5315,7 @@ private:
             case ID_NodeProperties: activePage()->editSelectedNode(); return;
             case ID_VertexProperties: activePage()->editSelectedVertices(); return;
             case ID_ControllerProperties: activePage()->editSelectedControllers(); return;
+            case ID_CollisionCompanions: activePage()->asciiEditor()->editCollisions(activePage()->document().sourceModel()); return;
             case ID_ModelProperties: activePage()->asciiEditor()->editModel(activePage()->document().sourceModel()); return;
             case ID_RenameTexture: activePage()->asciiEditor()->renameTexture(); return;
             case ID_ExportTextures: activePage()->asciiEditor()->exportTextureList(); return;
@@ -5449,6 +5474,7 @@ private:
         enableModuleCommand(ID_NodeProperties,active&&active->canEditNode());
         enableModuleCommand(ID_VertexProperties,active&&active->canEditVertices());
         enableModuleCommand(ID_ControllerProperties,active&&active->canEditNode());
+        enableModuleCommand(ID_CollisionCompanions,editor&&editor->previewCurrent()&&!area);
         enableModuleCommand(ID_ModelProperties,editor&&editor->previewCurrent()&&!area);
         enableModuleCommand(ID_RenameTexture,editor&&editor->previewCurrent()&&!area);
         enableModuleCommand(ID_ExportTextures,editor&&editor->previewCurrent()&&!area);

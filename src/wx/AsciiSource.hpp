@@ -51,6 +51,20 @@ struct SourceText {
             }
             return line + 1;
         }
+        if (name == "aabb") {
+            std::size_t pending = 1;
+            bool first = true;
+            while (pending) {
+                std::istringstream row(first ? value(lines[line]) : lines[line]);
+                float coordinate;
+                for (int i = 0; i < 6; ++i) row >> coordinate;
+                int face; row >> face;
+                --pending;
+                if (face == -1) pending += 2;
+                ++line; first = false;
+            }
+            return line;
+        }
         static const std::vector<std::string> arrays{
             "verts", "normals", "normalindices", "tverts", "tverts1", "tverts2", "tverts3",
             "texindices1", "texindices2", "texindices3", "colors", "colorsrgba", "colorindices",

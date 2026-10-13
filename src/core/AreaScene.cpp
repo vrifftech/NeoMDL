@@ -318,7 +318,7 @@ void AreaScene::loadResource(neoshared::ResourceDocument layout, const ResourceR
         {
             const auto resource=resolver?resolver(name,kMdlResourceType):std::nullopt;
             require(resource.has_value(),"missing area model: "+name);
-            document->openResource(*resource,resolver,job,services.game,services.asciiResources);
+            document->openResource(*resource,resolver,job,services.game,services.asciiResources,true,false);
         }
         require(document->isOpen(),"failed to load area model: "+name);
         const auto game=document->model().game;
@@ -486,7 +486,7 @@ void AreaScene::loadModuleArea(const std::string& area,const std::string& scope,
     // replacement light is fabricated from SunDiffuseColor.
     if(const auto sun=plan.resolver("gidy_sun",kMdlResourceType)) {
         try {
-            auto document=std::make_shared<ModelDocument>();document->openResource(*sun,plan.resolver,job,pending.game_,pending.services_.asciiResources);
+            auto document=std::make_shared<ModelDocument>();document->openResource(*sun,plan.resolver,job,pending.game_,pending.services_.asciiResources,true,false);
             require(document->model().game==pending.game_,"gidy_sun belongs to a different game");
             pending.environmentLightPose_=model::bindPose(document->model(),job);
             pending.environmentLightDocument_=std::move(document);
@@ -514,7 +514,7 @@ void AreaScene::loadModuleArea(const std::string& area,const std::string& scope,
         if(const auto i=assets.find(key(name));i!=assets.end())return i->second;
         const auto resource=plan.resolver(name,kMdlResourceType);
         require(bool(resource),"missing scoped object model: "+name);
-        auto doc=std::make_shared<ModelDocument>();doc->openResource(*resource,plan.resolver,job,pending.game_,pending.services_.asciiResources);
+        auto doc=std::make_shared<ModelDocument>();doc->openResource(*resource,plan.resolver,job,pending.game_,pending.services_.asciiResources,true,false);
         require(doc->model().game==pending.game_,"GIT object belongs to a different game: "+name);
         assets.emplace(key(name),doc);return doc;
     };
@@ -706,7 +706,7 @@ PreparedTriggerMine AreaScene::prepareTriggerMine(AreaTriggerRecord record,
     record.modelResref=resourceKey(tables.lookup("traps",record.trapType,"Model").value_or("v_mnfrag"));
     const auto resource=resolver(record.modelResref,kMdlResourceType);
     require(bool(resource),"missing scoped mine model: "+record.modelResref);
-    auto document=std::make_shared<ModelDocument>();document->openResource(*resource,resolver,job,game,asciiResources);
+    auto document=std::make_shared<ModelDocument>();document->openResource(*resource,resolver,job,game,asciiResources,true,false);
     require(document->model().game==game,"mine model belongs to a different game");
     auto metadata=TriggerRuntime::prepareMine(record,resolver,game,
         [&](std::size_t,const std::string& name) {

@@ -1,6 +1,7 @@
 #pragma once
 
 #include "core/ResourceContext.hpp"
+#include "core/CollisionAssets.hpp"
 #include <model/Model.hpp>
 #include <model/Lighting.hpp>
 #include <neoshared/material/Material.hpp>
@@ -79,12 +80,13 @@ public:
                       const neoshared::bif::JobControl& job = resourceLoadJob(),
                       std::optional<model::GameVersion> asciiGame = std::nullopt,
                       const model::AsciiResourceResolver& asciiResources = {},
-                      bool includeAnimations = true);
+                      bool includeAnimations = true, bool includeCollisions = true);
     std::unique_ptr<ModelDocument> rebuildAscii(const std::string& text,
         const neoshared::bif::JobControl& job = resourceLoadJob(),
         std::optional<model::GameVersion> game = std::nullopt,
         bool includeAnimations = true) const;
     const std::optional<std::string>& originalAscii() const noexcept { return originalAscii_; }
+    const CollisionSet& collisions() const noexcept { return collisions_; }
 
     // Immutable scene partition over an already resolved asset. The supplied
     // model keeps original node/mesh indices and sceneNodeAdmission records
@@ -227,6 +229,7 @@ private:
     ResourceResolver resolver_;
     model::AsciiResourceResolver asciiResources_;
     std::optional<std::string> originalAscii_;
+    CollisionSet collisions_;
     std::shared_ptr<ResourceTrace> trace_;
     std::shared_ptr<const ModelDocument> resourceParent_;
     bool allowChunkModels_{true};

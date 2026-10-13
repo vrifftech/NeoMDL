@@ -103,6 +103,14 @@ void AsciiEditor::editNode(const model::Model& asset, std::size_t nodeIndex) {
         flag("Rotate texture", "rotatetexture", mesh.rotateTexture);
         flag("Beaming", "beaming", mesh.beaming);
         flag("Background geometry", "m_bisbackgroundgeometry", mesh.backgroundGeometry);
+        if (node.aabb) {
+            auto* rebuild = new wxCheckBox(&dialog, wxID_ANY, "Rebuild AABB tree on Apply");
+            grid->Add(rebuild, 0, wxALIGN_CENTER_VERTICAL); grid->AddSpacer(1);
+            rebuild->Bind(wxEVT_CHECKBOX, [&, rebuild](wxCommandEvent&) {
+                if (rebuild->GetValue()) edits["aabb"] = std::nullopt;
+                else edits.erase("aabb");
+            });
+        }
         if (advanced_ && !node.lightsaber && !mesh.animated) {
             tangent = flag("Has tangent basis", "hastangentbasis", (mesh.mdxBitmap & 0x80u) != 0);
             auto* rebuild = new wxCheckBox(&dialog, wxID_ANY, "Regenerate tangent basis on Apply");

@@ -37,6 +37,7 @@ if(NOT TARGET neoshared::bif)
 endif()
 
 add_library(neomdl_core
+    src/core/CollisionAssets.cpp
     src/core/ActivePauseClock.cpp
     src/core/Engine2DA.cpp
     src/core/CreatureAppearance.cpp
@@ -222,6 +223,7 @@ if(NEOMDL_BUILD_WX_GUI OR NEOMDL_BUILD_WX_MODULE)
             src/wx/AsciiEditor.cpp
             src/wx/AsciiProperties.cpp
             src/wx/AsciiDataProperties.cpp
+            src/wx/CollisionEditor.cpp
             src/wx/ModelCanvas.cpp
             src/wx/SceneAudioPlayback.cpp
             src/wx/SceneAudioDevice.cpp

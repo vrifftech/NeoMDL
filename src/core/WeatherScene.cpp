@@ -15,7 +15,7 @@ WeatherResources prepareWeatherResources(const ResourceResolver& resolver,const 
     for(const auto* name:{"fx_rain","fx_snow","fx_lightning01"}) {
         job.update(0,0,std::string("Loading weather model ")+name);
         if(const auto resource=resolver(name,kMdlResourceType)) {
-            auto document=std::make_shared<ModelDocument>();document->openResource(*resource,resolver,job,asciiGame,asciiResources);
+            auto document=std::make_shared<ModelDocument>();document->openResource(*resource,resolver,job,asciiGame,asciiResources,true,false);
             result.models.emplace(name,std::move(document));
         }
     }
