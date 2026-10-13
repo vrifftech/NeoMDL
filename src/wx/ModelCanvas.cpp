@@ -15,6 +15,7 @@
 #include <wx/dcclient.h>
 #include <wx/log.h>
 #include <wx/msgdlg.h>
+#include <wx/utils.h>
 
 #if defined(__WXMAC__)
 #include <OpenGL/gl.h>
@@ -459,6 +460,9 @@ ModelCanvas::ModelCanvas(wxWindow* parent)
     Bind(wxEVT_MOTION, &ModelCanvas::onMouse, this);
     Bind(wxEVT_MOUSEWHEEL, &ModelCanvas::onMouse, this);
     Bind(wxEVT_MOUSE_CAPTURE_LOST, &ModelCanvas::onCaptureLost, this);
+    Bind(wxEVT_KEY_DOWN, &ModelCanvas::onKey, this);
+    Bind(wxEVT_KEY_UP, &ModelCanvas::onKey, this);
+    Bind(wxEVT_KILL_FOCUS, &ModelCanvas::onFocusLost, this);
 }
 
 ModelCanvas::~ModelCanvas() {
@@ -485,6 +489,7 @@ void ModelCanvas::setLoading(bool loading) {
         sceneAudioStatus_=error.what();dialogueMessages_.push_back(sceneAudioStatus_);
     }
     if(loading) {
+        resetCameraInput();
         resumeDialogueAudio_=dialogueAudio_.playing();
         if(resumeDialogueAudio_)dialogueAudio_.pause();
     } else {
@@ -2209,9 +2214,25 @@ bool ModelCanvas::activateAreaCameraId(std::int32_t cameraId) {
     if(activated){++sceneEffects_.historyEpoch;Refresh(false);}return activated;
 }
 
-void ModelCanvas::useOrbitCamera() {
-    ++sceneEffects_.historyEpoch;cameraScene_.deactivate();
-    dialogueCameraActive_=false;dialogueActorCameraActive_=false;
+void ModelCanvas::useViewerCamera(bool freeFly) {
+    auto position = viewerCameraPosition();
+    if (authoredCameraActive()) {
+        const auto world = inverseAreaReplayCamera(cameraView_);
+        position = {world.values[12], world.values[13], world.values[14]};
+        constexpr float degrees = 180.0f / 3.14159265358979323846f;
+        yaw_ = std::atan2(-world.values[8], -world.values[9]) * degrees;
+        pitch_ = std::atan2(world.values[10], std::hypot(world.values[8], world.values[9])) * degrees;
+    }
+    freeFly_ = freeFly;
+    flyPosition_ = position;
+    const auto offset = cameraOffset({0.0f, 0.0f, distance_});
+    center_ = {position.x - offset.x, position.y - offset.y, position.z - offset.z};
+    ++sceneEffects_.historyEpoch;
+    cameraScene_.deactivate();
+    dialogueCameraActive_ = false;
+    dialogueActorCameraActive_ = false;
+    if (activeAreaReplayCamera()) options_.useAreaReplayCamera = false;
+    resetCameraInput();
     Refresh(false);
 }
 
@@ -2965,6 +2986,7 @@ void ModelCanvas::updateAnimationVisibility() {
 void ModelCanvas::advance(float elapsedSeconds, bool advanceParticles,
                           bool advanceAnimations) {
     if (!std::isfinite(elapsedSeconds) || elapsedSeconds < 0.0f) elapsedSeconds = 0.0f;
+    advanceCamera(elapsedSeconds);
     synchronizeWorldClockCreatures();
     std::uint64_t snapshotMicroseconds=0u;
     // All four engine timers sample the same microsecond host snapshot. Only
@@ -3165,7 +3187,7 @@ const neomdl::model::Bounds& ModelCanvas::activeBounds() const noexcept {
 }
 
 void ModelCanvas::frameModel() {
-    ++sceneEffects_.historyEpoch;
+    useViewerCamera(false);
     center_ = {};
     float extent = 1.0f;
     const auto& bounds = activeBounds();
@@ -3176,9 +3198,41 @@ void ModelCanvas::frameModel() {
         extent = maximumExtent(bounds);
     }
     distance_ = std::max(2.0f, extent * 2.1f);
-    panX_ = 0.0f;
-    panY_ = 0.0f;
+    flySpeed_ = extent * 0.5f;
     Refresh(false);
+}
+
+model::Vec3 ModelCanvas::cameraOffset(model::Vec3 local) const {
+    constexpr float radians = 3.14159265358979323846f / 180.0f;
+    const auto sy = std::sin(yaw_ * radians), cy = std::cos(yaw_ * radians);
+    const auto sp = std::sin(pitch_ * radians), cp = std::cos(pitch_ * radians);
+    // Inverse of the viewer's pitch, yaw and Z-up to Y-up rotation.
+    return {cy * local.x + sy * sp * local.y - sy * cp * local.z,
+            -sy * local.x + cy * sp * local.y - cy * cp * local.z,
+            cp * local.y + sp * local.z};
+}
+
+model::Vec3 ModelCanvas::viewerCameraPosition() const {
+    if (freeFly_) return flyPosition_;
+    const auto offset = cameraOffset({0.0f, 0.0f, distance_});
+    return {center_.x + offset.x, center_.y + offset.y, center_.z + offset.z};
+}
+
+void ModelCanvas::advanceCamera(float elapsedSeconds) {
+    if (freeFlyCameraActive()) {
+        auto direction = cameraOffset({float(flyMovement_[0]) - float(flyMovement_[1]),
+                                      0.0f,
+                                      float(flyMovement_[4]) - float(flyMovement_[5])});
+        direction.z += float(flyMovement_[2]) - float(flyMovement_[3]);
+        const auto length = std::hypot(direction.x, direction.y, direction.z);
+        if (length > 0.0f) {
+            const auto step = flySpeed_ * elapsedSeconds * (wxGetKeyState(WXK_SHIFT) ? 4.0f : 1.0f) / length;
+            flyPosition_.x += direction.x * step;
+            flyPosition_.y += direction.y * step;
+            flyPosition_.z += direction.z * step;
+            Refresh(false);
+        }
+    }
 }
 
 void ModelCanvas::onPaint(wxPaintEvent&) {
@@ -3234,6 +3288,7 @@ void ModelCanvas::onSize(wxSizeEvent& event) {
 void ModelCanvas::onErase(wxEraseEvent&) {}
 
 void ModelCanvas::onMouse(wxMouseEvent& event) {
+    if (event.ButtonDown()) SetFocus();
     if(event.LeftDown()&&event.ControlDown()&&pickingCamera_&&document_&&document_->isOpen()) {
         const auto scale=GetContentScaleFactor();
         const auto x=static_cast<int>(std::lround(event.GetX()*scale));
@@ -3256,14 +3311,12 @@ void ModelCanvas::onMouse(wxMouseEvent& event) {
         }
         return;
     }
-    if (cameraScene_.anyActive() || dialogueCameraActive_||dialogueActorCameraActive_||activeAreaReplayCamera()) {
-        draggingRotate_ = false;
-        draggingPan_ = false;
-        if (HasCapture()) ReleaseMouse();
+    if (authoredCameraActive()) {
+        resetCameraInput();
         event.Skip();
         return;
     }
-    if (event.LeftDown()) {
+    if (event.LeftDown() || (freeFly_ && event.RightDown())) {
         draggingRotate_ = true;
         lastMouse_ = event.GetPosition();
         if (!HasCapture()) CaptureMouse();
@@ -3271,12 +3324,12 @@ void ModelCanvas::onMouse(wxMouseEvent& event) {
         draggingPan_ = true;
         lastMouse_ = event.GetPosition();
         if (!HasCapture()) CaptureMouse();
-    } else if (event.LeftUp()) {
-        draggingRotate_ = false;
-        if (!draggingPan_ && HasCapture()) ReleaseMouse();
+    } else if (event.LeftUp() || (freeFly_ && event.RightUp())) {
+        draggingRotate_ = event.LeftIsDown() || (freeFly_ && event.RightIsDown());
+        if (!draggingRotate_ && !draggingPan_ && HasCapture()) ReleaseMouse();
     } else if (event.RightUp() || event.MiddleUp()) {
-        draggingPan_ = false;
-        if (!draggingRotate_ && HasCapture()) ReleaseMouse();
+        draggingPan_ = event.MiddleIsDown() || (!freeFly_ && event.RightIsDown());
+        if (!draggingRotate_ && !draggingPan_ && HasCapture()) ReleaseMouse();
     } else if (event.Dragging()) {
         const auto current = event.GetPosition();
         const auto delta = current - lastMouse_;
@@ -3286,23 +3339,61 @@ void ModelCanvas::onMouse(wxMouseEvent& event) {
             pitch_ = std::clamp(pitch_ + static_cast<float>(delta.y) * 0.5f, -89.0f, 89.0f);
         }
         if (draggingPan_) {
-            const auto scale = std::max(0.001f, distance_ * 0.0015f);
-            panX_ += static_cast<float>(delta.x) * scale;
-            panY_ -= static_cast<float>(delta.y) * scale;
+            const auto scale = freeFly_ ? flySpeed_ * 0.003f : std::max(0.001f, distance_ * 0.0015f);
+            const auto offset = cameraOffset({-static_cast<float>(delta.x) * scale,
+                                              static_cast<float>(delta.y) * scale, 0.0f});
+            auto& position = freeFly_ ? flyPosition_ : center_;
+            position.x += offset.x;
+            position.y += offset.y;
+            position.z += offset.z;
         }
         Refresh(false);
     }
     if (event.GetWheelRotation() != 0) {
         const auto steps = static_cast<float>(event.GetWheelRotation()) /
                            static_cast<float>(std::max(1, event.GetWheelDelta()));
-        distance_ = std::max(0.01f, distance_ * std::pow(0.86f, steps));
+        if (freeFly_) {
+            flySpeed_ *= std::pow(1.25f, steps);
+        } else {
+            const auto travel = std::max(0.1f, distance_) * (1.0f - std::pow(0.86f, steps));
+            const auto previous = distance_;
+            distance_ = std::max(0.01f, distance_ - travel);
+            // Continue dollying through the pivot once the orbit radius reaches its minimum.
+            const auto offset = cameraOffset({0.0f, 0.0f, previous - distance_ - travel});
+            center_.x += offset.x;
+            center_.y += offset.y;
+            center_.z += offset.z;
+        }
         Refresh(false);
     }
 }
 
+void ModelCanvas::onKey(wxKeyEvent& event) {
+    constexpr std::array<int, 6> keys{{'D', 'A', 'E', 'Q', 'S', 'W'}};
+    const auto key = std::find(keys.begin(), keys.end(), event.GetKeyCode());
+    if (event.ControlDown() || event.AltDown()) {
+        flyMovement_.fill(false);
+        event.Skip();
+    } else if (freeFlyCameraActive() && key != keys.end())
+        flyMovement_[key - keys.begin()] = event.GetEventType() == wxEVT_KEY_DOWN;
+    else
+        event.Skip();
+}
+
+void ModelCanvas::onFocusLost(wxFocusEvent& event) {
+    resetCameraInput();
+    event.Skip();
+}
+
 void ModelCanvas::onCaptureLost(wxMouseCaptureLostEvent&) {
+    resetCameraInput();
+}
+
+void ModelCanvas::resetCameraInput() {
+    flyMovement_.fill(false);
     draggingRotate_ = false;
     draggingPan_ = false;
+    if (HasCapture()) ReleaseMouse();
 }
 
 void ModelCanvas::initializeGl() {
@@ -3379,8 +3470,19 @@ neomdl::render::GpuTexture ModelCanvas::textureForResref(
 void ModelCanvas::applyProjection(int width, int height) {
     const float aspect = static_cast<float>(width) / static_cast<float>(height);
     float viewAngle = 45.0f;
-    float nearPlane = std::max(0.005f, distance_ * 0.005f);
-    float farPlane = std::max(1000.0f, distance_ * 100.0f);
+    const auto position = viewerCameraPosition();
+    const auto& bounds = activeBounds();
+    // Clipping follows the camera's distance to the scene, independently of the orbit pivot.
+    const model::Vec3 gap{
+        std::max({bounds.minimum.x - position.x, 0.0f, position.x - bounds.maximum.x}),
+        std::max({bounds.minimum.y - position.y, 0.0f, position.y - bounds.maximum.y}),
+        std::max({bounds.minimum.z - position.z, 0.0f, position.z - bounds.maximum.z})};
+    const model::Vec3 reach{
+        std::max(std::abs(position.x - bounds.minimum.x), std::abs(position.x - bounds.maximum.x)),
+        std::max(std::abs(position.y - bounds.minimum.y), std::abs(position.y - bounds.maximum.y)),
+        std::max(std::abs(position.z - bounds.minimum.z), std::abs(position.z - bounds.maximum.z))};
+    float nearPlane = std::max(0.005f, std::hypot(gap.x, gap.y, gap.z) * 0.005f);
+    float farPlane = std::max(1000.0f, std::hypot(reach.x, reach.y, reach.z) * 1.1f);
     if (dialogueCameraActive_&&dialogueCameraScene_.active()) {
         viewAngle=dialogueCameraFov_;
         nearPlane=kK2AnimatedCameraNearClip;farPlane=kK2AnimatedCameraFarClip;
@@ -3450,14 +3552,14 @@ void ModelCanvas::drawScene() {
     } else if(const auto* camera=activeAreaReplayCamera()) {
         const auto view=inverseAreaReplayCamera(camera->world);glLoadMatrixf(view.values.data());
     } else {
-        glTranslatef(panX_, panY_, -distance_);
         glRotatef(pitch_, 1.0f, 0.0f, 0.0f);
         glRotatef(yaw_, 0.0f, 1.0f, 0.0f);
         // Odyssey models are Z-up; orient them into the conventional viewer
-        // Y-up frame only for the viewer's orbit camera. Authored cameras use
+        // Y-up frame only for the viewer's orbit/free-fly camera. Authored cameras use
         // their complete packed-driven position/orientation directly.
         glRotatef(-90.0f, 1.0f, 0.0f, 0.0f);
-        glTranslatef(-center_.x, -center_.y, -center_.z);
+        const auto position = viewerCameraPosition();
+        glTranslatef(-position.x, -position.y, -position.z);
     }
 
     drawGridAndAxes();

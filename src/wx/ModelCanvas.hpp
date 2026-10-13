@@ -421,8 +421,9 @@ public:
     bool activateCameraHook();
     bool activateAreaCamera(std::size_t index);
     bool activateAreaCameraId(std::int32_t cameraId);
-    void useOrbitCamera();
-    bool authoredCameraActive() const noexcept { return cameraScene_.anyActive()||dialogueCameraActive_||dialogueActorCameraActive_; }
+    void useViewerCamera(bool freeFly);
+    bool freeFlyCameraActive() const noexcept { return freeFly_ && !authoredCameraActive(); }
+    bool authoredCameraActive() const noexcept { return cameraScene_.anyActive()||dialogueCameraActive_||dialogueActorCameraActive_||activeAreaReplayCamera(); }
     ReferenceReattachResult reattachReferences(
         std::optional<std::size_t> ownerReference,
         std::optional<ReferenceObjectTarget> target);
@@ -478,7 +479,13 @@ private:
     void onSize(wxSizeEvent& event);
     void onErase(wxEraseEvent& event);
     void onMouse(wxMouseEvent& event);
+    void onKey(wxKeyEvent& event);
+    void onFocusLost(wxFocusEvent& event);
     void onCaptureLost(wxMouseCaptureLostEvent& event);
+    void resetCameraInput();
+    void advanceCamera(float elapsedSeconds);
+    model::Vec3 cameraOffset(model::Vec3 local) const;
+    model::Vec3 viewerCameraPosition() const;
     void initializeGl();
     void clearGpuTextures();
     neomdl::render::GpuTexture textureFor(const neoshared::material::TextureBinding& binding,
@@ -674,12 +681,14 @@ private:
     bool glInitialized_{};
     bool draggingRotate_{};
     bool draggingPan_{};
+    bool freeFly_{};
+    std::array<bool, 6> flyMovement_{};
+    model::Vec3 flyPosition_{};
+    float flySpeed_{5.0f};
     wxPoint lastMouse_;
     float yaw_{35.0f};
     float pitch_{25.0f};
     float distance_{10.0f};
-    float panX_{};
-    float panY_{};
     ReferenceScene referenceScene_;
     CameraScene cameraScene_;
     ParticleScene particleScene_;

@@ -128,6 +128,8 @@ enum CommandId {
     ID_ViewCameraHook,
     ID_ViewAreaCamera,
     ID_OrbitCamera,
+    ID_FreeFlyCamera,
+    ID_CameraControls,
     ID_CameraSettings,
     ID_ShowReferences,
     ID_PreviewLightsabers,
@@ -491,7 +493,7 @@ public:
     bool setTextureAngle(std::size_t owner,std::size_t node,float degrees,std::string& error) {
         return canvas_->setTextureAngle(owner,node,degrees,error);
     }
-    void frameModel() { canvas_->frameModel(); }
+    void frameModel() { canvas_->frameModel(); canvas_->SetFocus(); }
     AreaScene prepareAreaLoad() { return canvas_->prepareAreaLoad(); }
     void installArea(AreaScene pending,PreparedSceneAudioPlayback sounds={}) {
         canvas_->installArea(std::move(pending),std::move(sounds));
@@ -597,6 +599,7 @@ public:
     bool authoredCameraActive() const noexcept {
         return canvas_->authoredCameraActive();
     }
+    bool freeFlyCameraActive() const noexcept { return canvas_->freeFlyCameraActive(); }
     const CameraScene& cameraScene() const noexcept {return canvas_->cameraScene();}
     const TriggerScene& triggerScene() const noexcept {return canvas_->triggerScene();}
     TriggerMinePreviewInputs triggerMineInputs(std::size_t source) const {return canvas_->triggerMineInputs(source);}
@@ -642,8 +645,9 @@ public:
         const bool activated=canvas_->activateAreaCamera(index);
         updateDetails(selectedNode_);return activated;
     }
-    void useOrbitCamera() {
-        canvas_->useOrbitCamera();
+    void useViewerCamera(bool freeFly) {
+        canvas_->useViewerCamera(freeFly);
+        canvas_->SetFocus();
         updateDetails(selectedNode_);
     }
     void refreshDetails() { updateDetails(selectedNode_); }
@@ -3529,16 +3533,19 @@ private:
 
         auto* view = viewMenu_;
         view->Append(ID_FrameModel, "&Frame Model\tF");
+        auto* camera = new wxMenu;
+        camera->AppendCheckItem(ID_OrbitCamera, "&Orbit");
+        camera->AppendCheckItem(ID_FreeFlyCamera, "&Free Fly\tShift+F");
+        camera->Append(ID_CameraControls, "Navigation Controls...");
         if (features & PreviewCameras) {
-            auto* camera = new wxMenu;
+            camera->AppendSeparator();
             camera->Append(ID_ViewSelectedCamera, "View Through Selected Camera");
             camera->Append(ID_ViewCameraHook, "Attach to Camera Hook");
             if (area) camera->Append(ID_ViewAreaCamera, "View Through Area Camera...");
-            camera->Append(ID_OrbitCamera, "Return to Orbit Camera");
             camera->AppendSeparator();
             camera->Append(ID_CameraSettings, "Projection Settings...");
-            view->AppendSubMenu(camera, "&Camera");
         }
+        view->AppendSubMenu(camera, "&Camera");
         view->AppendSeparator();
         view->AppendCheckItem(ID_Textures, "Show &Textures");
         view->AppendCheckItem(ID_Lightmaps, "Show &Lightmaps");
@@ -3689,6 +3696,8 @@ private:
         const auto setCheck = [this](int id, bool checked) {
             if (auto* item = viewMenu_->FindItem(id)) item->Check(checked);
         };
+        setCheck(ID_OrbitCamera, active && !active->authoredCameraActive() && !active->freeFlyCameraActive());
+        setCheck(ID_FreeFlyCamera, active && active->freeFlyCameraActive());
         setCheck(ID_Textures, options_.textures);
         setCheck(ID_Lightmaps, options_.lightmaps);
         setCheck(ID_Wireframe, options_.wireframe);
@@ -4951,7 +4960,10 @@ private:
             case ID_LoadGrass: chooseGrassArea(); return;
             case ID_CloseModel: closePage(tabs_->GetSelection()); return;
             case ID_CloseAll: closeAll(); return;
-            case ID_FrameModel: if (auto* page = activePage()) page->frameModel(); return;
+            case ID_FrameModel:
+                if (auto* page = activePage()) page->frameModel();
+                updateState();
+                return;
             case ID_Textures: options_.textures = event.IsChecked(); applyDisplayOptions(); return;
             case ID_Lightmaps: options_.lightmaps = event.IsChecked(); applyDisplayOptions(); return;
             case ID_Wireframe: options_.wireframe = event.IsChecked(); applyDisplayOptions(); return;
@@ -4998,8 +5010,27 @@ private:
                 return;
             case ID_ViewAreaCamera: showAreaCameraChooser(); return;
             case ID_OrbitCamera:
-                if (auto* page = activePage()) page->useOrbitCamera();
+                if (auto* page = activePage()) page->useViewerCamera(false);
                 updateState();
+                return;
+            case ID_FreeFlyCamera:
+                if (auto* page = activePage()) page->useViewerCamera(!page->freeFlyCameraActive());
+                updateState();
+                return;
+            case ID_CameraControls:
+                wxMessageBox(
+                    "Orbit\n"
+                    "  Left drag: rotate around the pivot\n"
+                    "  Right or middle drag: pan\n"
+                    "  Mouse wheel: move closer or farther, continuing past the pivot\n\n"
+                    "Free Fly (Shift+F to toggle)\n"
+                    "  Click the viewport to give it keyboard focus\n"
+                    "  W/S: forward/backward; A/D: left/right\n"
+                    "  Q/E: down/up; hold Shift: move four times faster\n"
+                    "  Left or right drag: look around; middle drag: pan\n"
+                    "  Mouse wheel up/down: increase/decrease movement speed\n\n"
+                    "F: return to Orbit and frame the model or area.",
+                    "Camera Navigation", wxOK | wxICON_INFORMATION, this);
                 return;
             case ID_CameraSettings: showCameraSettings(); return;
             case ID_ShowReferences:
@@ -5068,7 +5099,8 @@ private:
                             active && active->canViewThroughSelectedCamera());
         enableModuleCommand(ID_ViewCameraHook, active && active->hasCameraHook());
         enableModuleCommand(ID_ViewAreaCamera,active&&!active->cameraScene().areaCameras().empty());
-        enableModuleCommand(ID_OrbitCamera, active && active->authoredCameraActive());
+        enableModuleCommand(ID_OrbitCamera, hasDocument);
+        enableModuleCommand(ID_FreeFlyCamera, hasDocument);
         enableModuleCommand(ID_CameraSettings,active&&active->cameraScene().engineRuntime());
         updateMenuChecks();
         if (const auto* page = active) {
