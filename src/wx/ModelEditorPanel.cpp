@@ -94,7 +94,6 @@ enum CommandId {
     ID_AreaRoom,
     ID_AreaAnimation,
     ID_RoomScriptAnimation,
-    ID_TrackAnimation,
     ID_DoorState,
     ID_AreaWeather,
     ID_SceneAudio,
@@ -3361,7 +3360,6 @@ private:
         auto* animation = new wxMenu;
         animation->Append(ID_AreaAnimation, "Area Object Animation...");
         animation->Append(ID_RoomScriptAnimation, "Room Animation...");
-        animation->Append(ID_TrackAnimation, "Track Follower Animation...");
         animation->Append(ID_DoorState, "Door State...");
         scene->AppendSubMenu(animation, "&Animation");
         scene->AppendSeparator();
@@ -4700,7 +4698,6 @@ private:
             case ID_SceneAudio: showSceneAudio(); return;
             case ID_AreaAnimation: chooseAreaAnimation(); return;
             case ID_RoomScriptAnimation: chooseRoomScriptAnimation(); return;
-            case ID_TrackAnimation: chooseTrackAnimation(); return;
             case ID_DoorState: chooseDoorState(); return;
             case ID_LoadGrass: chooseGrassArea(); return;
             case ID_CloseModel: closePage(tabs_->GetSelection()); return;
@@ -4790,8 +4787,6 @@ private:
         enableModuleCommand(ID_AreaRoom,activePage()&&!activePage()->areaScene().empty());
         enableModuleCommand(ID_SceneAudio,activePage()&&!activePage()->areaScene().empty());
         enableModuleCommand(ID_RoomScriptAnimation,activePage()&&!activePage()->areaScene().rooms().empty());
-        enableModuleCommand(ID_TrackAnimation,activePage()&&std::any_of(activePage()->areaScene().objects().begin(),
-            activePage()->areaScene().objects().end(),[](const auto& object){return object->kind()==AreaObjectKind::Track;}));
         enableModuleCommand(ID_AreaWeather,activePage()&&!activePage()->areaScene().empty()&&
             weatherRuntimeSupported(activePage()->areaScene().game()));
         enableModuleCommand(ID_CloseModel, hasDocument);
