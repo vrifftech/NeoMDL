@@ -331,7 +331,8 @@ MeshReconstruction reconstructMesh(Writer& out,const Node& node,const Mesh& mesh
     }
     auto& topology=topologies[selected];
     return {std::move(vertices),{std::move(topology.sourceVertices),std::move(topology.sourceFaces)},
-        std::move(reconstructed),topology.changedAdjacency,hasNormals,explicitNormals};
+        std::move(reconstructed),topology.changedAdjacency,hasNormals,explicitNormals,
+        std::vector<std::uint8_t>(mesh.faces.size(),0u)};
 }
 
 using CornerRows=std::vector<std::vector<std::array<std::int16_t,3>>>;
@@ -372,12 +373,14 @@ CornerRows generateGeometry(Model& rebuilt,const Model& source,
                 }
         for(std::size_t face=0;face<mesh.faces.size();++face) {
             ascii::RawFace value;
-            value.vertices=plan.topology.sourceFaces[face];
+            for(std::size_t corner=0;corner<3u;++corner)
+                value.vertices[corner]=plan.topology.sourceFaces[face][plan.sourceCorner(face,corner)];
             value.smoothing=smooth && !animation && plan.hasNormals?1u:plan.smoothing.masks[face];
             value.material=mesh.faces[face].surfaceMaterial;
             for(auto& channel:value.texcoords)
                 for(std::size_t corner=0;corner<3u;++corner)
-                    channel[corner]=static_cast<std::uint32_t>(mesh.faces[face].indices[corner]);
+                    channel[corner]=static_cast<std::uint32_t>(
+                        mesh.faces[face].indices[plan.sourceCorner(face,corner)]);
             if(plan.explicitNormals) raw.normalIndices.push_back(value.texcoords[0]);
             raw.faces.push_back(value);
         }
@@ -394,6 +397,11 @@ CornerRows generateGeometry(Model& rebuilt,const Model& source,
                 }
         }
         rows[index]=ascii::generateAsciiMeshGeometry(rebuilt,raw,rebuilt.meshes[index],job);
+        for(std::size_t face=0;face<rows[index].size();++face) {
+            const auto generated=rows[index][face];
+            for(std::size_t corner=0;corner<3u;++corner)
+                rows[index][face][plan.sourceCorner(face,corner)]=generated[corner];
+        }
     }
     initializeAsciiSkinSeamPools(rebuilt);
     return rows;
@@ -443,6 +451,116 @@ double measureSeamNormals(const Model& rebuilt,const Model& source,const CornerR
         error+=result.squaredNormalError;
     }
     return error;
+}
+
+double measureTangentBasis(Model& rebuilt,const Model& source,const CornerRows& rows,
+                          const std::map<const Mesh*,MeshReconstruction>& plans,
+                          const neoshared::bif::JobControl& job) {
+    double error{};
+    const auto difference=[](Vec3 a,Vec3 b) {
+        const double x=double(a.x)-b.x,y=double(a.y)-b.y,z=double(a.z)-b.z;
+        return (x*x+y*y)+z*z;
+    };
+    for(std::size_t index=0;index<source.meshes.size();++index) {
+        const auto& mesh=source.meshes[index];
+        const auto found=plans.find(&mesh);
+        if(!(mesh.mdxBitmap&0x80u) || mesh.animated || mesh.dangly || found==plans.end()) continue;
+        rebuildAsciiTangentBasis(rebuilt.meshes[index],job);
+        for(std::size_t face=0;face<mesh.faces.size();++face)
+            for(std::size_t corner=0;corner<3u;++corner) {
+                const auto& target=found->second.vertices[mesh.faces[face].indices[corner]].tangentBasis;
+                const auto& actual=rebuilt.meshes[index].vertices[rows[index][face][corner]].tangentBasis;
+                error+=difference(actual.bitangent,target.bitangent)+difference(actual.tangent,target.tangent)+
+                    difference(actual.normal,target.normal);
+            }
+    }
+    return error;
+}
+
+void reconstructCyclicCorners(Writer& out,const Model& model,const Model& frames) {
+    auto& plans=out.meshReconstructions;
+    auto current=frames;
+    const auto rows=generateGeometry(current,model,plans,false,out.job());
+    auto best=measureTangentBasis(current,model,rows,plans,out.job());
+    processAsciiSkinSeams(current,out.job());
+    best+=measureSeamNormals(current,model,rows,plans);
+    std::vector<std::pair<const Mesh*,std::size_t>> candidates;
+    std::vector<std::array<std::size_t,2>> pairs;
+    for(std::size_t index=0;index<model.meshes.size();++index) {
+        const auto& mesh=model.meshes[index];
+        const auto found=plans.find(&mesh);
+        if(found==plans.end() || mesh.animated || !found->second.hasNormals ||
+           found->second.explicitNormals) continue;
+        const auto& plan=found->second;
+        std::vector<bool> cancelled(plan.topology.sourceVertices.size(),false);
+        const auto cancellationOutput=[](Vec3 normal) {
+            return same(normal,{}) || same(normal,{1.0f,0.0f,0.0f});
+        };
+        for(std::size_t face=0;face<mesh.faces.size();++face)
+            for(std::size_t corner=0;corner<3u;++corner) {
+                const auto actual=current.meshes[index].normalAt(rows[index][face][corner]);
+                const auto target=plan.vertices[mesh.faces[face].indices[corner]].normal;
+                const auto source=plan.topology.sourceFaces[face][corner];
+                if(!same(actual,target) && (cancellationOutput(actual) || cancellationOutput(target)))
+                    cancelled[source]=true;
+            }
+        std::vector<std::vector<std::size_t>> incident(cancelled.size());
+        for(std::size_t face=0;face<mesh.faces.size();++face) {
+            const auto& vertices=plan.topology.sourceFaces[face];
+            if(std::any_of(vertices.begin(),vertices.end(),[&](auto vertex){return cancelled[vertex];})) {
+                for(const auto vertex:vertices)
+                    if(cancelled[vertex]) incident[vertex].push_back(candidates.size());
+                candidates.emplace_back(&mesh,face);
+            }
+        }
+        for(const auto& faces:incident)
+            for(std::size_t first=0;first<faces.size();++first)
+                for(std::size_t second=first+1u;second<faces.size();++second)
+                    if(faces[first]!=faces[second]) pairs.push_back({faces[first],faces[second]});
+    }
+    std::sort(pairs.begin(),pairs.end());
+    pairs.erase(std::unique(pairs.begin(),pairs.end()),pairs.end());
+    if(candidates.empty()) return;
+    // Cyclic corners retain triangle winding and connectivity but change
+    // float cross-product rounding. Score all three starts only around
+    // cancelled source normals, using the unchanged normal/basis producers.
+    bool improved;
+    do {
+        improved=false;
+        auto selected=plans;
+        const auto consider=[&](std::map<const Mesh*,MeshReconstruction> trial) {
+            auto rebuilt=frames;
+            const auto generated=generateGeometry(rebuilt,model,trial,false,out.job());
+            if(!preservesSkinChannels(model,generated)) return;
+            auto error=measureTangentBasis(rebuilt,model,generated,trial,out.job());
+            processAsciiSkinSeams(rebuilt,out.job());
+            error+=measureSeamNormals(rebuilt,model,generated,trial);
+            if(error<best) {best=error;selected=std::move(trial);improved=true;}
+        };
+        for(const auto& candidate:candidates)
+            for(std::uint8_t rotation=0u;rotation<3u;++rotation) {
+                if(plans.at(candidate.first).cornerRotations[candidate.second]==rotation) continue;
+                auto trial=plans;
+                trial.at(candidate.first).cornerRotations[candidate.second]=rotation;
+                consider(std::move(trial));
+            }
+        // Opposing contributions can require two cyclic starts to move
+        // together. Only pair faces incident to the same cancelled source.
+        if(!improved) for(const auto& pair:pairs) {
+            const auto& first=candidates[pair[0]];
+            const auto& second=candidates[pair[1]];
+            for(std::uint8_t a=0u;a<3u;++a)
+                for(std::uint8_t b=0u;b<3u;++b) {
+                    if(plans.at(first.first).cornerRotations[first.second]==a ||
+                       plans.at(second.first).cornerRotations[second.second]==b) continue;
+                    auto trial=plans;
+                    trial.at(first.first).cornerRotations[first.second]=a;
+                    trial.at(second.first).cornerRotations[second.second]=b;
+                    consider(std::move(trial));
+                }
+        }
+        if(improved) plans=std::move(selected);
+    } while(improved);
 }
 
 } // namespace
@@ -590,6 +708,62 @@ void reconstructSkinSeamSmoothing(Writer& out,const Model& model) {
                 consider(std::move(trial));
             }
     } while(best<previous);
+
+    // Retained tangent channels precede ProcessSkinSeams and disambiguate
+    // smoothing inputs whose final ordinary normals became equal. The local
+    // fit proposes intersections; the actual producers judge their effects.
+    double bestTangent{};
+    bool tangentChanged=std::any_of(plans.begin(),plans.end(),[](const auto& entry) {
+        const auto& mesh=*entry.first;
+        return (mesh.mdxBitmap&0x80u) && !mesh.animated && !mesh.dangly && !entry.second.explicitNormals;
+    });
+    while(tangentChanged) {
+        tangentChanged=false;
+        // A corner-local proposal can split a row before its last writer
+        // becomes independently selectable in the next generated mapping.
+        for(const bool useGeneratedWriters:{false,true}) {
+            auto current=frames;
+            const auto currentRows=generateGeometry(current,model,plans,false,out.job());
+            bestTangent=measureTangentBasis(current,model,currentRows,plans,out.job());
+            auto candidate=plans;
+            bool proposed=false;
+            for(std::size_t index=0;index<model.meshes.size();++index) {
+                const auto& mesh=model.meshes[index];
+                const auto found=candidate.find(&mesh);
+                if(!(mesh.mdxBitmap&0x80u) || mesh.animated || mesh.dangly || found==candidate.end() ||
+                   found->second.explicitNormals) continue;
+                auto& plan=found->second;
+                const TangentSmoothingSource tangents{
+                    current.meshes[index].asciiTangentSource->firstCornerNormals,currentRows[index],useGeneratedWriters};
+                const auto smoothing=reconstructSmoothing(mesh,plan.vertices,plan.topology.sourceVertices,
+                    plan.topology.sourceFaces,out.job(),nullptr,true,nullptr,&plan.smoothing.masks,false,
+                    &tangents);
+                proposed|=smoothing.masks!=plan.smoothing.masks;
+                plan.smoothing=smoothing;
+            }
+            if(!proposed) continue;
+            const auto considerTangents=[&](Plans trial) {
+                auto rebuilt=frames;
+                const auto rows=generateGeometry(rebuilt,model,trial,false,out.job());
+                const auto tangentError=measureTangentBasis(rebuilt,model,rows,trial,out.job());
+                processAsciiSkinSeams(rebuilt,out.job());
+                if(!preservesSkinChannels(model,rows)) return;
+                const auto normalError=measureSeamNormals(rebuilt,model,rows,trial);
+                if(normalError<=best && tangentError<=bestTangent &&
+                   (normalError<best || tangentError<bestTangent)) {
+                    best=normalError;bestTangent=tangentError;plans=std::move(trial);tangentChanged=true;
+                }
+            };
+            considerTangents(candidate);
+            for(const auto& entry:candidate)
+                if(entry.second.smoothing.masks!=plans.at(entry.first).smoothing.masks) {
+                    auto trial=plans;
+                    trial.at(entry.first)=entry.second;
+                    considerTangents(std::move(trial));
+                }
+        }
+    }
+    reconstructCyclicCorners(out,model,frames);
 }
 
 ReconstructedMesh writeMesh(Writer& out,const Model& model,const Node& node,const Mesh& mesh) {
@@ -632,10 +806,12 @@ ReconstructedMesh writeMesh(Writer& out,const Model& model,const Node& node,cons
         out.line("normals "+std::to_string(vertices.size()));
         for(const auto& vertex:vertices) out.line(out.vector(vertex.normal));
         out.line("normalindices "+std::to_string(mesh.faces.size()));
-        for(const auto& face:mesh.faces)
-            out.line(std::to_string(static_cast<std::uint32_t>(face.indices[0]))+" "+
-                std::to_string(static_cast<std::uint32_t>(face.indices[1]))+" "+
-                std::to_string(static_cast<std::uint32_t>(face.indices[2])));
+        for(std::size_t i=0;i<mesh.faces.size();++i) {
+            const auto& face=mesh.faces[i];
+            out.line(std::to_string(static_cast<std::uint32_t>(face.indices[reconstruction.sourceCorner(i,0u)]))+" "+
+                std::to_string(static_cast<std::uint32_t>(face.indices[reconstruction.sourceCorner(i,1u)]))+" "+
+                std::to_string(static_cast<std::uint32_t>(face.indices[reconstruction.sourceCorner(i,2u)])));
+        }
     }
     if(animation && hasNormals) {
         // NW ProcessVerts uses raw vertex indices for a supplied normal list.
@@ -662,9 +838,9 @@ ReconstructedMesh writeMesh(Writer& out,const Model& model,const Node& node,cons
             out.line("texindices"+std::to_string(channel)+" "+std::to_string(mesh.faces.size()));
             for(std::size_t i=0;i<mesh.faces.size();++i) {
                 const auto& face=mesh.faces[i];
-                out.line(std::to_string(static_cast<std::uint32_t>(face.indices[0]))+" "+
-                    std::to_string(static_cast<std::uint32_t>(face.indices[1]))+" "+
-                    std::to_string(static_cast<std::uint32_t>(face.indices[2])));
+                out.line(std::to_string(static_cast<std::uint32_t>(face.indices[reconstruction.sourceCorner(i,0u)]))+" "+
+                    std::to_string(static_cast<std::uint32_t>(face.indices[reconstruction.sourceCorner(i,1u)]))+" "+
+                    std::to_string(static_cast<std::uint32_t>(face.indices[reconstruction.sourceCorner(i,2u)])));
             }
         }
     }
@@ -702,11 +878,13 @@ ReconstructedMesh writeMesh(Writer& out,const Model& model,const Node& node,cons
     for(std::size_t i=0;i<mesh.faces.size();++i) {
         const auto& sourceFace=result.sourceFaces[i];
         const auto& compiled=mesh.faces[i];
-        out.line(std::to_string(sourceFace[0])+" "+std::to_string(sourceFace[1])+" "+std::to_string(sourceFace[2])+" "+
+        const auto a=reconstruction.sourceCorner(i,0u),b=reconstruction.sourceCorner(i,1u),
+                   c=reconstruction.sourceCorner(i,2u);
+        out.line(std::to_string(sourceFace[a])+" "+std::to_string(sourceFace[b])+" "+std::to_string(sourceFace[c])+" "+
             std::to_string(static_cast<std::int32_t>(smoothing[i]))+" "+
-            std::to_string(static_cast<std::uint32_t>(compiled.indices[0]))+" "+
-            std::to_string(static_cast<std::uint32_t>(compiled.indices[1]))+" "+
-            std::to_string(static_cast<std::uint32_t>(compiled.indices[2]))+" "+
+            std::to_string(static_cast<std::uint32_t>(compiled.indices[a]))+" "+
+            std::to_string(static_cast<std::uint32_t>(compiled.indices[b]))+" "+
+            std::to_string(static_cast<std::uint32_t>(compiled.indices[c]))+" "+
             std::to_string(static_cast<std::int32_t>(compiled.surfaceMaterial)));
     }
     if(mesh.dangly) {

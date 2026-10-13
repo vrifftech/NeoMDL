@@ -11,7 +11,15 @@ namespace {
 
 constexpr auto ownFace=std::numeric_limits<std::size_t>::max();
 struct Contribution { std::size_t face,relation; };
-struct Corner { Vec3 target; std::size_t source,compiledVertex; std::vector<Contribution> contributions; bool scored{true}; };
+struct Corner {
+    Vec3 target;
+    std::size_t source,compiledVertex;
+    std::vector<Contribution> contributions;
+    bool scored{true};
+    TangentBasis basisTarget;
+    std::vector<Contribution> basisContributions;
+    std::size_t basisWriter{};
+};
 struct Relation { std::size_t first,second; std::vector<std::size_t> corners; };
 
 Vec3 subtract(Vec3 a,Vec3 b) { return {a.x-b.x,a.y-b.y,a.z-b.z}; }
@@ -35,6 +43,12 @@ double difference(Vec3 a,Vec3 b) {
     const double z=static_cast<double>(a.z)-b.z;
     return (x*x+y*y)+z*z;
 }
+Vec3 normalizeTangent(Vec3 value) {
+    const float length=std::sqrt((value.x*value.x+value.y*value.y)+value.z*value.z);
+    if(static_cast<double>(length)<1e-9) return {1.0f,0.0f,0.0f};
+    const float scale=1.0f/length;
+    return {value.x*scale,value.y*scale,value.z*scale};
+}
 
 struct Smoothing {
     std::vector<Vec3> crosses;
@@ -42,6 +56,7 @@ struct Smoothing {
     std::vector<Relation> relations;
     std::vector<std::vector<std::size_t>> faceRelations;
     const neoshared::bif::JobControl& job;
+    std::vector<TangentBasis> faceBases;
 
     Vec3 normal(std::size_t corner,const std::vector<std::uint8_t>& joined) const {
         Vec3 sum{};
@@ -56,6 +71,24 @@ struct Smoothing {
         return normalizeSmoothing(sum);
     }
     double error(std::size_t corner,const std::vector<std::uint8_t>& joined) const {
+        if(!faceBases.empty()) {
+            // CalculateTangentSpaceBasis starts with self, then accumulates
+            // each matching position corner in face order (K2 0x6e3f40).
+            const auto writer=corners[corner].basisWriter;
+            auto basis=faceBases[writer/3u];
+            const auto add=[](Vec3 a,Vec3 b) { return Vec3{a.x+b.x,a.y+b.y,a.z+b.z}; };
+            for(const auto& entry:corners[writer].basisContributions)
+                if(entry.relation!=ownFace && joined[entry.relation]) {
+                    const auto& other=faceBases[entry.face];
+                    basis.bitangent=add(basis.bitangent,other.bitangent);
+                    basis.tangent=add(basis.tangent,other.tangent);
+                    basis.normal=add(basis.normal,other.normal);
+                }
+            const auto& target=corners[corner].basisTarget;
+            return difference(normalizeTangent(basis.bitangent),target.bitangent)+
+                difference(normalizeTangent(basis.tangent),target.tangent)+
+                difference(normalizeTangent(basis.normal),target.normal);
+        }
         return corners[corner].scored?difference(normal(corner,joined),corners[corner].target):0.0;
     }
     std::vector<double> errors(const std::vector<std::uint8_t>& joined) const {
@@ -93,15 +126,18 @@ struct Smoothing {
 
     std::vector<std::uint8_t> fitPairs(std::vector<std::uint8_t> joined) const {
         std::vector<std::pair<std::size_t,std::size_t>> pairs;
-        for(const auto& corner:corners) if(corner.scored)
-            for(std::size_t a=0;a<corner.contributions.size();++a) {
-                const auto first=corner.contributions[a].relation;
+        for(const auto& corner:corners) if(corner.scored) {
+            const auto& contributions=faceBases.empty()?corner.contributions:
+                corners[corner.basisWriter].basisContributions;
+            for(std::size_t a=0;a<contributions.size();++a) {
+                const auto first=contributions[a].relation;
                 if(first==ownFace) continue;
-                for(std::size_t b=a+1u;b<corner.contributions.size();++b) {
-                    const auto second=corner.contributions[b].relation;
-                    if(second!=ownFace) pairs.push_back(std::minmax(first,second));
+                for(std::size_t b=a+1u;b<contributions.size();++b) {
+                    const auto second=contributions[b].relation;
+                    if(second!=ownFace && second!=first) pairs.push_back(std::minmax(first,second));
                 }
             }
+        }
         std::sort(pairs.begin(),pairs.end());
         pairs.erase(std::unique(pairs.begin(),pairs.end()),pairs.end());
         auto current=errors(joined);
@@ -178,6 +214,50 @@ struct Smoothing {
                 for(const auto corner:affected) current[corner]=error(corner,joined);
             } else {
                 for(const auto relation:added) joined[relation]=0u;
+            }
+        }
+        return joined;
+    }
+
+    std::vector<std::uint8_t> fitSharedTangents(std::vector<std::uint8_t> joined) const {
+        // Corners of a retained row share the final basis. Intersect their
+        // current contribution sets to propose coupled removals together.
+        std::map<std::pair<std::size_t,std::size_t>,std::vector<std::size_t>> groups;
+        for(std::size_t i=0;i<corners.size();++i)
+            groups[{corners[i].source,corners[i].compiledVertex}].push_back(i);
+        auto current=errors(joined);
+        for(const auto& group:groups) {
+            job.check();
+            std::vector<std::size_t> common;
+            bool first=true;
+            for(const auto corner:group.second) {
+                std::vector<std::size_t> faces;
+                for(const auto& entry:corners[corner].basisContributions)
+                    if(entry.relation==ownFace || joined[entry.relation]) faces.push_back(entry.face);
+                if(first) { common=std::move(faces);first=false; }
+                else common.erase(std::remove_if(common.begin(),common.end(),[&](std::size_t face) {
+                    return !std::binary_search(faces.begin(),faces.end(),face);
+                }),common.end());
+            }
+            std::vector<std::size_t> removed,affected;
+            for(const auto corner:group.second)
+                for(const auto& entry:corners[corner].basisContributions)
+                    if(entry.relation!=ownFace && joined[entry.relation] &&
+                       !std::binary_search(common.begin(),common.end(),entry.face)) removed.push_back(entry.relation);
+            std::sort(removed.begin(),removed.end());
+            removed.erase(std::unique(removed.begin(),removed.end()),removed.end());
+            for(const auto relation:removed)
+                affected.insert(affected.end(),relations[relation].corners.begin(),relations[relation].corners.end());
+            std::sort(affected.begin(),affected.end());
+            affected.erase(std::unique(affected.begin(),affected.end()),affected.end());
+            double before{},after{};
+            for(const auto corner:affected) before+=current[corner];
+            for(const auto relation:removed) joined[relation]=0u;
+            for(const auto corner:affected) after+=error(corner,joined);
+            if(after<before) {
+                for(const auto corner:affected) current[corner]=error(corner,joined);
+            } else {
+                for(const auto relation:removed) joined[relation]=1u;
             }
         }
         return joined;
@@ -282,10 +362,12 @@ ReconstructedSmoothing reconstructSmoothing(
     const neoshared::bif::JobControl& job,
     const std::vector<Vec3>* cornerTargets,bool refine,
     const std::vector<bool>* ignoredCorners,
-    const std::vector<std::uint32_t>* seedMasks,bool useStoredRows) {
-    Smoothing work{{},{},{},{},job};
+    const std::vector<std::uint32_t>* seedMasks,bool useStoredRows,
+    const TangentSmoothingSource* tangents) {
+    Smoothing work{{},{},{},{},job,{}};
     work.faceRelations.resize(sourceFaces.size());
     std::vector<std::vector<std::size_t>> incident(sourceVertices.size());
+    std::map<std::array<float,3>,std::vector<std::size_t>> positionFaces;
     for(std::size_t face=0;face<sourceFaces.size();++face) {
         job.check();
         const auto& indices=sourceFaces[face];
@@ -296,6 +378,28 @@ ReconstructedSmoothing reconstructSmoothing(
         for(const auto source:indices) {
             auto& faces=incident[source];
             if(faces.empty() || faces.back()!=face) faces.push_back(face);
+            if(tangents) {
+                const auto p=vertices[sourceVertices[source]].position;
+                positionFaces[{{p.x,p.y,p.z}}].push_back(face);
+            }
+        }
+        if(tangents) {
+            const auto& va=vertices[mesh.faces[face].indices[0]];
+            const auto& vb=vertices[mesh.faces[face].indices[1]];
+            const auto& vc=vertices[mesh.faces[face].indices[2]];
+            const auto p=subtract(b,a),q=subtract(c,a);
+            const float pu=vb.texcoord0.x-va.texcoord0.x,qu=vc.texcoord0.x-va.texcoord0.x;
+            const float pv=vb.texcoord0.y-va.texcoord0.y,qv=vc.texcoord0.y-va.texcoord0.y;
+            TangentBasis basis;
+            basis.bitangent=normalizeTangent({q.x*pu-p.x*qu,q.y*pu-p.y*qu,q.z*pu-p.z*qu});
+            basis.tangent=normalizeTangent({q.x*pv-p.x*qv,q.y*pv-p.y*qv,q.z*pv-p.z*qv});
+            basis.normal=cross(basis.bitangent,basis.tangent);
+            const auto n=tangents->firstCornerNormals[face];
+            if((basis.normal.x*n.x+basis.normal.y*n.y)+basis.normal.z*n.z<0.0f) {
+                basis.tangent={-basis.tangent.x,-basis.tangent.y,-basis.tangent.z};
+                basis.normal={-basis.normal.x,-basis.normal.y,-basis.normal.z};
+            }
+            work.faceBases.push_back(basis);
         }
     }
     std::map<std::pair<std::size_t,std::size_t>,std::size_t> relationIndices;
@@ -305,6 +409,10 @@ ReconstructedSmoothing reconstructSmoothing(
             for(std::size_t b=a+1u;b<faces.size();++b)
                 relationIndices.emplace(std::make_pair(faces[a],faces[b]),0u);
     }
+    for(const auto& entry:positionFaces)
+        for(const auto a:entry.second)
+            for(const auto b:entry.second)
+                if(a<b) relationIndices.emplace(std::make_pair(a,b),0u);
     for(auto& entry:relationIndices) {
         entry.second=work.relations.size();
         const auto first=entry.first.first,second=entry.first.second;
@@ -319,15 +427,44 @@ ReconstructedSmoothing reconstructSmoothing(
                 vertices[static_cast<std::size_t>(mesh.faces[face].indices[corner])].normal;
             Corner value{target,sourceFaces[face][corner],
                 static_cast<std::size_t>(mesh.faces[face].indices[corner]),{},
-                !ignoredCorners || !(*ignoredCorners)[face*3u+corner]};
+                !ignoredCorners || !(*ignoredCorners)[face*3u+corner],{}, {},0u};
             for(const auto candidate:incident[sourceFaces[face][corner]]) {
                 const auto relation=candidate==face?ownFace:
                     relationIndices.at(std::minmax(face,candidate));
                 value.contributions.push_back({candidate,relation});
                 if(relation!=ownFace) work.relations[relation].corners.push_back(index);
             }
+            if(tangents) {
+                value.basisTarget=vertices[value.compiledVertex].tangentBasis;
+                const auto p=vertices[sourceVertices[value.source]].position;
+                for(const auto candidate:positionFaces.at({{p.x,p.y,p.z}})) {
+                    const auto relation=candidate==face?ownFace:relationIndices.at(std::minmax(face,candidate));
+                    value.basisContributions.push_back({candidate,relation});
+                }
+            }
             work.corners.push_back(std::move(value));
         }
+    if(tangents) {
+        // The last face using a generated row overwrites its basis. Every
+        // corner reading that row therefore depends on the writer's joins.
+        std::map<std::int16_t,std::size_t> writers;
+        for(std::size_t face=0;face<tangents->cornerRows.size();++face)
+            for(std::size_t corner=0;corner<3u;++corner)
+                writers[tangents->cornerRows[face][corner]]=face*3u+corner;
+        for(auto& relation:work.relations) relation.corners.clear();
+        for(std::size_t corner=0;corner<work.corners.size();++corner) {
+            const auto writer=tangents->useGeneratedWriters?
+                writers.at(tangents->cornerRows[corner/3u][corner%3u]):corner;
+            work.corners[corner].basisWriter=writer;
+            for(const auto& contribution:work.corners[writer].basisContributions)
+                if(contribution.relation!=ownFace)
+                    work.relations[contribution.relation].corners.push_back(corner);
+        }
+        for(auto& relation:work.relations) {
+            std::sort(relation.corners.begin(),relation.corners.end());
+            relation.corners.erase(std::unique(relation.corners.begin(),relation.corners.end()),relation.corners.end());
+        }
+    }
     ReconstructedSmoothing result;
     if(seedMasks) result.masks=*seedMasks;
     else result.masks.assign(sourceFaces.size(),0u);
@@ -393,14 +530,18 @@ ReconstructedSmoothing reconstructSmoothing(
         consider(work.fit(joined,false));
         consider(work.fit(joined,true));
         consider(work.fitPairs(joined));
-        consider(work.fitSharedVertices(joined));
-        consider(work.fitSharedVertices(joined,true));
-        consider(work.fitSharedVertices(joined,true,true));
+        if(tangents) consider(work.fitSharedTangents(joined));
+        else {
+            consider(work.fitSharedVertices(joined));
+            consider(work.fitSharedVertices(joined,true));
+            consider(work.fitSharedVertices(joined,true,true));
+        }
         if(!(best<previous)) break;
     }
-    result.squaredNormalError=best;
+    result.squaredNormalError=tangents?0.0:best;
     for(std::size_t corner=0;corner<work.corners.size();++corner) {
         const auto actual=work.normal(corner,joined),target=work.corners[corner].target;
+        if(tangents) result.squaredNormalError+=difference(actual,target);
         const float delta=std::max({std::abs(actual.x-target.x),std::abs(actual.y-target.y),std::abs(actual.z-target.z)});
         result.changedCornerNormals+=delta!=0.0f;
         result.maxNormalComponentDifference=std::max(result.maxNormalComponentDifference,delta);

@@ -724,6 +724,24 @@ void postProcessSkinNode(RawNode& raw,const neoshared::bif::JobControl& job) {
         raw.processedSkinNormals=processVertices(raw,*raw.mesh,job);
 }
 
+void retainTangentSource(const RawNode& raw,Mesh& mesh,
+        const std::vector<std::array<std::size_t,3>>& normalIndices,
+        const std::vector<GeneratedVertex>& generated,bool animated) {
+    // NW's authored tangent4 pool makes CalculateTangentSpaceBasis return
+    // immediately (0x457710). Do not rebuild it as a KOTOR nine-float basis.
+    if(mesh.dangly || (animated && !raw.animTangents.empty())) return;
+    auto source=std::make_shared<AsciiTangentSource>();
+    for(std::size_t i=0;i<mesh.faces.size();++i) {
+        source->faceSmoothing.push_back(raw.faces[i].smoothing);
+        source->firstCornerNormals.push_back(raw.normals.at(normalIndices[i][0]));
+    }
+    for(const auto& vertex:generated) {
+        source->generatedPositions.push_back(vertex.position);
+        source->generatedTexcoords.push_back({vertex.texcoords[0].x,vertex.texcoords[0].y});
+    }
+    mesh.asciiTangentSource=std::move(source);
+}
+
 std::vector<std::array<std::int16_t,3>> generateAsciiMeshGeometry(
         Model& model,RawNode& raw,Mesh& mesh,const neoshared::bif::JobControl& job) {
     const bool animated=raw.node.animmesh.has_value();
@@ -732,6 +750,7 @@ std::vector<std::array<std::int16_t,3>> generateAsciiMeshGeometry(
     corners.reserve(raw.faces.size());
     const auto generated=animated?generateAnimVertices(raw,mesh,normals,job):
         generateVertices(raw,mesh,normals,job,&corners);
+    retainTangentSource(raw,mesh,normals,generated,animated);
     if(animated)
         for(const auto& face:mesh.faces) corners.push_back(face.indices);
     mesh.enginePrelightVertexCount=static_cast<std::uint16_t>(generated.size());
@@ -799,20 +818,7 @@ void buildMesh(Model& model,RawNode& raw,std::size_t nodeIndex,
         generateVertices(raw,mesh,normalIndices,job);
     if(raw.node.flags==0x821u) {lightsaber(raw,mesh);return;}
     neighbors(raw,mesh);
-    // NW's authored tangent4 pool makes CalculateTangentSpaceBasis return
-    // immediately (0x457710). Do not rebuild it as a KOTOR nine-float basis.
-    if(!mesh.dangly && !(animated && !raw.animTangents.empty())) {
-        auto tangentSource=std::make_shared<AsciiTangentSource>();
-        for(std::size_t i=0;i<mesh.faces.size();++i) {
-            tangentSource->faceSmoothing.push_back(raw.faces[i].smoothing);
-            tangentSource->firstCornerNormals.push_back(raw.normals.at(normalIndices[i][0]));
-        }
-        for(const auto& vertex:generated) {
-            tangentSource->generatedPositions.push_back(vertex.position);
-            tangentSource->generatedTexcoords.push_back({vertex.texcoords[0].x,vertex.texcoords[0].y});
-        }
-        mesh.asciiTangentSource=std::move(tangentSource);
-    }
+    retainTangentSource(raw,mesh,normalIndices,generated,animated);
     // InternalPostProcess narrows the generated count before allocating and
     // copying the MDX/CPU rows. The temporary NodeVertex list remains full
     // for tangent construction (K1 0x5c620c/0x5c6420, K2 0x6e499f/0x6e4c55).

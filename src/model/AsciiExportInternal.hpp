@@ -19,6 +19,10 @@ struct MeshReconstruction {
     std::size_t changedAdjacency{};
     bool hasNormals{};
     bool explicitNormals{};
+    std::vector<std::uint8_t> cornerRotations;
+    std::size_t sourceCorner(std::size_t face,std::size_t corner) const {
+        return (corner+cornerRotations[face])%3u;
+    }
 };
 
 class Writer {
