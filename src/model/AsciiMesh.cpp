@@ -216,21 +216,32 @@ std::vector<std::array<std::size_t,3>> processVertices(RawNode& raw,Mesh& mesh,
         }
     } else {
         raw.normals.clear();
+        std::vector<std::vector<std::pair<std::size_t,std::size_t>>> incident(raw.vertices.size());
+        std::vector<Vec3> crosses;
+        for(std::size_t face=0;face<raw.faces.size();++face) {
+            const auto& candidate=raw.faces[face];
+            crosses.push_back(raw.normalPositionPrecision==64u?
+                preciseNormalCross(candidate,raw):faceCross(candidate,raw.vertices));
+            // The engine chooses the last matching corner of a repeated vertex.
+            for(std::size_t corner=0;corner<3u;++corner) {
+                auto& faces=incident.at(candidate.vertices[corner]);
+                if(!faces.empty() && faces.back().first==face) faces.back().second=corner;
+                else faces.emplace_back(face,corner);
+            }
+        }
         for(std::size_t i=0;i<raw.faces.size();++i) {
             job.check();
             const auto& current=raw.faces[i];
             for(std::size_t corner=0;corner<3u;++corner) {
                 Vec3 sum{}; bool reused=false;
-                for(std::size_t j=0;j<raw.faces.size();++j) {
+                for(const auto& entry:incident[current.vertices[corner]]) {
+                    const auto j=entry.first;
                     const auto& candidate=raw.faces[j];
-                    int shared=2;
-                    while(shared>=0 && candidate.vertices[static_cast<std::size_t>(shared)]!=current.vertices[corner]) --shared;
-                    if(shared<0 || (i!=j && !(current.smoothing&candidate.smoothing))) continue;
-                    const auto weighted=raw.normalPositionPrecision==64u?
-                        preciseNormalCross(candidate,raw):faceCross(candidate,raw.vertices);
+                    if(i!=j && !(current.smoothing&candidate.smoothing)) continue;
+                    const auto weighted=crosses[j];
                     sum={sum.x+weighted.x,sum.y+weighted.y,weighted.z+sum.z};
                     if(j<i && current.smoothing==candidate.smoothing) {
-                        indices[i][corner]=indices[j][static_cast<std::size_t>(shared)];
+                        indices[i][corner]=indices[j][entry.second];
                         reused=true;break;
                     }
                 }
@@ -474,6 +485,7 @@ std::vector<GeneratedVertex> generateVertices(RawNode& raw,Mesh& mesh,
     // equal(Vector) 0x664744 compares all three components exactly, including
     // the third authoring UV coordinate that is omitted from final MDX rows.
     std::vector<GeneratedVertex> vertices;
+    std::map<std::array<std::uint32_t,3>,std::vector<std::size_t>> positions;
     mesh.faces.resize(raw.faces.size());
     raw.tangentFaceSources.resize(raw.faces.size());
     const bool dangly=raw.node.flags==0x121u;
@@ -495,9 +507,20 @@ std::vector<GeneratedVertex> generateVertices(RawNode& raw,Mesh& mesh,
                 if(!raw.texcoords[channel].empty())
                     vertex.texcoords[channel]=raw.texcoords[channel].at(raw.faces[i].texcoords[channel][corner]);
             if(dangly) vertex.constraint=raw.constraints.at(vertex.source);
-            auto found=std::find_if(vertices.begin(),vertices.end(),[&](const auto& existing){return same(existing,vertex,dangly);});
-            auto index=static_cast<std::size_t>(found-vertices.begin());
-            if(found==vertices.end()) vertices.push_back(vertex);
+            std::array<std::uint32_t,3> key;
+            std::size_t axis{};
+            for(const auto value:{vertex.position.x,vertex.position.y,vertex.position.z}) {
+                // Numeric equality joins both zero signs; other attributes
+                // still use NodeVertex equality within each position bucket.
+                std::memcpy(&key[axis],&value,sizeof(value));
+                if(value==0.0f) key[axis]=0u;
+                ++axis;
+            }
+            auto& candidates=positions[key];
+            const auto found=std::find_if(candidates.begin(),candidates.end(),
+                [&](std::size_t index){return same(vertices[index],vertex,dangly);});
+            const auto index=found==candidates.end()?vertices.size():*found;
+            if(found==candidates.end()) {candidates.push_back(index);vertices.push_back(vertex);}
             face.indices[corner]=static_cast<std::int16_t>(index);
         }
         if(authoredCorners) authoredCorners->push_back(face.indices);

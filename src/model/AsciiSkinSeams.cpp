@@ -2,12 +2,20 @@
 
 #include <algorithm>
 #include <cmath>
+#include <cstring>
 #include <functional>
+#include <limits>
 
 namespace neomdl::model {
 namespace {
 
 Vec3 add(Vec3 a, Vec3 b) { return {a.x+b.x,a.y+b.y,a.z+b.z}; }
+
+std::uint32_t positionKey(float value) {
+    std::uint32_t bits;
+    std::memcpy(&bits,&value,sizeof(bits));
+    return bits&0x80000000u?~bits:bits^0x80000000u;
+}
 
 Vec3 normalizeSeamVector(Vec3 value) {
     // Vector::Normalize: K1 0x66414c. This is the engine tiny-vector
@@ -96,6 +104,8 @@ void processAsciiSkinSeams(const Model& model,const neoshared::bif::JobControl& 
 
     // Positions stay fixed while the ordered seam pass updates normal pools.
     std::vector<std::vector<Vec3>> positions(meshes.size());
+    using PositionEntry=std::pair<std::uint32_t,std::size_t>;
+    std::vector<std::vector<PositionEntry>> byX(meshes.size());
     for(std::size_t index=0;index<meshes.size();++index) {
         const auto& entry=meshes[index];
         const auto& mesh=model.meshes[entry.mesh];
@@ -105,7 +115,9 @@ void processAsciiSkinSeams(const Model& model,const neoshared::bif::JobControl& 
                 ? entry.sentinel : mesh.vertices[vertex].position;
             positions[index].push_back(add(entry.position,
                 ascii::engineModelRotateVector(entry.orientation,local)));
+            byX[index].emplace_back(positionKey(positions[index].back().x),vertex);
         }
+        std::sort(byX[index].begin(),byX[index].end());
     }
 
     struct NormalReference { std::size_t mesh,vertex; };
@@ -123,35 +135,44 @@ void processAsciiSkinSeams(const Model& model,const neoshared::bif::JobControl& 
         for(std::int32_t vertex=0;vertex<ownerCount;++vertex) {
             job.check();
             const auto point=positions[owner][vertex];
+            const auto lower=positionKey(std::nextafter(point.x-tolerance,-std::numeric_limits<float>::infinity()));
+            const auto upper=positionKey(std::nextafter(point.x+tolerance,std::numeric_limits<float>::infinity()));
             auto sum=ascii::engineModelRotateVector(meshes[owner].orientation,current.normalAt(vertex));
             std::vector<NormalReference> matches{{owner,static_cast<std::size_t>(vertex)}};
             // K1 0x5c224c / K2 0x6e00dc visit every OTHER mesh, including
             // earlier ones. Their inclusive candidate loop reads row N.
             for(std::size_t candidate=0;candidate<meshes.size();++candidate) {
                 if(candidate==owner) continue;
+                job.check();
                 const auto& source=model.meshes[meshes[candidate].mesh];
-                const auto candidateCount=static_cast<std::int16_t>(source.enginePrelightVertexCount);
-                for(std::int32_t sourceVertex=0;sourceVertex<=candidateCount;++sourceVertex) {
-                    job.check();
-                    // No-face animmeshes never publish a static MDX allocation.
-                    // Published animmeshes have KOTOR's defined extra row;
-                    // unpublished position offset -1 addresses pool-base-1
-                    // (K1 ARM ctor 0x592bd4, seam read 0x5c25b0).
-                    if(source.animated && !source.asciiMdxAllocation &&
-                       static_cast<std::size_t>(sourceVertex)==source.enginePrelightVertexCount)
-                        throw ModelError("ASCII skin seam processing reaches an animmesh without a published MDX pool");
-                    ++result.candidateComparisons;
+                // The inclusive engine traversal also reads the unpublished
+                // tail of a no-face animmesh (K1 0x5c25b0).
+                if(source.animated && !source.asciiMdxAllocation &&
+                   positions[candidate].size()==source.enginePrelightVertexCount+1u)
+                    throw ModelError("ASCII skin seam processing reaches an animmesh without a published MDX pool");
+                result.candidateComparisons+=positions[candidate].size();
+                const auto first=matches.size();
+                const auto begin=std::lower_bound(byX[candidate].begin(),byX[candidate].end(),PositionEntry{lower,0u});
+                const auto end=std::upper_bound(begin,byX[candidate].end(),
+                    PositionEntry{upper,std::numeric_limits<std::size_t>::max()});
+                for(auto entry=begin;entry!=end;++entry) {
+                    const auto sourceVertex=entry->second;
                     const auto candidatePoint=positions[candidate][sourceVertex];
                     // The comparison is strict; unordered values also fail.
                     if(!(std::abs(candidatePoint.x-point.x)<tolerance) ||
                        !(std::abs(candidatePoint.y-point.y)<tolerance) ||
                        !(std::abs(candidatePoint.z-point.z)<tolerance)) continue;
-                    const NormalReference ref{candidate,static_cast<std::size_t>(sourceVertex)};
-                    sum=add(sum,ascii::engineModelRotateVector(meshes[candidate].orientation,normal(ref)));
-                    matches.push_back(ref);
+                    matches.push_back({candidate,sourceVertex});
                 }
+                // Spatial lookup must not change the engine's accumulation order.
+                std::sort(matches.begin()+static_cast<std::ptrdiff_t>(first),matches.end(),
+                    [](const auto& a,const auto& b){return a.vertex<b.vertex;});
             }
             if(matches.size()==1u) continue;
+            for(std::size_t match=1u;match<matches.size();++match) {
+                const auto& ref=matches[match];
+                sum=add(sum,ascii::engineModelRotateVector(meshes[ref.mesh].orientation,normal(ref)));
+            }
             ++result.matchedGroups;
             const float inverse=1.0f/static_cast<float>(matches.size());
             const auto average=normalizeSeamVector({sum.x*inverse,sum.y*inverse,sum.z*inverse});

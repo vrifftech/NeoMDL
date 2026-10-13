@@ -366,9 +366,13 @@ struct Smoothing {
 
 struct SourceFaceNeighbors {
     using Neighbor=std::pair<bool,std::size_t>;
+    struct EdgeNeighbors {
+        std::vector<std::size_t> faces;
+        std::vector<Neighbor> neighbors;
+    };
     bool animated{};
     std::map<std::pair<std::uint32_t,std::uint32_t>,std::vector<std::size_t>> edges;
-    std::vector<std::vector<Neighbor>> expected;
+    std::vector<EdgeNeighbors> expected;
 
     static std::vector<std::size_t> ranks(const std::vector<std::size_t>& order) {
         std::vector<std::size_t> result(order.size());
@@ -403,17 +407,20 @@ struct SourceFaceNeighbors {
             }
         const auto rank=ranks(order);
         for(const auto& edge:edges) {
-            auto& neighbors=expected.emplace_back();
-            for(const auto face:edge.second) neighbors.push_back(neighbor(edge.second,face,order,rank));
+            // Isolated edges have no neighbor; two-face edges always choose
+            // each other while every emitted face index is nonnegative.
+            if(edge.second.size()<2u || (edge.second.size()==2u &&
+               order.size()<=static_cast<std::size_t>(std::numeric_limits<std::int16_t>::max())+1u)) continue;
+            auto& entry=expected.emplace_back();
+            entry.faces=edge.second;
+            for(const auto face:edge.second) entry.neighbors.push_back(neighbor(edge.second,face,order,rank));
         }
     }
     bool preserves(const std::vector<std::size_t>& order,
                    const std::vector<std::size_t>& rank) const {
-        std::size_t index{};
-        for(const auto& edge:edges) {
-            const auto& neighbors=expected[index++];
-            for(std::size_t i=0;i<edge.second.size();++i)
-                if(neighbor(edge.second,edge.second[i],order,rank)!=neighbors[i]) return false;
+        for(const auto& edge:expected) {
+            for(std::size_t i=0;i<edge.faces.size();++i)
+                if(neighbor(edge.faces,edge.faces[i],order,rank)!=edge.neighbors[i]) return false;
         }
         return true;
     }

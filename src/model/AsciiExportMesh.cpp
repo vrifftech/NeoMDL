@@ -511,12 +511,13 @@ bool preservesSkinChannels(const Model& model,const CornerRows& rows) {
         const auto& mesh=model.meshes[index];
         if(!mesh.skinned) continue;
         const auto channels=decodeEngineFloatSkinChannels(mesh);
-        std::map<std::int16_t,std::size_t> first;
+        std::vector<std::size_t> first(mesh.faces.size()*3u,channels.size());
         for(std::size_t face=0;face<mesh.faces.size();++face)
             for(std::size_t corner=0;corner<3u;++corner) {
                 const auto source=static_cast<std::size_t>(mesh.faces[face].indices[corner]);
-                const auto inserted=first.emplace(rows[index][face][corner],source);
-                const auto& previous=channels[inserted.first->second];
+                auto& retained=first[static_cast<std::uint16_t>(rows[index][face][corner])];
+                if(retained==channels.size()) retained=source;
+                const auto& previous=channels[retained];
                 const auto& current=channels[source];
                 if(previous.weights!=current.weights || previous.indices!=current.indices) return false;
             }
@@ -1393,34 +1394,56 @@ void reconstructNormalPositionPrecision(Writer& out,const Model& model,const Mod
             }
             if(invariant && !cyclicStates) return;
             std::set<std::vector<std::uint32_t>> visited;
-            const auto emit=[&](double value) {
-                auto proposed=localCrosses;std::vector<std::uint32_t> key;
+            struct AxisState {
+                double value;
+                std::vector<std::array<Vec3,2>> products;
+            };
+            const auto stride=cyclicStates?4u:1u;
+            const auto state=[&](double value) {
+                AxisState result{value,{}};
+                result.products.reserve(pathFaces.size()*stride);
                 for(const auto face:pathFaces) {
-                    const auto result=crossFrom(products(face,source,axis,value,paired));
+                    result.products.push_back(products(face,source,axis,value,paired));
+                    if(cyclicStates) for(std::size_t rotation=0;rotation<3u;++rotation)
+                        result.products.push_back(products(face,source,axis,value,paired,rotation));
+                }
+                return result;
+            };
+            auto proposed=localCrosses;
+            const auto emit=[&](const AxisState& value) {
+                std::vector<std::uint32_t> key;
+                key.reserve(pathFaces.size()*stride*3u);
+                for(std::size_t index=0;index<pathFaces.size();++index) {
+                    const auto face=pathFaces[index];
+                    const auto result=crossFrom(value.products[index*stride]);
                     proposed[face]=result;
                     key.push_back(rawBits(result.x));key.push_back(rawBits(result.y));key.push_back(rawBits(result.z));
                     if(cyclicStates) for(std::size_t rotation=0;rotation<3u;++rotation) {
-                        const auto alternate=crossFrom(products(face,source,axis,value,paired,rotation));
+                        const auto alternate=crossFrom(value.products[index*stride+rotation+1u]);
                         key.push_back(rawBits(alternate.x));key.push_back(rawBits(alternate.y));
                         key.push_back(rawBits(alternate.z));
                     }
                 }
-                if(visited.insert(std::move(key)).second) consider(value,proposed);
+                if(visited.insert(std::move(key)).second) consider(value.value,proposed);
             };
-            emit(initial);
+            const auto initialState=state(initial);
+            emit(initialState);
             for(const auto end:ends) {
-                emit(end);
-                std::vector<std::pair<double,double>> intervals{{initial,end}};
+                auto lowerState=initialState;
+                std::vector<AxisState> upperStates;
+                upperStates.push_back(state(end));
+                emit(upperStates.back());
                 auto lowerCross=localCrosses,upperCross=localCrosses;
-                while(!intervals.empty()) {
+                while(!upperStates.empty()) {
                     out.job().check();
-                    const auto interval=intervals.back();intervals.pop_back();
+                    const auto& upperState=upperStates.back();
                     // Same-axis paths leave only one varying factor in each product.
                     bool constant=true;
-                    for(const auto face:pathFaces) {
+                    for(std::size_t index=0;index<pathFaces.size();++index) {
+                        const auto face=pathFaces[index];
                         if(cyclicStates) for(std::size_t rotation=0;rotation<3u;++rotation) {
-                            const auto a=products(face,source,axis,interval.first,paired,rotation),
-                                b=products(face,source,axis,interval.second,paired,rotation);
+                            const auto& a=lowerState.products[index*stride+rotation+1u];
+                            const auto& b=upperState.products[index*stride+rotation+1u];
                             for(std::size_t c=0;c<3u;++c) {
                                 const float lower=std::min(component(a[0],c),component(b[0],c))-
                                     std::max(component(a[1],c),component(b[1],c));
@@ -1429,8 +1452,8 @@ void reconstructNormalPositionPrecision(Writer& out,const Model& model,const Mod
                                 constant=constant && rawBits(lower)==rawBits(upper);
                             }
                         }
-                        const auto a=products(face,source,axis,interval.first,paired),
-                            b=products(face,source,axis,interval.second,paired);
+                        const auto& a=lowerState.products[index*stride];
+                        const auto& b=upperState.products[index*stride];
                         std::array<float,3> lows{},highs{};
                         for(std::size_t c=0;c<3u;++c) {
                             const float a0=component(a[0],c),a1=component(a[1],c),
@@ -1454,13 +1477,15 @@ void reconstructNormalPositionPrecision(Writer& out,const Model& model,const Mod
                             }
                             constant=constant && rawBits(lower.x)==rawBits(upper.x) &&
                                 rawBits(lower.y)==rawBits(upper.y) && rawBits(lower.z)==rawBits(upper.z);
+                            if(!constant) break;
                         }
                     }
-                    if(constant || std::nextafter(interval.first,interval.second)==interval.second) {
-                        emit(interval.first);emit(interval.second);continue;
+                    if(constant || std::nextafter(lowerState.value,upperState.value)==upperState.value) {
+                        emit(upperState);
+                        lowerState=std::move(upperStates.back());upperStates.pop_back();continue;
                     }
-                    const double middle=interval.first+(interval.second-interval.first)*0.5;
-                    intervals.push_back({middle,interval.second});intervals.push_back({interval.first,middle});
+                    const double middle=lowerState.value+(upperState.value-lowerState.value)*0.5;
+                    upperStates.push_back(state(middle));
                 }
             }
         };
@@ -1497,6 +1522,7 @@ void reconstructNormalPositionPrecision(Writer& out,const Model& model,const Mod
                     const auto original=high[source];
                     auto localCrosses=inputCrosses;
                     std::vector<Vec3> localNormals(groups.size());
+                    std::vector<std::array<double,2>> localErrors(mesh.faces.size()*3u);
                     const auto updateNormals=[&] {
                         for(const auto id:affected) {
                             Vec3 sum{};
@@ -1505,6 +1531,10 @@ void reconstructNormalPositionPrecision(Writer& out,const Model& model,const Mod
                                 sum={sum.x+value.x,sum.y+value.y,value.z+sum.z};
                             }
                             localNormals[id]=normal(sum);
+                            for(const auto corner:groups[id].corners) {
+                                const auto target=plan.vertices[mesh.faces[corner/3u].indices[corner%3u]].normal;
+                                localErrors[corner]={{difference(localNormals[id],target),angle(localNormals[id],target)}};
+                            }
                         }
                     };
                     updateNormals();
@@ -1529,10 +1559,10 @@ void reconstructNormalPositionPrecision(Writer& out,const Model& model,const Mod
                                     for(const auto corner:group.corners) {
                                         const auto face=corner/3u,c=corner%3u;
                                         const auto target=plan.vertices[mesh.faces[face].indices[c]].normal;
-                                        const auto before=localNormals[id];
-                                        const double previous=difference(before,target),next=difference(after,target);
-                                        if(next>previous || angle(after,target)>angle(before,target)) return;
-                                        error+=next-previous;improved=improved || next<previous;
+                                        const auto& previous=localErrors[corner];
+                                        const double next=difference(after,target);
+                                        if(next>previous[0] || angle(after,target)>previous[1]) return;
+                                        error+=next-previous[0];improved=improved || next<previous[0];
                                     }
                                 }
                                 if(improved) moves.push_back({axis,value,error});
@@ -2169,6 +2199,7 @@ void reconstructSkinSeamSmoothing(Writer& out,const Model& model) {
             if(!node.lightsaber) out.meshReconstructions.emplace(&mesh,reconstructMesh(out,node,mesh));
         }
         auto frames=model;
+        frames.animations.clear();
         reconstructExportedNodeFrames(frames,out.job());
         reconstructTangentRounding(out,model,frames,out.meshReconstructions);
         reconstructNormalRoundingPass(out,model,frames,out.meshReconstructions);
@@ -2188,6 +2219,7 @@ void reconstructSkinSeamSmoothing(Writer& out,const Model& model) {
     auto& plans=out.meshReconstructions;
     plans=reconstruct(false);
     auto frames=model;
+    frames.animations.clear();
     reconstructExportedNodeFrames(frames,out.job());
     if(std::none_of(plans.begin(),plans.end(),[](const auto& entry) {
         return entry.second.hasNormals && !entry.second.explicitNormals && !entry.first->animated;
