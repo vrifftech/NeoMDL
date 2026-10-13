@@ -455,7 +455,8 @@ double measureSeamNormals(const Model& rebuilt,const Model& source,const CornerR
 
 double measureTangentBasis(Model& rebuilt,const Model& source,const CornerRows& rows,
                           const std::map<const Mesh*,MeshReconstruction>& plans,
-                          const neoshared::bif::JobControl& job) {
+                          const neoshared::bif::JobControl& job,
+                          const std::map<const Mesh*,MeshReconstruction>* changed=nullptr) {
     double error{};
     const auto difference=[](Vec3 a,Vec3 b) {
         const double x=double(a.x)-b.x,y=double(a.y)-b.y,z=double(a.z)-b.z;
@@ -465,7 +466,8 @@ double measureTangentBasis(Model& rebuilt,const Model& source,const CornerRows& 
         const auto& mesh=source.meshes[index];
         const auto found=plans.find(&mesh);
         if(!(mesh.mdxBitmap&0x80u) || mesh.animated || mesh.dangly || found==plans.end()) continue;
-        rebuildAsciiTangentBasis(rebuilt.meshes[index],job);
+        if(!changed || changed->find(&mesh)!=changed->end())
+            rebuildAsciiTangentBasis(rebuilt.meshes[index],job);
         for(std::size_t face=0;face<mesh.faces.size();++face)
             for(std::size_t corner=0;corner<3u;++corner) {
                 const auto& target=found->second.vertices[mesh.faces[face].indices[corner]].tangentBasis;
@@ -480,7 +482,7 @@ double measureTangentBasis(Model& rebuilt,const Model& source,const CornerRows& 
 void reconstructCyclicCorners(Writer& out,const Model& model,const Model& frames) {
     auto& plans=out.meshReconstructions;
     auto current=frames;
-    const auto rows=generateGeometry(current,model,plans,false,out.job());
+    auto rows=generateGeometry(current,model,plans,false,out.job());
     auto best=measureTangentBasis(current,model,rows,plans,out.job());
     processAsciiSkinSeams(current,out.job());
     best+=measureSeamNormals(current,model,rows,plans);
@@ -493,23 +495,56 @@ void reconstructCyclicCorners(Writer& out,const Model& model,const Model& frames
            found->second.explicitNormals) continue;
         const auto& plan=found->second;
         std::vector<bool> cancelled(plan.topology.sourceVertices.size(),false);
+        std::vector<bool> singular(mesh.faces.size(),false);
+        std::vector<Vec3> cancelledTangents;
         const auto cancellationOutput=[](Vec3 normal) {
             return same(normal,{}) || same(normal,{1.0f,0.0f,0.0f});
         };
-        for(std::size_t face=0;face<mesh.faces.size();++face)
+        const bool tangents=(mesh.mdxBitmap&0x80u) && !mesh.dangly;
+        for(std::size_t face=0;face<mesh.faces.size();++face) {
+            bool changedBasis=false;
             for(std::size_t corner=0;corner<3u;++corner) {
                 const auto actual=current.meshes[index].normalAt(rows[index][face][corner]);
                 const auto target=plan.vertices[mesh.faces[face].indices[corner]].normal;
                 const auto source=plan.topology.sourceFaces[face][corner];
                 if(!same(actual,target) && (cancellationOutput(actual) || cancellationOutput(target)))
                     cancelled[source]=true;
+                if(tangents) {
+                    const auto& generated=current.meshes[index].vertices[rows[index][face][corner]];
+                    const auto& retained=plan.vertices[mesh.faces[face].indices[corner]].tangentBasis;
+                    const auto inspect=[&](Vec3 value,Vec3 wanted) {
+                        if(same(value,wanted)) return;
+                        changedBasis=true;
+                        if(cancellationOutput(value) || cancellationOutput(wanted))
+                            cancelledTangents.push_back(generated.position);
+                    };
+                    inspect(generated.tangentBasis.bitangent,retained.bitangent);
+                    inspect(generated.tangentBasis.tangent,retained.tangent);
+                    inspect(generated.tangentBasis.normal,retained.normal);
+                }
             }
+            if(changedBasis) {
+                const auto texcoord=[&](std::size_t corner) {
+                    return uv(plan.vertices[mesh.faces[face].indices[plan.sourceCorner(face,corner)]],0u);
+                };
+                const auto a=texcoord(0u),b=texcoord(1u),c=texcoord(2u);
+                singular[face]=(b.x-a.x)*(c.y-a.y)-(c.x-a.x)*(b.y-a.y)==0.0f;
+            }
+        }
+        // Tangent contributions join equal positions even when the authoring
+        // topology uses distinct source vertices at that point.
+        for(std::size_t source=0;source<cancelled.size();++source) {
+            const auto point=plan.vertices[plan.topology.sourceVertices[source]].position;
+            if(std::any_of(cancelledTangents.begin(),cancelledTangents.end(),
+                [&](Vec3 other){return same(point,other);})) cancelled[source]=true;
+        }
         std::vector<std::vector<std::size_t>> incident(cancelled.size());
         for(std::size_t face=0;face<mesh.faces.size();++face) {
             const auto& vertices=plan.topology.sourceFaces[face];
-            if(std::any_of(vertices.begin(),vertices.end(),[&](auto vertex){return cancelled[vertex];})) {
+            if(singular[face] || std::any_of(vertices.begin(),vertices.end(),
+                [&](auto vertex){return cancelled[vertex];})) {
                 for(const auto vertex:vertices)
-                    if(cancelled[vertex]) incident[vertex].push_back(candidates.size());
+                    if(singular[face] || cancelled[vertex]) incident[vertex].push_back(candidates.size());
                 candidates.emplace_back(&mesh,face);
             }
         }
@@ -522,45 +557,85 @@ void reconstructCyclicCorners(Writer& out,const Model& model,const Model& frames
     pairs.erase(std::unique(pairs.begin(),pairs.end()),pairs.end());
     if(candidates.empty()) return;
     // Cyclic corners retain triangle winding and connectivity but change
-    // float cross-product rounding. Score all three starts only around
-    // cancelled source normals, using the unchanged normal/basis producers.
-    bool improved;
-    do {
-        improved=false;
-        auto selected=plans;
-        const auto consider=[&](std::map<const Mesh*,MeshReconstruction> trial) {
-            auto rebuilt=frames;
-            const auto generated=generateGeometry(rebuilt,model,trial,false,out.job());
-            if(!preservesSkinChannels(model,generated)) return;
-            auto error=measureTangentBasis(rebuilt,model,generated,trial,out.job());
-            processAsciiSkinSeams(rebuilt,out.job());
-            error+=measureSeamNormals(rebuilt,model,generated,trial);
-            if(error<best) {best=error;selected=std::move(trial);improved=true;}
-        };
-        for(const auto& candidate:candidates)
-            for(std::uint8_t rotation=0u;rotation<3u;++rotation) {
-                if(plans.at(candidate.first).cornerRotations[candidate.second]==rotation) continue;
-                auto trial=plans;
-                trial.at(candidate.first).cornerRotations[candidate.second]=rotation;
-                consider(std::move(trial));
-            }
-        // Opposing contributions can require two cyclic starts to move
-        // together. Only pair faces incident to the same cancelled source.
-        if(!improved) for(const auto& pair:pairs) {
-            const auto& first=candidates[pair[0]];
-            const auto& second=candidates[pair[1]];
-            for(std::uint8_t a=0u;a<3u;++a)
-                for(std::uint8_t b=0u;b<3u;++b) {
-                    if(plans.at(first.first).cornerRotations[first.second]==a ||
-                       plans.at(second.first).cornerRotations[second.second]==b) continue;
+    // float cross-product rounding. Score cancelled vectors and singular UV
+    // faces using the unchanged normal/basis producers.
+    // Rendered meshes interact through seams. Each excluded mesh is an
+    // independent component, so its cyclic search need not revisit the others.
+    std::map<const Mesh*,std::vector<std::size_t>> groups;
+    for(std::size_t i=0;i<candidates.size();++i) {
+        const auto* mesh=candidates[i].first;
+        groups[mesh->render?nullptr:mesh].push_back(i);
+    }
+    for(const auto& group:groups) {
+        bool improved;
+        do {
+            improved=false;
+            auto selected=plans;
+            auto selectedGeometry=current;
+            auto selectedRows=rows;
+            const auto consider=[&](std::map<const Mesh*,MeshReconstruction> trial) {
+                std::map<const Mesh*,MeshReconstruction> changed;
+                for(const auto& entry:trial)
+                    if(entry.second.cornerRotations!=plans.at(entry.first).cornerRotations)
+                        changed.emplace(entry);
+                auto rebuilt=current;
+                auto generated=rows;
+                for(const auto& entry:changed) {
+                    const auto index=static_cast<std::size_t>(entry.first-model.meshes.data());
+                    rebuilt.meshes[index]=frames.meshes[index];
+                }
+                const auto changedRows=generateGeometry(rebuilt,model,changed,false,out.job());
+                for(const auto& entry:changed) {
+                    const auto index=static_cast<std::size_t>(entry.first-model.meshes.data());
+                    generated[index]=changedRows[index];
+                }
+                if(!preservesSkinChannels(model,generated)) return;
+                auto error=measureTangentBasis(rebuilt,model,generated,trial,out.job(),&changed);
+                if(std::any_of(changed.begin(),changed.end(),[](const auto& entry){return entry.first->render;}))
+                    processAsciiSkinSeams(rebuilt,out.job());
+                else {
+                    // CreateSkinNodeList excludes non-rendered meshes. Changing
+                    // only those leaves every ordered seam input unchanged.
+                    for(std::size_t index=0;index<model.meshes.size();++index)
+                        if(model.meshes[index].render)
+                            rebuilt.meshes[index].asciiNormalPool=current.meshes[index].asciiNormalPool;
+                }
+                error+=measureSeamNormals(rebuilt,model,generated,trial);
+                if(error<best) {
+                    best=error;selected=std::move(trial);improved=true;
+                    selectedGeometry=std::move(rebuilt);selectedRows=std::move(generated);
+                }
+            };
+            for(const auto index:group.second) {
+                const auto& candidate=candidates[index];
+                for(std::uint8_t rotation=0u;rotation<3u;++rotation) {
+                    if(plans.at(candidate.first).cornerRotations[candidate.second]==rotation) continue;
                     auto trial=plans;
-                    trial.at(first.first).cornerRotations[first.second]=a;
-                    trial.at(second.first).cornerRotations[second.second]=b;
+                    trial.at(candidate.first).cornerRotations[candidate.second]=rotation;
                     consider(std::move(trial));
                 }
-        }
-        if(improved) plans=std::move(selected);
-    } while(improved);
+            }
+            // Opposing contributions can require two cyclic starts to move
+            // together. Only pair affected faces incident to the same source.
+            if(!improved) for(const auto& pair:pairs) {
+                const auto& first=candidates[pair[0]];
+                const auto& second=candidates[pair[1]];
+                if((first.first->render?nullptr:first.first)!=group.first) continue;
+                for(std::uint8_t a=0u;a<3u;++a)
+                    for(std::uint8_t b=0u;b<3u;++b) {
+                        if(plans.at(first.first).cornerRotations[first.second]==a ||
+                           plans.at(second.first).cornerRotations[second.second]==b) continue;
+                        auto trial=plans;
+                        trial.at(first.first).cornerRotations[first.second]=a;
+                        trial.at(second.first).cornerRotations[second.second]=b;
+                        consider(std::move(trial));
+                    }
+            }
+            if(improved) {
+                plans=std::move(selected);current=std::move(selectedGeometry);rows=std::move(selectedRows);
+            }
+        } while(improved);
+    }
 }
 
 } // namespace
@@ -654,7 +729,7 @@ void reconstructSkinSeamSmoothing(Writer& out,const Model& model) {
                     topology.sourceFaces,out.job(),&targets,refine,ignoreSeams?&ignored:nullptr,
                     fit==PrecursorFit::RefineExisting || fit==PrecursorFit::RetainedVertices?
                         &plan.smoothing.masks:nullptr,
-                    fit==PrecursorFit::RetainedVertices);
+                    fit==PrecursorFit::RetainedVertices,nullptr,&plan.cornerRotations);
             }
         }
         return candidate;
@@ -713,57 +788,121 @@ void reconstructSkinSeamSmoothing(Writer& out,const Model& model) {
     // smoothing inputs whose final ordinary normals became equal. The local
     // fit proposes intersections; the actual producers judge their effects.
     double bestTangent{};
-    bool tangentChanged=std::any_of(plans.begin(),plans.end(),[](const auto& entry) {
-        const auto& mesh=*entry.first;
-        return (mesh.mdxBitmap&0x80u) && !mesh.animated && !mesh.dangly && !entry.second.explicitNormals;
-    });
-    while(tangentChanged) {
-        tangentChanged=false;
-        // A corner-local proposal can split a row before its last writer
-        // becomes independently selectable in the next generated mapping.
-        for(const bool useGeneratedWriters:{false,true}) {
-            auto current=frames;
-            const auto currentRows=generateGeometry(current,model,plans,false,out.job());
-            bestTangent=measureTangentBasis(current,model,currentRows,plans,out.job());
-            auto candidate=plans;
-            bool proposed=false;
-            for(std::size_t index=0;index<model.meshes.size();++index) {
-                const auto& mesh=model.meshes[index];
-                const auto found=candidate.find(&mesh);
-                if(!(mesh.mdxBitmap&0x80u) || mesh.animated || mesh.dangly || found==candidate.end() ||
-                   found->second.explicitNormals) continue;
-                auto& plan=found->second;
-                const TangentSmoothingSource tangents{
-                    current.meshes[index].asciiTangentSource->firstCornerNormals,currentRows[index],useGeneratedWriters};
-                const auto smoothing=reconstructSmoothing(mesh,plan.vertices,plan.topology.sourceVertices,
-                    plan.topology.sourceFaces,out.job(),nullptr,true,nullptr,&plan.smoothing.masks,false,
-                    &tangents);
-                proposed|=smoothing.masks!=plan.smoothing.masks;
-                plan.smoothing=smoothing;
-            }
-            if(!proposed) continue;
-            const auto considerTangents=[&](Plans trial) {
-                auto rebuilt=frames;
-                const auto rows=generateGeometry(rebuilt,model,trial,false,out.job());
-                const auto tangentError=measureTangentBasis(rebuilt,model,rows,trial,out.job());
-                processAsciiSkinSeams(rebuilt,out.job());
-                if(!preservesSkinChannels(model,rows)) return;
-                const auto normalError=measureSeamNormals(rebuilt,model,rows,trial);
-                if(normalError<=best && tangentError<=bestTangent &&
-                   (normalError<best || tangentError<bestTangent)) {
-                    best=normalError;bestTangent=tangentError;plans=std::move(trial);tangentChanged=true;
+    const auto refineTangents=[&] {
+        bool refined=false;
+        bool tangentChanged=std::any_of(plans.begin(),plans.end(),[](const auto& entry) {
+            const auto& mesh=*entry.first;
+            return (mesh.mdxBitmap&0x80u) && !mesh.animated && !mesh.dangly && !entry.second.explicitNormals;
+        });
+        while(tangentChanged) {
+            tangentChanged=false;
+            // A corner-local proposal can split a row before its last writer
+            // becomes independently selectable in the next generated mapping.
+            for(const bool useGeneratedWriters:{false,true}) {
+                auto current=frames;
+                const auto currentRows=generateGeometry(current,model,plans,false,out.job());
+                bestTangent=measureTangentBasis(current,model,currentRows,plans,out.job());
+                auto candidate=plans;
+                bool proposed=false;
+                for(std::size_t index=0;index<model.meshes.size();++index) {
+                    const auto& mesh=model.meshes[index];
+                    const auto found=candidate.find(&mesh);
+                    if(!(mesh.mdxBitmap&0x80u) || mesh.animated || mesh.dangly || found==candidate.end() ||
+                       found->second.explicitNormals) continue;
+                    auto& plan=found->second;
+                    const TangentSmoothingSource tangents{
+                        current.meshes[index].asciiTangentSource->firstCornerNormals,currentRows[index],useGeneratedWriters};
+                    const auto smoothing=reconstructSmoothing(mesh,plan.vertices,plan.topology.sourceVertices,
+                        plan.topology.sourceFaces,out.job(),nullptr,true,nullptr,&plan.smoothing.masks,false,
+                        &tangents,&plan.cornerRotations);
+                    proposed|=smoothing.masks!=plan.smoothing.masks;
+                    plan.smoothing=smoothing;
                 }
-            };
-            considerTangents(candidate);
+                if(!proposed) continue;
+                const auto considerTangents=[&](Plans trial) {
+                    auto rebuilt=frames;
+                    const auto rows=generateGeometry(rebuilt,model,trial,false,out.job());
+                    const auto tangentError=measureTangentBasis(rebuilt,model,rows,trial,out.job());
+                    processAsciiSkinSeams(rebuilt,out.job());
+                    if(!preservesSkinChannels(model,rows)) return;
+                    const auto normalError=measureSeamNormals(rebuilt,model,rows,trial);
+                    if(normalError<=best && tangentError<=bestTangent &&
+                       (normalError<best || tangentError<bestTangent)) {
+                        best=normalError;bestTangent=tangentError;plans=std::move(trial);tangentChanged=true;refined=true;
+                    }
+                };
+                considerTangents(candidate);
+                for(const auto& entry:candidate)
+                    if(entry.second.smoothing.masks!=plans.at(entry.first).smoothing.masks) {
+                        auto trial=plans;
+                        trial.at(entry.first)=entry.second;
+                        considerTangents(std::move(trial));
+                    }
+            }
+        }
+        return refined;
+    };
+    refineTangents();
+    for(;;) {
+        reconstructCyclicCorners(out,model,frames);
+        auto current=frames;
+        const auto rows=generateGeometry(current,model,plans,false,out.job());
+        bestTangent=measureTangentBasis(current,model,rows,plans,out.job());
+        processAsciiSkinSeams(current,out.job());
+        best=measureSeamNormals(current,model,rows,plans);
+        bool refitted=false;
+        const auto considerRefit=[&](Plans trial) {
+            auto rebuilt=frames;
+            const auto generated=generateGeometry(rebuilt,model,trial,false,out.job());
+            if(!preservesSkinChannels(model,generated)) return;
+            const auto tangentError=measureTangentBasis(rebuilt,model,generated,trial,out.job());
+            processAsciiSkinSeams(rebuilt,out.job());
+            const auto normalError=measureSeamNormals(rebuilt,model,generated,trial);
+            if(normalError<=best && tangentError<=bestTangent &&
+               (normalError<best || tangentError<bestTangent)) {
+                best=normalError;bestTangent=tangentError;
+                plans=std::move(trial);refitted=true;
+            }
+        };
+        // Cyclic starts change the rounded contributions used to fit masks.
+        // Refit those relationships in the emitted corner order, then let
+        // the complete normal and tangent producers judge each proposal.
+        for(const auto fit:{PrecursorFit::RefineExisting,PrecursorFit::RetainedVertices}) {
+            const auto candidate=precursor(plans,true,fit);
+            considerRefit(candidate);
             for(const auto& entry:candidate)
                 if(entry.second.smoothing.masks!=plans.at(entry.first).smoothing.masks) {
                     auto trial=plans;
                     trial.at(entry.first)=entry.second;
-                    considerTangents(std::move(trial));
+                    considerRefit(std::move(trial));
                 }
         }
+        auto seams=frames;
+        const auto seamRows=generateGeometry(seams,model,plans,false,out.job());
+        processAsciiSkinSeams(seams,out.job());
+        for(std::size_t index=0;index<model.meshes.size();++index) {
+            const auto& mesh=model.meshes[index];
+            const auto found=plans.find(&mesh);
+            if(found==plans.end() || mesh.animated || !found->second.hasNormals ||
+               found->second.explicitNormals) continue;
+            std::vector<bool> seamCorners;
+            for(const auto& face:seamRows[index])
+                for(const auto row:face)
+                    seamCorners.push_back(!same(seams.meshes[index].vertices[row].normal,
+                        seams.meshes[index].normalAt(row)));
+            // A local fit cannot judge a precursor overwritten by seams.
+            // Propose its shared-normal joins directly to the ordered pass.
+            const auto candidates=sharedSeamSmoothingCandidates(mesh,found->second.vertices,
+                found->second.topology.sourceFaces,found->second.smoothing.masks,seamCorners,out.job());
+            for(const auto& masks:candidates) {
+                auto trial=plans;
+                trial.at(&mesh).smoothing.masks=masks;
+                considerRefit(std::move(trial));
+            }
+        }
+        const bool tangentRefitted=refineTangents();
+        if(!refitted && !tangentRefitted) break;
     }
-    reconstructCyclicCorners(out,model,frames);
 }
 
 ReconstructedMesh writeMesh(Writer& out,const Model& model,const Node& node,const Mesh& mesh) {

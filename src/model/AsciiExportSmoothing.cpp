@@ -4,6 +4,7 @@
 #include <cmath>
 #include <limits>
 #include <map>
+#include <set>
 #include <utility>
 
 namespace neomdl::model::ascii_export {
@@ -363,7 +364,8 @@ ReconstructedSmoothing reconstructSmoothing(
     const std::vector<Vec3>* cornerTargets,bool refine,
     const std::vector<bool>* ignoredCorners,
     const std::vector<std::uint32_t>* seedMasks,bool useStoredRows,
-    const TangentSmoothingSource* tangents) {
+    const TangentSmoothingSource* tangents,
+    const std::vector<std::uint8_t>* cornerRotations) {
     Smoothing work{{},{},{},{},job,{}};
     work.faceRelations.resize(sourceFaces.size());
     std::vector<std::vector<std::size_t>> incident(sourceVertices.size());
@@ -371,9 +373,10 @@ ReconstructedSmoothing reconstructSmoothing(
     for(std::size_t face=0;face<sourceFaces.size();++face) {
         job.check();
         const auto& indices=sourceFaces[face];
-        const auto a=vertices[sourceVertices[indices[0]]].position;
-        const auto b=vertices[sourceVertices[indices[1]]].position;
-        const auto c=vertices[sourceVertices[indices[2]]].position;
+        const auto rotation=cornerRotations?(*cornerRotations)[face]:0u;
+        const auto a=vertices[sourceVertices[indices[rotation%3u]]].position;
+        const auto b=vertices[sourceVertices[indices[(1u+rotation)%3u]]].position;
+        const auto c=vertices[sourceVertices[indices[(2u+rotation)%3u]]].position;
         work.crosses.push_back(cross(subtract(b,a),subtract(c,b)));
         for(const auto source:indices) {
             auto& faces=incident[source];
@@ -384,9 +387,9 @@ ReconstructedSmoothing reconstructSmoothing(
             }
         }
         if(tangents) {
-            const auto& va=vertices[mesh.faces[face].indices[0]];
-            const auto& vb=vertices[mesh.faces[face].indices[1]];
-            const auto& vc=vertices[mesh.faces[face].indices[2]];
+            const auto& va=vertices[mesh.faces[face].indices[rotation%3u]];
+            const auto& vb=vertices[mesh.faces[face].indices[(1u+rotation)%3u]];
+            const auto& vc=vertices[mesh.faces[face].indices[(2u+rotation)%3u]];
             const auto p=subtract(b,a),q=subtract(c,a);
             const float pu=vb.texcoord0.x-va.texcoord0.x,qu=vc.texcoord0.x-va.texcoord0.x;
             const float pv=vb.texcoord0.y-va.texcoord0.y,qv=vc.texcoord0.y-va.texcoord0.y;
@@ -547,6 +550,54 @@ ReconstructedSmoothing reconstructSmoothing(
         result.maxNormalComponentDifference=std::max(result.maxNormalComponentDifference,delta);
     }
     return result;
+}
+
+std::vector<std::vector<std::uint32_t>> sharedSeamSmoothingCandidates(
+    const Mesh& mesh,const std::vector<Vertex>& vertices,
+    const std::vector<std::array<std::uint32_t,3>>& sourceFaces,
+    const std::vector<std::uint32_t>& masks,const std::vector<bool>& seamCorners,
+    const neoshared::bif::JobControl& job) {
+    struct Group { Vec3 normal;std::vector<std::size_t> faces;bool seam{}; };
+    std::map<std::size_t,std::vector<Group>> groups;
+    for(std::size_t face=0;face<sourceFaces.size();++face) {
+        job.check();
+        for(std::size_t corner=0;corner<3u;++corner) {
+            const auto normal=vertices[mesh.faces[face].indices[corner]].normal;
+            auto& source=groups[sourceFaces[face][corner]];
+            auto found=std::find_if(source.begin(),source.end(),[&](const Group& group) {
+                return group.normal.x==normal.x && group.normal.y==normal.y && group.normal.z==normal.z;
+            });
+            if(found==source.end()) {
+                source.push_back({normal,{},false});found=source.end()-1;
+            }
+            if(found->faces.empty() || found->faces.back()!=face) found->faces.push_back(face);
+            found->seam=found->seam || seamCorners[face*3u+corner];
+        }
+    }
+    std::uint32_t bits{};
+    for(const auto mask:masks) bits|=mask;
+    for(std::uint32_t bit=1u;bit;bit<<=1u)
+        if(!(bits&bit)) { bits|=bit;break; }
+    std::set<std::vector<std::uint32_t>> proposals;
+    const auto propose=[&](const std::vector<std::size_t>& faces) {
+        for(std::uint32_t bit=1u;bit;bit<<=1u) if(bits&bit) {
+            job.check();
+            auto candidate=masks;
+            for(const auto face:faces) candidate[face]|=bit;
+            if(candidate!=masks) proposals.insert(std::move(candidate));
+        }
+    };
+    for(const auto& source:groups)
+        for(const auto& group:source.second) if(group.seam) {
+            bool missing=false;
+            for(std::size_t a=0;a<group.faces.size();++a)
+                for(std::size_t b=a+1u;b<group.faces.size();++b)
+                    if(!(masks[group.faces[a]]&masks[group.faces[b]])) {
+                        missing=true;propose({group.faces[a],group.faces[b]});
+                    }
+            if(missing) propose(group.faces);
+        }
+    return {proposals.begin(),proposals.end()};
 }
 
 } // namespace neomdl::model::ascii_export
