@@ -174,34 +174,42 @@ std::vector<std::array<std::size_t,3>> processVertices(RawNode& raw,Mesh& mesh,
                     static_cast<std::uint32_t>(engineFloatToInt(indices.z))}};
             }
     std::vector<std::array<std::size_t,3>> indices(raw.faces.size());
-    raw.normals.clear();
-    for(std::size_t i=0;i<raw.faces.size();++i) {
-        job.check();
-        const auto& current=raw.faces[i];
-        for(std::size_t corner=0;corner<3u;++corner) {
-            Vec3 sum{}; bool reused=false;
-            for(std::size_t j=0;j<raw.faces.size();++j) {
-                const auto& candidate=raw.faces[j];
-                int shared=2;
-                while(shared>=0 && candidate.vertices[static_cast<std::size_t>(shared)]!=current.vertices[corner]) --shared;
-                if(shared<0 || (i!=j && !(current.smoothing&candidate.smoothing))) continue;
-                const auto weighted=faceCross(candidate,raw.vertices);
-                sum={sum.x+weighted.x,sum.y+weighted.y,weighted.z+sum.z};
-                if(j<i && current.smoothing==candidate.smoothing) {
-                    indices[i][corner]=indices[j][static_cast<std::size_t>(shared)];
-                    reused=true;break;
+    if(mesh.explicitNormals) {
+        for(std::size_t i=0;i<raw.faces.size();++i) {
+            job.check();
+            const auto& source=raw.normalIndices.empty()?raw.faces[i].vertices:raw.normalIndices.at(i);
+            for(std::size_t corner=0;corner<3u;++corner) indices[i][corner]=source[corner];
+        }
+    } else {
+        raw.normals.clear();
+        for(std::size_t i=0;i<raw.faces.size();++i) {
+            job.check();
+            const auto& current=raw.faces[i];
+            for(std::size_t corner=0;corner<3u;++corner) {
+                Vec3 sum{}; bool reused=false;
+                for(std::size_t j=0;j<raw.faces.size();++j) {
+                    const auto& candidate=raw.faces[j];
+                    int shared=2;
+                    while(shared>=0 && candidate.vertices[static_cast<std::size_t>(shared)]!=current.vertices[corner]) --shared;
+                    if(shared<0 || (i!=j && !(current.smoothing&candidate.smoothing))) continue;
+                    const auto weighted=faceCross(candidate,raw.vertices);
+                    sum={sum.x+weighted.x,sum.y+weighted.y,weighted.z+sum.z};
+                    if(j<i && current.smoothing==candidate.smoothing) {
+                        indices[i][corner]=indices[j][static_cast<std::size_t>(shared)];
+                        reused=true;break;
+                    }
                 }
+                // ProcessVerts leaves zero accumulated normals zero; the separate
+                // face-plane NormalOf helper has the +X zero-length behavior.
+                const auto length=magnitude(sum);
+                if(length!=0.0f) {
+                    // ProcessVerts skips Normalize only for exact zero; its
+                    // nonzero path uses Vector::Normalize's engine 1e-9 limit.
+                    if(static_cast<double>(length)<1e-9) sum={1.0f,0.0f,0.0f};
+                    else {const auto scale=1.0f/length;sum={sum.x*scale,sum.y*scale,sum.z*scale};}
+                }
+                if(!reused) {indices[i][corner]=raw.normals.size();raw.normals.push_back(sum);}
             }
-            // ProcessVerts leaves zero accumulated normals zero; the separate
-            // face-plane NormalOf helper has the +X zero-length behavior.
-            const auto length=magnitude(sum);
-            if(length!=0.0f) {
-                // ProcessVerts skips Normalize only for exact zero; its
-                // nonzero path uses Vector::Normalize's engine 1e-9 limit.
-                if(static_cast<double>(length)<1e-9) sum={1.0f,0.0f,0.0f};
-                else {const auto scale=1.0f/length;sum={sum.x*scale,sum.y*scale,sum.z*scale};}
-            }
-            if(!reused) {indices[i][corner]=raw.normals.size();raw.normals.push_back(sum);}
         }
     }
     auto& bounds=*mesh.engineBounds;
@@ -549,6 +557,19 @@ static bool parseMeshValue(const Line& line,Reader& reader,RawNode& raw,GameVers
     auto& mesh=*raw.mesh;
     const auto key=lower(line.tokens.front());
     if(key=="verts") vectorList(line,reader,raw.vertices);
+    else if(key=="normals" && raw.node.flags!=0xa1u) {
+        vectorList(line,reader,raw.normals);
+        mesh.explicitNormals=true;
+    }
+    else if(key=="normalindices" && raw.node.flags!=0xa1u && raw.node.flags!=0x821u)
+        readArray(line,reader,raw.normalIndices,12u,
+            [](const Line& row,const Reader&,std::array<std::uint32_t,3>& value) {
+                unsigned int x=value[0],y=value[1],z=value[2];
+                std::sscanf(row.text.c_str(),"%u %u %u",&x,&y,&z);
+                value={{x,y,z}};
+            },[](const std::uint8_t* bytes) {
+                return std::array<std::uint32_t,3>{{word(bytes),word(bytes+4u),word(bytes+8u)}};
+            });
     else if(key=="tverts") vectorList(line,reader,raw.texcoords[0]);
     else if(key=="tverts1") vectorList(line,reader,raw.texcoords[1]);
     else if(key=="tverts2") vectorList(line,reader,raw.texcoords[2]);
@@ -642,9 +663,15 @@ static bool parseMeshValue(const Line& line,Reader& reader,RawNode& raw,GameVers
 bool parseMeshField(const Line& initial,Reader& reader,RawNode& raw,GameVersion game) {
     if(!raw.mesh) return false;
     const auto offset=initial.bufferOffset;
+    const auto extension=lower(initial.tokens.front());
+    if(raw.node.flags!=0xa1u && (extension=="normals" ||
+            (extension=="normalindices" && raw.node.flags!=0x821u))) {
+        parseMeshValue(initial,reader,raw,game);
+        applyAsciiLightmap(raw,reader);
+        return true;
+    }
     // Preserve the explicit NW animmesh extension's existing producer; its
     // fields are outside the four KOTOR InternalParseField implementations.
-    const auto extension=lower(initial.tokens.front());
     if(raw.node.flags==0xa1u && (extension=="sampleperiod" ||
             extension=="animverts" || extension=="animtverts")) {
         parseMeshValue(initial,reader,raw,game);

@@ -82,7 +82,7 @@ void writeSkin(Writer& writer,const Model& model,const Mesh& mesh,
                    ": engine ASCII load regenerates inverse bind transforms from the initial node transforms; compiled inverse bind arrays are not emitted.");
 }
 
-void writeLightsaber(Writer& writer,const Node& node) {
+void writeLightsaber(Writer& writer,const Node& node,bool explicitNormals) {
     const auto& saber=*node.lightsaber;
     constexpr auto back=LightsaberNodeData::backPieceOffset;
     // Triangulate the two eight-vertex blade strips. Segment rows are copies
@@ -161,6 +161,11 @@ void writeLightsaber(Writer& writer,const Node& node) {
     for(const auto& source:sources) {vertices[source.index]=source.piece;colors[source.index]=source.color;}
     writer.line("verts "+std::to_string(count));
     for(const auto index:vertices) writer.line(writer.vector(saber.positions.at(index)));
+    if(explicitNormals) {
+        writer.explicitNormalNote();
+        writer.line("normals "+std::to_string(count));
+        for(const auto index:vertices) writer.line(writer.vector(saber.normals.at(index)));
+    }
     writer.line("tverts "+std::to_string(count));
     for(const auto index:vertices) {
         const auto uv=saber.texcoords.at(index);
@@ -178,7 +183,9 @@ void writeLightsaber(Writer& writer,const Node& node) {
         writer.line(a+" "+b+" "+c+" 0 "+a+" "+b+" "+c+" 0");
     }
     writer.warning("Lightsaber "+node.name+
-        ": source faces and selector colors are reconstructed from the blade pieces; ASCII load regenerates normals and the mesh sphere, which may differ from their stored values.");
+        ": source faces and selector colors are reconstructed from the blade pieces; ASCII load regenerates "+
+        (explicitNormals?std::string("the mesh sphere, which may differ from its stored value."):
+            std::string("normals and the mesh sphere, which may differ from their stored values.")));
 }
 
 } // namespace neomdl::model::ascii_export

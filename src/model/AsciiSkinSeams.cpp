@@ -66,22 +66,24 @@ void processAsciiSkinSeams(const Model& model,const neoshared::bif::JobControl& 
             if(node.mesh && model.meshes[*node.mesh].render) {
                 const auto& mesh=model.meshes[*node.mesh];
                 if(mesh.skinned) ++result.skinMeshes;
-                Vec3 position{};
-                Quaternion orientation{};
-                auto ancestor=std::optional<std::size_t>{index};
-                while(ancestor) {
-                    const auto& transform=model.nodes[*ancestor];
-                    position=add(ascii::engineModelRotateVector(transform.orientation,position),
-                                 transform.position);
-                    orientation=ascii::engineModelQuaternionProduct(transform.orientation,orientation);
-                    ancestor=transform.parent;
+                if(!mesh.explicitNormals) {
+                    Vec3 position{};
+                    Quaternion orientation{};
+                    auto ancestor=std::optional<std::size_t>{index};
+                    while(ancestor) {
+                        const auto& transform=model.nodes[*ancestor];
+                        position=add(ascii::engineModelRotateVector(transform.orientation,position),
+                                     transform.position);
+                        orientation=ascii::engineModelQuaternionProduct(transform.orientation,orientation);
+                        ancestor=transform.parent;
+                    }
+                    // The engine interleaved pools allocate N+1 records.
+                    // Ordinary/dangly/backported animmesh tail xyz=1e7;
+                    // skin tail xyz=1e6. Seams read this static MDX position,
+                    // not the N-row CPU or animated Part position arrays.
+                    const float tail=mesh.skinned?1000000.0f:10000000.0f;
+                    meshes.push_back({*node.mesh,position,orientation,{tail,tail,tail}});
                 }
-                // The engine interleaved pools allocate N+1 records.
-                // Ordinary/dangly/backported animmesh tail xyz=1e7;
-                // skin tail xyz=1e6. Seams read this static MDX position,
-                // not the N-row CPU or animated Part position arrays.
-                const float tail=mesh.skinned?1000000.0f:10000000.0f;
-                meshes.push_back({*node.mesh,position,orientation,{tail,tail,tail}});
             }
             collect(index);
         }

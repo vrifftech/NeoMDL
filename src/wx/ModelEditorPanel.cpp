@@ -3153,6 +3153,17 @@ private:
             wxui::toWx(filename),"ASCII models (*.mdl)|*.mdl|All files (*.*)|*.*",
             wxFD_SAVE|wxFD_OVERWRITE_PROMPT);
         if(file.ShowModal()!=wxID_OK) return;
+        wxArrayString normalModes;
+        normalModes.Add("Keep current mesh modes");normalModes.Add("Smoothing groups");
+        normalModes.Add("Explicit normals (NeoMDL extension)");
+        wxSingleChoiceDialog normalChoice(this,
+            "Smoothing groups calculate normals from geometry.\n"
+            "Explicit normals preserve current normals and may need recalculation after geometry edits.",
+            "ASCII mesh normals",normalModes);
+        normalChoice.SetSelection(0);
+        if(normalChoice.ShowModal()!=wxID_OK) return;
+        model::AsciiExportOptions options;
+        if(normalChoice.GetSelection()!=0)options.explicitNormals=normalChoice.GetSelection()==2;
         try {
             const auto output=neosettings::pathFromWx(file.GetPath());
             neoshared::checkResourceOutput(output,protectedInputs);
@@ -3164,7 +3175,7 @@ private:
                 // any area/creature assembly maintained by the canvas.
                 job.check();
                 const auto snapshot=document.sourceModel();
-                exported=model::exportAsciiModel(snapshot,job);
+                exported=model::exportAsciiModel(snapshot,job,options);
                 bytes.assign(exported.text.begin(),exported.text.end());
                 job.check();
             })) return;

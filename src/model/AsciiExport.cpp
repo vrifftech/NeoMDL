@@ -14,7 +14,12 @@
 
 namespace neomdl::model::ascii_export {
 
-Writer::Writer(GameVersion game,const neoshared::bif::JobControl& job):game_(game),job_(job) {}
+Writer::Writer(GameVersion game,const neoshared::bif::JobControl& job,const AsciiExportOptions& options)
+    :game_(game),job_(job),options_(options) {}
+
+void Writer::explicitNormalNote() {
+    warning("Explicit final normals are a NeoMDL ASCII extension. Remove normals and normalindices to recalculate from geometry and smoothing groups.");
+}
 
 void Writer::line(const std::string& text) {
     job_.check();
@@ -302,9 +307,10 @@ void reconstructExportedNodeFrames(Model& model,const neoshared::bif::JobControl
 
 namespace neomdl::model {
 
-AsciiExportResult exportAsciiModel(const Model& model,const neoshared::bif::JobControl& job) {
+AsciiExportResult exportAsciiModel(const Model& model,const neoshared::bif::JobControl& job,
+                                  const AsciiExportOptions& options) {
     using namespace ascii_export;
-    Writer writer(model.game,job);
+    Writer writer(model.game,job,options);
     const auto& name=model.name;
     // newmodel receives the complete command argument, not an sscanf token.
     // Empty names and internal whitespace are defined constructor inputs.

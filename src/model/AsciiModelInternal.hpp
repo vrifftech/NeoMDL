@@ -147,6 +147,7 @@ struct RawNode {
     std::string parentName;
     std::vector<Vec3> vertices;
     std::vector<Vec3> normals;
+    std::vector<std::array<std::uint32_t,3>> normalIndices;
     std::vector<std::array<std::size_t,3>> processedSkinNormals;
     std::array<std::vector<Vec3>,4> texcoords;
     std::array<std::vector<Vec3>,3> textureIndices;

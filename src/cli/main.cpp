@@ -12,9 +12,12 @@
 
 int main(int argc, char** argv) {
     const auto printUsage = [] {
-        std::cout << "Usage: neomdl-info [--game=k1|--game=k2] [--export-ascii output.mdl] [--export-packed output.mdl] <model.mdl> [model.mdx]\n"
+        std::cout << "Usage: neomdl-info [--game=k1|--game=k2] [--export-ascii output.mdl] [--explicit-normals|--smoothing-groups] [--export-packed output.mdl] <model.mdl> [model.mdx]\n"
                      "ASCII models use the shared x86-layout builder and require an explicit target game.\n"
                      "ASCII export writes one model asset and its own animations to a separate file.\n"
+                     "--explicit-normals preserves normals in a NeoMDL ASCII extension.\n"
+                     "--smoothing-groups reconstructs smoothing groups instead of explicit mesh normals.\n"
+                     "Without either option, export preserves the mesh's input mode; compiled meshes use smoothing groups.\n"
                      "Packed export compiles ASCII input to an x86 MDL and same-name MDX pair.\n";
     };
     if (argc == 2 && (std::string_view(argv[1]) == "--help" || std::string_view(argv[1]) == "-h")) {
@@ -24,11 +27,14 @@ int main(int argc, char** argv) {
     std::optional<neomdl::model::GameVersion> game;
     std::optional<std::filesystem::path> asciiOutput;
     std::optional<std::filesystem::path> packedOutput;
+    neomdl::model::AsciiExportOptions asciiOptions;
     std::vector<std::filesystem::path> paths;
     for(int i=1;i<argc;++i) {
         const std::string_view argument(argv[i]);
         if(argument=="--game=k1")game=neomdl::model::GameVersion::Kotor1;
         else if(argument=="--game=k2")game=neomdl::model::GameVersion::Kotor2;
+        else if(argument=="--explicit-normals")asciiOptions.explicitNormals=true;
+        else if(argument=="--smoothing-groups")asciiOptions.explicitNormals=false;
         else if(argument=="--export-ascii") {
             if(i+1>=argc) {printUsage();return 2;}
             asciiOutput=std::filesystem::u8path(argv[++i]);
@@ -82,7 +88,7 @@ int main(int argc, char** argv) {
             neoshared::checkResourceOutput(packedCompanion,protectedPaths);
         }
         if(asciiOutput) {
-            const auto exported=neomdl::model::exportAsciiModel(model);
+            const auto exported=neomdl::model::exportAsciiModel(model,{},asciiOptions);
             const std::vector<std::uint8_t> bytes(exported.text.begin(),exported.text.end());
             neoshared::texture::writeFileBytes(*asciiOutput,bytes);
             for(const auto& warning:exported.warnings) std::cout<<"export warning: "<<warning<<'\n';

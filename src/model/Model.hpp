@@ -428,6 +428,8 @@ struct Mesh {
     std::shared_ptr<const AsciiTangentSource> asciiTangentSource;
     std::optional<std::size_t> asciiMdxAllocation;
     std::shared_ptr<const AsciiSkinSource> asciiSkinSource;
+    // Final authored normals bypass smoothing and seam averaging.
+    bool explicitNormals{};
     bool hasVertexColors{};
     MeshUvAnimation uvAnimation{};
     // Model-owned MDX UV channel. Procedural Part updates write this shared

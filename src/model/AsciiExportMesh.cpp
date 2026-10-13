@@ -240,6 +240,7 @@ MeshReconstruction reconstructMesh(Writer& out,const Node& node,const Mesh& mesh
         throw ModelError("Cannot export skin mesh "+node.name+": engine float weight/index channels are unavailable");
     const auto skin=mesh.skinned?decodeEngineFloatSkinChannels(mesh):std::vector<EngineFloatSkinChannels>{};
     const bool hasNormals=!mesh.enginePrelightInput || (mesh.mdxBitmap&0x20u)!=0u;
+    const bool explicitNormals=!animation && hasNormals && out.explicitNormals(mesh);
     const bool hasColors=mesh.hasVertexColors || (mesh.enginePrelightInput && (mesh.mdxBitmap&0x40u)!=0u);
     if(mesh.skinned) {
         // Engine NodeVertex equality deliberately excludes skin influences.
@@ -318,9 +319,10 @@ MeshReconstruction reconstructMesh(Writer& out,const Node& node,const Mesh& mesh
         const auto candidateSphereError=sphereError(mesh,vertices,topology);
         // Source identity is not retained uniquely. A point-join candidate
         // must improve a stored result without worsening the other one.
-        if(i==0u || (candidate.squaredNormalError<=reconstructed.squaredNormalError &&
+        // Explicit normals are independent of these source-position joins.
+        if(i==0u || ((explicitNormals || candidate.squaredNormalError<=reconstructed.squaredNormalError) &&
                      candidateSphereError<=selectedSphereError &&
-                     (candidate.squaredNormalError<reconstructed.squaredNormalError ||
+                     ((!explicitNormals && candidate.squaredNormalError<reconstructed.squaredNormalError) ||
                       candidateSphereError<selectedSphereError))) {
             selected=i;
             selectedSphereError=candidateSphereError;
@@ -329,7 +331,7 @@ MeshReconstruction reconstructMesh(Writer& out,const Node& node,const Mesh& mesh
     }
     auto& topology=topologies[selected];
     return {std::move(vertices),{std::move(topology.sourceVertices),std::move(topology.sourceFaces)},
-        std::move(reconstructed),topology.changedAdjacency,hasNormals};
+        std::move(reconstructed),topology.changedAdjacency,hasNormals,explicitNormals};
 }
 
 using CornerRows=std::vector<std::vector<std::array<std::int16_t,3>>>;
@@ -346,6 +348,7 @@ CornerRows generateGeometry(Model& rebuilt,const Model& source,
         if(found==plans.end()) continue; // Saber geometry has its own producer.
         const auto& plan=found->second;
         ascii::RawNode raw;
+        rebuilt.meshes[index].explicitNormals=plan.explicitNormals;
         raw.node=source.nodes[mesh.nodeIndex];
         const auto* animation=raw.node.animmesh?&*raw.node.animmesh:nullptr;
         const bool colors=mesh.hasVertexColors || (mesh.enginePrelightInput && (mesh.mdxBitmap&0x40u));
@@ -359,6 +362,8 @@ CornerRows generateGeometry(Model& rebuilt,const Model& source,
             if(animation && !animation->staticTangents.empty())
                 raw.animTangents.push_back(animation->staticTangents.at(vertex));
         }
+        if(plan.explicitNormals)
+            for(const auto& vertex:plan.vertices) raw.normals.push_back(vertex.normal);
         for(std::size_t channel=0;channel<4u;++channel)
             if(mesh.mdxBitmap&(2u<<channel))
                 for(const auto& vertex:plan.vertices) {
@@ -373,6 +378,7 @@ CornerRows generateGeometry(Model& rebuilt,const Model& source,
             for(auto& channel:value.texcoords)
                 for(std::size_t corner=0;corner<3u;++corner)
                     channel[corner]=static_cast<std::uint32_t>(mesh.faces[face].indices[corner]);
+            if(plan.explicitNormals) raw.normalIndices.push_back(value.texcoords[0]);
             raw.faces.push_back(value);
         }
         if(animation) {
@@ -448,6 +454,9 @@ void reconstructSkinSeamSmoothing(Writer& out,const Model& model) {
         const auto& node=model.nodes[mesh.nodeIndex];
         if(!node.lightsaber) plans.emplace(&mesh,reconstructMesh(out,node,mesh));
     }
+    if(std::none_of(plans.begin(),plans.end(),[](const auto& entry) {
+        return entry.second.hasNormals && !entry.second.explicitNormals && !entry.first->animated;
+    })) return;
     // The saved normals can be outputs of ProcessSkinSeams. Generate one
     // geometric precursor candidate, and let that same producer identify
     // the corners it changes. Other corners keep their original targets.
@@ -461,7 +470,7 @@ void reconstructSkinSeamSmoothing(Writer& out,const Model& model) {
     for(std::size_t index=0;index<model.meshes.size();++index) {
         const auto& mesh=model.meshes[index];
         const auto found=candidate.find(&mesh);
-        if(found==candidate.end() || mesh.animated || !found->second.hasNormals) continue;
+        if(found==candidate.end() || mesh.animated || !found->second.hasNormals || found->second.explicitNormals) continue;
         auto& plan=found->second;
         std::vector<Vec3> targets;
         bool adjusted=false;
@@ -499,7 +508,7 @@ void reconstructSkinSeamSmoothing(Writer& out,const Model& model) {
 ReconstructedMesh writeMesh(Writer& out,const Model& model,const Node& node,const Mesh& mesh) {
     materialFields(out,model,node,mesh);
     if(node.lightsaber) {
-        writeLightsaber(out,node);
+        writeLightsaber(out,node,out.explicitNormals(mesh));
         return {};
     }
     const auto cached=out.meshReconstructions.find(&mesh);
@@ -515,7 +524,7 @@ ReconstructedMesh writeMesh(Writer& out,const Model& model,const Node& node,cons
         out.warning("Mesh "+node.name+": source edge connectivity cannot reproduce "+
             std::to_string(reconstruction.changedAdjacency)+" stored face-neighbour entries");
     const auto& smoothing=reconstructed.masks;
-    if(reconstructed.changedCornerNormals)
+    if(reconstructed.changedCornerNormals && !reconstruction.explicitNormals)
         out.warning("Mesh "+node.name+": reconstructed smoothing changes "+
             std::to_string(reconstructed.changedCornerNormals)+" corner normals; maximum component difference "+
             out.scalar(reconstructed.maxNormalComponentDifference));
@@ -531,6 +540,16 @@ ReconstructedMesh writeMesh(Writer& out,const Model& model,const Node& node,cons
     diagnoseTopology(out,node,mesh);
     out.line("verts "+std::to_string(result.sourceVertices.size()));
     for(const auto index:result.sourceVertices) out.line(out.vector(vertices[index].position));
+    if(reconstruction.explicitNormals) {
+        out.explicitNormalNote();
+        out.line("normals "+std::to_string(vertices.size()));
+        for(const auto& vertex:vertices) out.line(out.vector(vertex.normal));
+        out.line("normalindices "+std::to_string(mesh.faces.size()));
+        for(const auto& face:mesh.faces)
+            out.line(std::to_string(static_cast<std::uint32_t>(face.indices[0]))+" "+
+                std::to_string(static_cast<std::uint32_t>(face.indices[1]))+" "+
+                std::to_string(static_cast<std::uint32_t>(face.indices[2])));
+    }
     if(animation && hasNormals) {
         // NW ProcessVerts uses raw vertex indices for a supplied normal list.
         out.line("normals "+std::to_string(result.sourceVertices.size()));
