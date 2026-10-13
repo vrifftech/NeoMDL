@@ -78,6 +78,9 @@ public:
                       const neoshared::bif::JobControl& job = resourceLoadJob(),
                       std::optional<model::GameVersion> asciiGame = std::nullopt,
                       const model::AsciiResourceResolver& asciiResources = {});
+    std::unique_ptr<ModelDocument> rebuildAscii(const std::string& text,
+        const neoshared::bif::JobControl& job = resourceLoadJob()) const;
+    const std::optional<std::string>& originalAscii() const noexcept { return originalAscii_; }
 
     // Immutable scene partition over an already resolved asset. The supplied
     // model keeps original node/mesh indices and sceneNodeAdmission records
@@ -219,6 +222,7 @@ private:
     bool runtimeScopePinned_{true};
     ResourceResolver resolver_;
     model::AsciiResourceResolver asciiResources_;
+    std::optional<std::string> originalAscii_;
     std::shared_ptr<ResourceTrace> trace_;
     std::shared_ptr<const ModelDocument> resourceParent_;
     bool allowChunkModels_{true};

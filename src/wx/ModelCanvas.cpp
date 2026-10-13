@@ -1815,7 +1815,8 @@ bool ModelCanvas::setTextureAngle(std::size_t owner,std::size_t node,float degre
     shaderErrorReported_=false;Refresh(false);return true;
 }
 
-void ModelCanvas::setDocument(const ModelDocument* document) {
+void ModelCanvas::setDocument(const ModelDocument* document, bool preserveCamera) {
+    if (preserveCamera && authoredCameraActive()) useViewerCamera(false);
     stopDialogue();
     clearWorldClock();
     dialogueMainLookAt_.clear();dialogueParticipantStates_.clear();
@@ -1963,7 +1964,7 @@ void ModelCanvas::setDocument(const ModelDocument* document) {
     danglyState_ = {};
     resetWorldClock(false);
     rebuildPose(true);
-    frameModel();
+    if (!preserveCamera) frameModel();
     Refresh(false);
 }
 
@@ -3378,6 +3379,11 @@ void ModelCanvas::onKey(wxKeyEvent& event) {
     if (event.ControlDown() || event.AltDown()) {
         flyMovement_.fill(false);
         event.Skip();
+    } else if (event.GetKeyCode() == 'F') {
+        if (event.GetEventType() == wxEVT_KEY_DOWN) {
+            if (event.ShiftDown()) useViewerCamera(!freeFlyCameraActive());
+            else frameModel();
+        }
     } else if (freeFlyCameraActive() && key != keys.end())
         flyMovement_[key - keys.begin()] = event.GetEventType() == wxEVT_KEY_DOWN;
     else

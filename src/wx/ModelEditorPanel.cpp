@@ -4,6 +4,7 @@
 #include "wx/ModelEditorPanel.hpp"
 
 #include "wx/ModelCanvas.hpp"
+#include "wx/AsciiEditor.hpp"
 #include "wx/TrapRuntimeCapture.hpp"
 #include "core/GameResourceSession.hpp"
 #include "core/CreatureAppearance.hpp"
@@ -86,6 +87,9 @@ enum CommandId {
     ID_Open = wxID_HIGHEST + 23600,
     ID_Reload,
     ID_ModelResources,
+    ID_SaveAscii,
+    ID_SaveAsciiAs,
+    ID_AsciiEditor,
     ID_ExportAscii,
     ID_ExportPacked,
     ID_AdvancedSettings,
@@ -163,7 +167,7 @@ public:
             "Explicit normals (NeoMDL extension)", "Smoothing groups (adjust position rounding)"};
         normals_ = customizer.AddChoice(4, modes);
         normals_->SetSelection(normalMode);
-        customizer.AddStaticText("Automatic: preserve ASCII modes; use smoothing groups for binary models.");
+        customizer.AddStaticText("Automatic: preserve the mesh normal modes in the editor text.");
         customizer.AddStaticText("Explicit normals: NeoMDL extension; recalculate after geometry edits.");
         customizer.AddStaticText("Position rounding may adjust coordinates by one float step.");
     }
@@ -182,8 +186,8 @@ public:
 class ModelPage final : public wxPanel {
 public:
     ModelPage(wxWindow* parent, std::unique_ptr<ModelDocument> document,
-              const RenderOptions& options, bool compact)
-        : wxPanel(parent), document_(std::move(document)) {
+              const RenderOptions& options, bool compact, std::function<void()> changed = [] {})
+        : wxPanel(parent), document_(std::move(document)), changed_(std::move(changed)) {
         timer_.SetOwner(this);
 
         auto* preview = new wxSplitterWindow(this, wxID_ANY, wxDefaultPosition, wxDefaultSize,
@@ -194,20 +198,7 @@ public:
         auto* advanced = advancedAnimation_->GetPane();
         animationChoice_ = new wxChoice(playback, wxID_ANY, wxDefaultPosition,
                                         wxSize(FromDIP(190), wxDefaultCoord));
-        animationChoice_->Append("Bind pose");
-        for (std::size_t index = 0u; index < document_->animations().size(); ++index) {
-            const auto& animation = document_->animation(index);
-            const auto& reference = document_->animationReference(index);
-            std::string label = animation.name;
-            if (reference.modelIndex != 0u) {
-                const auto& owner = document_->animationModel(index);
-                label += "  [" + (owner.name.empty()
-                    ? "supermodel " + std::to_string(reference.modelIndex)
-                    : owner.name) + "]";
-            }
-            animationChoice_->Append(wxui::toWx(label));
-        }
-        animationChoice_->SetSelection(0);
+        populateAnimations();
 
         runModeChoice_ = new wxChoice(advanced, wxID_ANY);
         runModeChoice_->Append("Base");
@@ -330,11 +321,21 @@ public:
             FromDIP(static_cast<int>(layoutSettings.readDouble("Layout/TreeHeight", compact ? 220 : 320))));
         inspector->SetSashGravity(0.6);
 
-        canvas_ = new ModelCanvas(splitter_);
+        sourceSplit_ = new wxSplitterWindow(splitter_, wxID_ANY, wxDefaultPosition, wxDefaultSize,
+                                             wxSP_LIVE_UPDATE | wxSP_3D);
+        canvas_ = new ModelCanvas(sourceSplit_);
         canvas_->setDocument(document_.get());
         canvas_->setOptions(options);
+        sourceSplit_->SetMinimumPaneSize(FromDIP(160));
+        sourceSplit_->SetSashGravity(0.5);
+        if (document_->hasModelOwner()) {
+            asciiEditor_ = new AsciiEditor(sourceSplit_, document_,
+                [this](std::unique_ptr<ModelDocument> document) { applyAsciiPreview(std::move(document)); }, changed_);
+            sourceSplit_->SplitVertically(canvas_, asciiEditor_, FromDIP(static_cast<int>(
+                layoutSettings.readDouble("Layout/ModelPreviewWidth", compact ? 260 : 420))));
+        } else sourceSplit_->Initialize(canvas_);
         splitter_->SetMinimumPaneSize(FromDIP(160));
-        splitter_->SplitVertically(inspector, canvas_,
+        splitter_->SplitVertically(inspector, sourceSplit_,
             FromDIP(static_cast<int>(layoutSettings.readDouble("Layout/InspectorWidth", compact ? 220 : 300))));
         splitter_->SetSashGravity(0.0);
         preview->SetMinimumPaneSize(FromDIP(60));
@@ -351,6 +352,7 @@ public:
         rememberPane(preview, "Layout/PlaybackHeight");
         rememberPane(splitter_, "Layout/InspectorWidth");
         rememberPane(inspector, "Layout/TreeHeight");
+        rememberPane(sourceSplit_, "Layout/ModelPreviewWidth");
         auto* layout = new wxBoxSizer(wxVERTICAL);
         layout->Add(preview, 1, wxEXPAND);
         SetSizer(layout);
@@ -456,6 +458,7 @@ public:
 
     ~ModelPage() override {
         timer_.Stop();
+        if (asciiEditor_) asciiEditor_->cancelAndWait();
         // The canvas borrows document_, so destroy it before the document.
         DestroyChildren();
     }
@@ -463,11 +466,13 @@ public:
     void suspendLoadingPlayback() {
         ++loadingSuspensions_;
         timer_.Stop();
+        if (asciiEditor_) asciiEditor_->setPreviewEnabled(false);
         canvas_->setLoading(true);
     }
     void resumeLoadingPlayback() {
         if (--loadingSuspensions_ != 0u) return;
         canvas_->setLoading(false);
+        if (asciiEditor_) asciiEditor_->setPreviewEnabled(canvas_->areaScene().empty());
         lastTick_ = std::chrono::steady_clock::now();
         timer_.Start(16);
     }
@@ -476,6 +481,9 @@ public:
     const RenderOptions& options() const noexcept { return canvas_->options(); }
     unsigned previewFeatures() const noexcept { return previewFeatures_; }
     ModelDocument& document() noexcept { return *document_; }
+    AsciiEditor* asciiEditor() const noexcept { return asciiEditor_; }
+    bool asciiVisible() const noexcept { return asciiVisible_ && canvas_->areaScene().empty(); }
+    void showAscii(bool visible) { asciiVisible_ = visible; updateAsciiVisibility(); }
     void setResourceSession(std::shared_ptr<GameResourceSession> session) {
         resourceSession_=std::move(session);
         updateDetails(selectedNode_);
@@ -514,6 +522,7 @@ public:
     void installArea(AreaScene pending,PreparedSceneAudioPlayback sounds={}) {
         canvas_->installArea(std::move(pending),std::move(sounds));
         updatePreviewFeatures();
+        updateAsciiVisibility();
     }
     void configureSceneAudio(std::optional<ExoRandom::State> state) {canvas_->configureSceneAudio(state);}
 
@@ -535,7 +544,7 @@ public:
     std::string engineExecutionReport() const {return canvas_->engineExecutionReport();}
     void setSceneShadowInputs(SceneShadowInputs inputs) {canvas_->setSceneShadowInputs(std::move(inputs));}
     void setSceneCasterEnabled(LightOwnerId owner,bool enabled) {canvas_->setSceneCasterEnabled(owner,enabled);}
-    void clearArea() { canvas_->clearArea(); updatePreviewFeatures(); }
+    void clearArea() { canvas_->clearArea(); updatePreviewFeatures(); updateAsciiVisibility(); }
     const AreaScene& areaScene() const noexcept { return canvas_->areaScene(); }
     void setAreaRoom(std::optional<LightRoomId> id) { canvas_->setAreaRoom(id); }
     void useReplayedAreaRoom() {canvas_->useReplayedAreaRoom();}
@@ -673,10 +682,66 @@ public:
     void refreshDetails() { updateDetails(selectedNode_); }
     void setAppearance(bool dark) {
         wxui::applyTheme(this, dark);
+        if (asciiEditor_) asciiEditor_->setAppearance(dark);
         canvas_->Refresh(false);
     }
 
 private:
+    void populateAnimations() {
+        animationChoice_->Clear();
+        animationChoice_->Append("Bind pose");
+        for (std::size_t index = 0; index < document_->animations().size(); ++index) {
+            auto label = document_->animation(index).name;
+            const auto& reference = document_->animationReference(index);
+            if (reference.modelIndex != 0u) {
+                const auto& owner = document_->animationModel(index);
+                label += "  [" + (owner.name.empty() ? "supermodel " + std::to_string(reference.modelIndex) : owner.name) + "]";
+            }
+            animationChoice_->Append(wxui::toWx(label));
+        }
+        animationChoice_->SetSelection(0);
+    }
+
+    void updateAsciiVisibility() {
+        if (!asciiEditor_) return;
+        asciiEditor_->setPreviewEnabled(loadingSuspensions_ == 0u && canvas_->areaScene().empty());
+        if (asciiVisible() && !sourceSplit_->IsSplit()) {
+            asciiEditor_->Show();
+            sourceSplit_->SplitVertically(canvas_, asciiEditor_, FromDIP(static_cast<int>(
+                neosettings::AppSettings("NeoMDL").readDouble("Layout/ModelPreviewWidth", 420))));
+        } else if (!asciiVisible() && sourceSplit_->IsSplit()) {
+            sourceSplit_->Unsplit(asciiEditor_);
+        }
+    }
+
+    void applyAsciiPreview(std::unique_ptr<ModelDocument> document) {
+        const auto animation = selectedAnimation();
+        const auto clip = animation ? document_->animation(*animation).name : std::string{};
+        const auto* run = selectedRun();
+        const float time = run ? run->time : 0.0f;
+        const bool resume = playing_;
+        auto previous = std::move(document_);
+        document_ = std::move(document);
+        canvas_->setDocument(document_.get(), true);
+        stopPlayback();
+        eventLog_.clear();
+        selectedNode_.reset();
+        populateTree();
+        populateAnimations();
+        for (std::size_t index = 0; index < document_->animations().size(); ++index) {
+            if (document_->animation(index).name == clip) {
+                animationChoice_->SetSelection(static_cast<int>(index + 1u));
+                previewSelectedAnimation();
+                if (const auto id = selectedRunId()) canvas_->setAnimationRunTime(*id, time, true);
+                if (resume) startPlayback();
+                break;
+            }
+        }
+        updatePreviewFeatures();
+        updateAnimationControls();
+        updateDetails(std::nullopt);
+    }
+
     std::optional<std::size_t> selectedAnimation() const {
         const auto selection = animationChoice_
             ? animationChoice_->GetSelection() : wxNOT_FOUND;
@@ -1037,7 +1102,7 @@ private:
                 text << "Resources from: model directory\n"
                      << "Choose a game installation in Tools > Model Resource Installation.\n";
             if (document_->hasModelOwner() && !document_->sourceModel().asciiBuilt)
-                text << "To compile: export ASCII, then open the exported model.\n";
+                text << "ASCII is generated automatically for editing and compilation.\n";
             if (const auto animation = selectedAnimation()) {
                 const auto& clip = document_->animation(*animation);
                 text << "\nSelected animation: " << clip.name << "\nLength: " << clip.length << " s\n"
@@ -1588,7 +1653,11 @@ private:
         details_->ChangeValue(wxui::toWx(text.str()));
     }
 
-    std::unique_ptr<ModelDocument> document_;
+    std::shared_ptr<ModelDocument> document_;
+    std::function<void()> changed_;
+    wxSplitterWindow* sourceSplit_{};
+    AsciiEditor* asciiEditor_{};
+    bool asciiVisible_{true};
     unsigned previewFeatures_{};
     wxSplitterWindow* splitter_{};
     wxTreeCtrl* tree_{};
@@ -1762,6 +1831,8 @@ public:
     std::size_t documentCount() const override { return tabs_->GetPageCount(); }
     bool canClose() override {
         if (jobRunning_) { cancelJob_.store(true); return false; }
+        for (std::size_t index = 0; index < tabs_->GetPageCount(); ++index)
+            if (!confirmDiscard(pageAt(index))) return false;
         return true;
     }
 
@@ -1784,8 +1855,20 @@ public:
     }
 
 private:
+    bool confirmDiscard(ModelPage* page) {
+        const auto* editor = page->asciiEditor();
+        if (!editor || !editor->modified()) return true;
+        tabs_->SetSelection(tabs_->GetPageIndex(page));
+        wxMessageDialog dialog(this, "Save ASCII edits to " + wxui::toWx(page->document().title()) + " before continuing?",
+            "Unsaved ASCII edits", wxYES_NO | wxCANCEL | wxICON_QUESTION);
+        dialog.SetYesNoLabels("Save ASCII", "Discard");
+        const auto answer = dialog.ShowModal();
+        return answer == wxID_NO || (answer == wxID_YES && page->asciiEditor()->save());
+    }
+
     void reloadModel(ResourceResolver resources, std::shared_ptr<GameResourceSession> session) {
         auto* page = activePage();
+        if (!confirmDiscard(page)) return;
         try {
             auto document = std::make_unique<ModelDocument>();
             std::optional<model::GameVersion> game = page->document().model().game;
@@ -3404,7 +3487,6 @@ private:
 
     void exportAsciiModel() {
         auto* page=activePage();
-        if(!page || !page->document().hasModelOwner()) return;
         const auto& document=page->document();
         const auto protectedInputs=document.openPaths();
         auto stem=document.path().stem();
@@ -3418,7 +3500,7 @@ private:
         if(file.ShowModal()!=wxID_OK) return;
         asciiNormalMode_=controls.normalMode;
         model::AsciiExportOptions options;
-        if(asciiNormalMode_!=0 || !document.model().asciiBuilt)options.explicitNormals=asciiNormalMode_==2;
+        if(asciiNormalMode_!=0)options.explicitNormals=asciiNormalMode_==2;
         options.refineTangentRounding=asciiNormalMode_==3;
         options.refineNormalRounding=asciiNormalMode_==3;
         try {
@@ -3426,10 +3508,13 @@ private:
             neoshared::checkResourceOutput(output,protectedInputs);
             model::AsciiExportResult exported;
             std::vector<std::uint8_t> bytes;
+            const auto* editor = page->asciiEditor();
+            const auto text = editor->text();
             if(!runJob("Exporting ASCII model",[&](const neoshared::bif::JobControl& job) {
                 // runJob keeps documents alive and suspends scene updates.
                 job.check();
-                exported=model::exportAsciiModel(document.sourceModel(),job,options);
+                const auto edited = editor->source()->rebuildAscii(text, job);
+                exported=model::exportAsciiModel(edited->sourceModel(),job,options);
                 bytes.assign(exported.text.begin(),exported.text.end());
                 job.check();
             })) return;
@@ -3448,10 +3533,9 @@ private:
 
     void exportPackedModel() {
         auto* page=activePage();
-        if(!page || !page->document().hasModelOwner()) return;
         const auto& document=page->document();
         auto protectedInputs=document.openPaths();
-        const auto filename=neoshared::pathToUtf8(document.path().stem())+"-packed.mdl";
+        const auto filename=document.model().name+"-packed.mdl";
         wxFileDialog file(this,"Compile ASCII to Binary MDL/MDX",neosettings::pathToWx(document.path().parent_path()),
             wxui::toWx(filename),"Binary models (*.mdl)|*.mdl",
             wxFD_SAVE|wxFD_OVERWRITE_PROMPT);
@@ -3466,9 +3550,12 @@ private:
                     "Replace the companion file "+wxui::toWx(neoshared::pathToUtf8(companion))+"?",
                     "Export Binary MDL/MDX",wxYES_NO|wxNO_DEFAULT|wxICON_QUESTION,this)!=wxYES) return;
             model::PackedExportResult exported;
+            const auto* editor = page->asciiEditor();
+            const auto text = editor->text();
             if(!runJob("Compiling packed model",[&](const neoshared::bif::JobControl& job) {
                 job.check();
-                exported=model::exportPackedModel(document.sourceModel(),job);
+                const auto edited = editor->source()->rebuildAscii(text, job);
+                exported=model::exportPackedModel(edited->sourceModel(),job);
                 job.check();
             })) return;
             neoshared::texture::writeFileBytes(companion,exported.mdx);
@@ -3512,7 +3599,8 @@ private:
     void addDocument(std::unique_ptr<ModelDocument> document, std::shared_ptr<GameResourceSession> session = {},
                      ResourceResolver fileResources = {}, ModelPage* replacement = nullptr) {
         const auto title = wxui::toWx(document->title());
-        auto* page = new ModelPage(tabs_, std::move(document), replacement ? replacement->options() : options_, context_.compact);
+        auto* page = new ModelPage(tabs_, std::move(document), replacement ? replacement->options() : options_,
+                                   context_.compact, [this] { updateState(); });
         page->setResourceSession(std::move(session));
         page->setFileResources(std::move(fileResources));
         page->setAppearance(dark_);
@@ -3528,12 +3616,13 @@ private:
     void closePage(int index) {
         if (jobRunning_) { cancelJob_.store(true); return; }
         if (index < 0 || static_cast<std::size_t>(index) >= tabs_->GetPageCount()) return;
+        if (!confirmDiscard(pageAt(static_cast<std::size_t>(index)))) return;
         tabs_->DeletePage(static_cast<std::size_t>(index));
         updateState();
     }
 
     void closeAll() {
-        if (jobRunning_) { cancelJob_.store(true); return; }
+        if (!canClose()) return;
         while (tabs_->GetPageCount() != 0u) tabs_->DeletePage(tabs_->GetPageCount() - 1u);
         updateState();
     }
@@ -3597,6 +3686,8 @@ private:
         auto* file = fileMenu_;
         file->Append(ID_Open, "&Open Model...\tCtrl+O");
         file->Append(ID_Reload, "&Reload Model\tCtrl+R", "Reload the model from disk and reset its preview.");
+        file->Append(ID_SaveAscii, "Save &ASCII\tCtrl+S", "Save the text in the ASCII editor.");
+        file->Append(ID_SaveAsciiAs, "Save ASCII As...\tCtrl+Shift+S", "Save the editor text to another file.");
         gameDirectoryMenu_ = neogames::appendOpenGameDirectoryMenu(
             *this, *file,
             [this](const neogames::SavedGameDirectory& directory) {
@@ -3607,9 +3698,9 @@ private:
         file->Append(ID_LoadArea, "Load Area Layout...");
         file->Append(ID_ModuleArea, "Load Module Area...");
         file->AppendSeparator();
-        file->Append(ID_ExportAscii, "Export &ASCII MDL...");
+        file->Append(ID_ExportAscii, "Export ASCII MDL...", "Re-export the current ASCII using conversion options.");
         file->Append(ID_ExportPacked, "Compile ASCII to &Binary...",
-                     "Compile an opened ASCII model to MDL/MDX. Export binary models to ASCII and open that file first.");
+                     "Compile the text in the ASCII editor to MDL/MDX.");
         file->AppendSeparator();
         file->Append(ID_CloseModel, "&Close Model\tCtrl+W");
         file->Append(ID_CloseAll, "Close &All");
@@ -3650,10 +3741,11 @@ private:
                 menu->Destroy(menu->FindItemByPosition(0));
 
         auto* view = viewMenu_;
-        view->Append(ID_FrameModel, "&Frame Model\tF");
+        view->AppendCheckItem(ID_AsciiEditor, "ASCII Editor");
+        view->Append(ID_FrameModel, "&Frame Model", "Press F while the viewport has keyboard focus.");
         auto* camera = new wxMenu;
         camera->AppendCheckItem(ID_OrbitCamera, "&Orbit");
-        camera->AppendCheckItem(ID_FreeFlyCamera, "&Free Fly\tShift+F");
+        camera->AppendCheckItem(ID_FreeFlyCamera, "&Free Fly", "Press Shift+F while the viewport has keyboard focus.");
         camera->Append(ID_CameraControls, "Navigation Controls...");
         if (features & PreviewCameras) {
             camera->AppendSeparator();
@@ -3816,6 +3908,7 @@ private:
         };
         setCheck(ID_OrbitCamera, active && !active->authoredCameraActive() && !active->freeFlyCameraActive());
         setCheck(ID_FreeFlyCamera, active && active->freeFlyCameraActive());
+        setCheck(ID_AsciiEditor, active && active->asciiEditor() && active->asciiVisible());
         setCheck(ID_Textures, options_.textures);
         setCheck(ID_Lightmaps, options_.lightmaps);
         setCheck(ID_Wireframe, options_.wireframe);
@@ -5068,6 +5161,9 @@ private:
             case ID_Open: chooseAndOpenModel(); return;
             case ID_Reload: reloadModel(activePage()->fileResources(), activePage()->resourceSession()); return;
             case ID_ModelResources: chooseModelResources(); return;
+            case ID_SaveAscii: activePage()->asciiEditor()->save(); return;
+            case ID_SaveAsciiAs: activePage()->asciiEditor()->save(true); return;
+            case ID_AsciiEditor: activePage()->showAscii(event.IsChecked()); updateState(); return;
             case ID_ExportAscii: exportAsciiModel(); return;
             case ID_ExportPacked: exportPackedModel(); return;
             case ID_AdvancedSettings: showAdvancedSettings(); return;
@@ -5180,7 +5276,7 @@ private:
             case ID_PreviewTriggers:
                 options_.previewTriggers = event.IsChecked(); applyDisplayOptions(); return;
             case ID_About:
-                wxMessageBox("NeoMDL is a model viewer and ASCII / binary MDL converter for Knights of the Old Republic I and II.\n\nInspect geometry, materials, animations, particles, lightsabers and area layouts. Model dependencies resolve through the model directory, the active resource session or a discovered game installation.",
+                wxMessageBox("NeoMDL is a model viewer, ASCII editor and ASCII / binary MDL converter for Knights of the Old Republic I and II.\n\nEdit an individual model's ASCII beside its 3D preview. Inspect geometry, materials, animations, particles, lightsabers and area layouts. Model dependencies resolve through the model directory, the active resource session or a selected game installation.",
                              "About NeoMDL", wxOK | wxICON_INFORMATION, this);
                 return;
             case ID_Exit: requestModuleClose(); return;
@@ -5196,6 +5292,13 @@ private:
     void updateState() {
         const auto* active = activePage();
         const bool hasDocument = active != nullptr;
+        const auto* editor = active ? active->asciiEditor() : nullptr;
+        for (std::size_t index = 0; index < tabs_->GetPageCount(); ++index) {
+            const auto* page = pageAt(index);
+            auto title = wxui::toWx(page->document().title());
+            if (page->asciiEditor() && page->asciiEditor()->modified()) title += " *";
+            if (tabs_->GetPageText(index) != title) tabs_->SetPageText(index, title);
+        }
         const bool area = active && !active->areaScene().empty();
         const unsigned features = active ? active->previewFeatures() : 0u;
         if (features != previewMenuFeatures_) buildPreviewMenus(features);
@@ -5210,9 +5313,11 @@ private:
             else if (!area && developerMenu_->FindItem(command.first))
                 developerMenu_->Destroy(command.first);
         }
-        enableModuleCommand(ID_ExportAscii,activePage()&&activePage()->document().hasModelOwner());
-        enableModuleCommand(ID_ExportPacked,activePage()&&activePage()->document().hasModelOwner()&&
-            activePage()->document().model().asciiBuilt);
+        enableModuleCommand(ID_SaveAscii,editor&&editor->ready());
+        enableModuleCommand(ID_SaveAsciiAs,editor&&editor->ready());
+        enableModuleCommand(ID_AsciiEditor,editor&&!area);
+        enableModuleCommand(ID_ExportAscii,editor&&editor->ready());
+        enableModuleCommand(ID_ExportPacked,editor&&editor->ready());
         enableModuleCommand(ID_ResourceProvenance,hasDocument);
         const bool looseModel = active && !active->document().path().empty() && !area;
         enableModuleCommand(ID_Reload, looseModel);
@@ -5264,10 +5369,11 @@ private:
                 right << " | " << document.references().size() << " reference(s)";
             if (!document.messages().empty()) right << " | " << document.messages().size() << " diagnostic(s)";
             setModuleStatusText(right.str(), 1);
-            setModuleTitle(wxString("NeoMDL - ") + wxui::toWx(document.title()));
+            setModuleTitle(wxString("NeoMDL - ") + wxui::toWx(document.title()) +
+                (editor && editor->modified() ? " *" : ""));
         } else {
             setModuleStatusText("Open an MDL model to begin.", 0);
-            setModuleStatusText("Read-only renderer", 1);
+            setModuleStatusText("ASCII editor and 3D preview", 1);
             setModuleTitle("NeoMDL");
         }
     }

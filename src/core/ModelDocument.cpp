@@ -289,6 +289,9 @@ bool ModelDocument::openResource(neoshared::ResourceDocument resource,
     };
     auto nextModel = neomdl::model::decodeModelBytes(
         mdlResource.bytes, mdx, mdlResource.sourceDescription, job,asciiGame,loadResources);
+    originalAscii_ = nextModel.asciiBuilt
+        ? std::optional<std::string>{std::string(mdlResource.bytes.begin(), mdlResource.bytes.end())}
+        : std::nullopt;
     asciiResources_=loadResources;
     runtimeScopePinned_=true;resolver_=resolver;trace_=std::move(trace);
     resourceParent_.reset();
@@ -393,6 +396,22 @@ bool ModelDocument::openResource(neoshared::ResourceDocument resource,
     job.update(1u, 1u, "Loaded model: " + stem);
     open_ = true;
     return true;
+}
+
+std::unique_ptr<ModelDocument> ModelDocument::rebuildAscii(const std::string& text,
+    const neoshared::bif::JobControl& job) const {
+    neoshared::ResourceDocument resource;
+    resource.fileName = title_;
+    resource.type = kMdlResourceType;
+    resource.bytes.assign(text.begin(), text.end());
+    resource.identity = identity_;
+    resource.sourceDescription = title_ + " (edited ASCII)";
+    resource.protectedInputs = openPaths();
+    auto result = std::make_unique<ModelDocument>();
+    result->openResource(std::move(resource), resolver_, job, model_.game, asciiResources_);
+    result->path_ = path_;
+    result->runtimeScopePinned_ = runtimeScopePinned_;
+    return result;
 }
 
 void ModelDocument::instantiateParts() {
