@@ -592,9 +592,12 @@ double measureTangentBasis(Model& rebuilt,const Model& source,const CornerRows& 
     return error;
 }
 
+enum class CornerSearch { Cancellation,TangentAxes,TangentOrder };
+
 void reconstructCyclicCornerPass(Writer& out,const Model& model,const Model& frames,
                                 std::map<const Mesh*,MeshReconstruction>& plans,
-                                const Mesh* changedMesh,bool axisTangents,bool neighbors) {
+                                const Mesh* changedMesh,CornerSearch search,bool neighbors) {
+    const bool axisTangents=search!=CornerSearch::Cancellation;
     auto current=frames;
     auto rows=generateGeometry(current,model,plans,false,out.job());
     auto best=measureTangentBasis(current,model,rows,plans,out.job());
@@ -637,7 +640,8 @@ void reconstructCyclicCornerPass(Writer& out,const Model& model,const Model& fra
                         if(same(value,wanted)) return;
                         changedBasis=true;
                         const bool original=cancellationOutput(value) || cancellationOutput(wanted);
-                        if(axisTangents ? !original && axisAligned(value) && axisAligned(wanted) : original)
+                        if(search==CornerSearch::TangentOrder ? axisAligned(wanted) :
+                           axisTangents ? !original && axisAligned(value) && axisAligned(wanted) : original)
                             cancelledTangents.push_back(generated.position);
                     };
                     inspect(generated.tangentBasis.bitangent,retained.bitangent);
@@ -719,6 +723,10 @@ void reconstructCyclicCornerPass(Writer& out,const Model& model,const Model& fra
             auto selectedGeometry=current;
             auto selectedRows=rows;
             const auto consider=[&](const Mesh* mesh,MeshReconstruction trial) {
+                const auto& retained=plans.at(mesh);
+                if(trial.faceOrder!=retained.faceOrder &&
+                   !preservesSourceFaceNeighbors(*mesh,trial.topology.sourceFaces,
+                       retained.faceOrder,trial.faceOrder)) return;
                 std::map<const Mesh*,MeshReconstruction> changed;
                 changed.emplace(mesh,std::move(trial));
                 auto rebuilt=current;
@@ -744,7 +752,28 @@ void reconstructCyclicCornerPass(Writer& out,const Model& model,const Model& fra
                     selectedGeometry=std::move(rebuilt);selectedRows=std::move(generated);
                 }
             };
-            for(const auto index:group.second) {
+            // Mirrored tangent sums can retain only rounding residue. Move
+            // their contributors as well as their cyclic starts; swapping
+            // alone cannot recover every accumulation order.
+            if(search==CornerSearch::TangentOrder) for(const auto& pair:pairs) {
+                const auto& first=candidates[pair[0]];
+                const auto& second=candidates[pair[1]];
+                const auto* mesh=first.first;
+                if((mesh->render?nullptr:mesh)!=group.first || model.nodes[mesh->nodeIndex].aabb) continue;
+                const auto& order=plans.at(mesh).faceOrder;
+                const auto a=std::find(order.begin(),order.end(),first.second)-order.begin();
+                const auto b=std::find(order.begin(),order.end(),second.second)-order.begin();
+                auto trial=plans.at(mesh);
+                std::swap(trial.faceOrder[a],trial.faceOrder[b]);
+                consider(mesh,std::move(trial));
+                for(const auto& move:{std::make_pair(a,b),std::make_pair(b,a)}) {
+                    trial=plans.at(mesh);
+                    trial.faceOrder.erase(trial.faceOrder.begin()+move.first);
+                    trial.faceOrder.insert(trial.faceOrder.begin()+move.second,order[move.first]);
+                    consider(mesh,std::move(trial));
+                }
+            }
+            if(search!=CornerSearch::TangentOrder) for(const auto index:group.second) {
                 const auto& candidate=candidates[index];
                 for(std::uint8_t rotation=0u;rotation<3u;++rotation) {
                     if(plans.at(candidate.first).cornerRotations[candidate.second]==rotation) continue;
@@ -755,7 +784,7 @@ void reconstructCyclicCornerPass(Writer& out,const Model& model,const Model& fra
             }
             // Opposing contributions can require two cyclic starts to move
             // together. Only pair affected faces incident to the same source.
-            if(!improved) for(const auto& pair:pairs) {
+            if(!improved && search!=CornerSearch::TangentOrder) for(const auto& pair:pairs) {
                 const auto& first=candidates[pair[0]];
                 const auto& second=candidates[pair[1]];
                 if((first.first->render?nullptr:first.first)!=group.first) continue;
@@ -772,7 +801,7 @@ void reconstructCyclicCornerPass(Writer& out,const Model& model,const Model& fra
             // Keep the established single/source-pair search first. Only
             // at its fixed point try compensating neighbors, then resume it
             // after accepting an improvement.
-            if(!improved) for(const auto& entry:compensatingPairs) {
+            if(!improved && search!=CornerSearch::TangentOrder) for(const auto& entry:compensatingPairs) {
                 const auto* mesh=entry.first;
                 if((mesh->render?nullptr:mesh)!=group.first) continue;
                 for(const auto& pair:entry.second)
@@ -797,7 +826,7 @@ void reconstructCyclicCornerPass(Writer& out,const Model& model,const Model& fra
 void reconstructCyclicCorners(Writer& out,const Model& model,const Model& frames,
                               std::map<const Mesh*,MeshReconstruction>& plans,
                               const Mesh* changedMesh=nullptr) {
-    reconstructCyclicCornerPass(out,model,frames,plans,changedMesh,false,false);
+    reconstructCyclicCornerPass(out,model,frames,plans,changedMesh,CornerSearch::Cancellation,false);
 }
 
 bool improvesReconstructedShading(const Model& model,
@@ -2543,23 +2572,21 @@ void reconstructSkinSeamSmoothing(Writer& out,const Model& model) {
     }
     // Keep the additional cyclic candidates out of private smoothing-join
     // trials; refine the accepted reconstruction once those reach a fixed point.
-    reconstructCyclicCornerPass(out,model,frames,plans,nullptr,false,true);
-    // Basis sums can cancel individual components and leave a different
-    // axis, without taking Normalize's +X branch or having singular UVs.
-    // Compare differing retained/rebuilt axes after smoothing joins and the cyclic search
-    // reach their fixed point, including the private shared-join proposals.
+    reconstructCyclicCornerPass(out,model,frames,plans,nullptr,CornerSearch::Cancellation,true);
+    // Recover differing tangent axes after the original cyclic search.
     if(std::any_of(plans.begin(),plans.end(),[](const auto& entry) {
         const auto& mesh=*entry.first;
         return (mesh.mdxBitmap&0x80u) && !mesh.animated && !mesh.dangly &&
             entry.second.hasNormals && !entry.second.explicitNormals;
-    })) reconstructCyclicCornerPass(out,model,frames,plans,nullptr,true,true);
-    // Face order changes ProcessVerts' rounded sums and the tangent writer.
-    // Apply the neighbor-preserving order last, judging every resulting
-    // normal and basis corner as well as the skin records.
+    })) reconstructCyclicCornerPass(out,model,frames,plans,nullptr,CornerSearch::TangentAxes,true);
+    // Refine normal accumulation order while retaining neighbors, basis
+    // corners and skin records.
     reconstructFaceOrder(out,model,frames,plans);
     reconstructTangentRounding(out,model,frames,plans);
     reconstructNormalRoundingPass(out,model,frames,plans);
     reconstructTangentUvPrecision(out,model,frames,plans);
+    // Resolve UV precision before ordering the remaining cancelled tangents.
+    reconstructCyclicCornerPass(out,model,frames,plans,nullptr,CornerSearch::TangentOrder,false);
     reconstructNormalPositionPrecision(out,model,frames,plans);
 }
 

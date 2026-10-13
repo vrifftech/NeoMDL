@@ -40,6 +40,11 @@ std::vector<std::vector<std::uint32_t>> sharedSeamSmoothingCandidates(
     bool differentNormals = false,
     bool missingComponents = false);
 
+bool preservesSourceFaceNeighbors(
+    const Mesh&, const std::vector<std::array<std::uint32_t,3>>& sourceFaces,
+    const std::vector<std::size_t>& currentOrder,
+    const std::vector<std::size_t>& candidateOrder);
+
 std::vector<std::size_t> reconstructNormalFaceOrder(
     const Mesh&, const std::vector<Vertex>& compiledVertices,
     const std::vector<std::size_t>& sourceVertices,

@@ -580,6 +580,14 @@ struct SourceFaceNeighbors {
 
 } // namespace
 
+bool preservesSourceFaceNeighbors(const Mesh& mesh,
+        const std::vector<std::array<std::uint32_t,3>>& sourceFaces,
+        const std::vector<std::size_t>& currentOrder,
+        const std::vector<std::size_t>& candidateOrder) {
+    const SourceFaceNeighbors neighbors(mesh,sourceFaces,currentOrder);
+    return neighbors.preserves(candidateOrder,SourceFaceNeighbors::ranks(candidateOrder));
+}
+
 std::vector<std::size_t> reconstructNormalFaceOrder(
     const Mesh& mesh,const std::vector<Vertex>& vertices,
     const std::vector<std::size_t>& sourceVertices,
