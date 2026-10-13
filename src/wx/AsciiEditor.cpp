@@ -140,6 +140,7 @@ void AsciiEditor::poll() {
                 status_->ChangeValue("ASCII ready. The viewport shows the original binary until you edit or Update Preview.");
                 changed_();
             } else if (workerRevision_ == revision_ && !cancelled_.load()) {
+                previewRevision_ = workerRevision_;
                 apply_(std::move(result.document));
                 status_->ChangeValue("Preview current. Edits update after a 0.5-second typing pause.");
                 changed_();
@@ -178,6 +179,15 @@ void AsciiEditor::findNext() {
         editor_->SearchNext(0, search_->GetValue());
     }
     editor_->ScrollRange(editor_->GetSelectionStart(), editor_->GetSelectionEnd());
+}
+
+void AsciiEditor::replaceText(const std::string& text) {
+    editor_->BeginUndoAction();
+    editor_->SetTargetStart(0);
+    editor_->SetTargetEnd(editor_->GetTextLength());
+    editor_->ReplaceTargetRaw(text.data(), static_cast<int>(text.size()));
+    editor_->EndUndoAction();
+    updatePreview();
 }
 
 void AsciiEditor::setAppearance(bool dark) {

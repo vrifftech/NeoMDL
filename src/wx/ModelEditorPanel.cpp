@@ -92,6 +92,10 @@ enum CommandId {
     ID_AsciiEditor,
     ID_ExportAscii,
     ID_ExportPacked,
+    ID_NodeProperties,
+    ID_ModelProperties,
+    ID_RenameTexture,
+    ID_ExportTextures,
     ID_AdvancedSettings,
     ID_DeveloperSettings,
     ID_EngineGraphics,
@@ -170,11 +174,38 @@ public:
         customizer.AddStaticText("Automatic: preserve the mesh normal modes in the editor text.");
         customizer.AddStaticText("Explicit normals: NeoMDL extension; recalculate after geometry edits.");
         customizer.AddStaticText("Position rounding may adjust coordinates by one float step.");
+        geometryOnly_ = customizer.AddCheckBox("Geometry only (omit this model's animations)");
     }
-    void TransferDataFromCustomControls() override { normalMode = normals_->GetSelection(); }
+    void TransferDataFromCustomControls() override {
+        normalMode = normals_->GetSelection();
+        includeAnimations = !geometryOnly_->GetValue();
+    }
     int normalMode{};
+    bool includeAnimations{true};
 private:
     wxFileDialogChoice* normals_{};
+    wxFileDialogCheckBox* geometryOnly_{};
+};
+
+class PackedExportControls final : public wxFileDialogCustomizeHook {
+public:
+    explicit PackedExportControls(model::GameVersion target) : game(target) {}
+    void AddCustomControls(wxFileDialogCustomize& customizer) override {
+        customizer.AddStaticText("Output game");
+        const wxString games[] = {"Knights of the Old Republic (K1)", "The Sith Lords (K2)"};
+        game_ = customizer.AddChoice(2, games);
+        game_->SetSelection(game == model::GameVersion::Kotor1 ? 0 : 1);
+        geometryOnly_ = customizer.AddCheckBox("Geometry only (omit this model's animations)");
+    }
+    void TransferDataFromCustomControls() override {
+        game = game_->GetSelection() == 0 ? model::GameVersion::Kotor1 : model::GameVersion::Kotor2;
+        includeAnimations = !geometryOnly_->GetValue();
+    }
+    model::GameVersion game;
+    bool includeAnimations{true};
+private:
+    wxFileDialogChoice* game_{};
+    wxFileDialogCheckBox* geometryOnly_{};
 };
 
 class NodeItemData final : public wxTreeItemData {
@@ -188,6 +219,7 @@ public:
     ModelPage(wxWindow* parent, std::unique_ptr<ModelDocument> document,
               const RenderOptions& options, bool compact, std::function<void()> changed = [] {})
         : wxPanel(parent), document_(std::move(document)), changed_(std::move(changed)) {
+        outputGame_ = document_->sourceModel().game;
         timer_.SetOwner(this);
 
         auto* preview = new wxSplitterWindow(this, wxID_ANY, wxDefaultPosition, wxDefaultSize,
@@ -310,9 +342,13 @@ public:
         auto* detailsPanel = new wxPanel(inspector);
         auto* detailsLayout = new wxBoxSizer(wxVERTICAL);
         detailedDiagnostics_ = new wxCheckBox(detailsPanel, wxID_ANY, "Detailed diagnostics");
+        editNode_ = new wxButton(detailsPanel, wxID_ANY, "Edit Selected Node...");
+        editNode_->SetToolTip("Select a uniquely named node after the ASCII preview is current.");
+        editNode_->Enable(false);
         details_ = new wxTextCtrl(detailsPanel, wxID_ANY, wxEmptyString, wxDefaultPosition,
                                   wxDefaultSize, wxTE_MULTILINE | wxTE_READONLY | wxTE_RICH2);
         detailsLayout->Add(detailedDiagnostics_, 0, wxALL, FromDIP(5));
+        detailsLayout->Add(editNode_, 0, wxEXPAND | wxLEFT | wxRIGHT | wxBOTTOM, FromDIP(5));
         detailsLayout->Add(details_, 1, wxEXPAND);
         detailsPanel->SetSizer(detailsLayout);
         const neosettings::AppSettings layoutSettings("NeoMDL");
@@ -330,7 +366,8 @@ public:
         sourceSplit_->SetSashGravity(0.5);
         if (document_->hasModelOwner()) {
             asciiEditor_ = new AsciiEditor(sourceSplit_, document_,
-                [this](std::unique_ptr<ModelDocument> document) { applyAsciiPreview(std::move(document)); }, changed_);
+                [this](std::unique_ptr<ModelDocument> document) { applyAsciiPreview(std::move(document)); },
+                [this] { updateEditingControls(); changed_(); });
             sourceSplit_->SplitVertically(canvas_, asciiEditor_, FromDIP(static_cast<int>(
                 layoutSettings.readDouble("Layout/ModelPreviewWidth", compact ? 260 : 420))));
         } else sourceSplit_->Initialize(canvas_);
@@ -364,6 +401,7 @@ public:
         detailedDiagnostics_->Bind(wxEVT_CHECKBOX, [this](wxCommandEvent&) {
             updateDetails(selectedNode_);
         });
+        editNode_->Bind(wxEVT_BUTTON, [this](wxCommandEvent&) { editSelectedNode(); });
         advancedAnimation_->Bind(wxEVT_COLLAPSIBLEPANE_CHANGED,
             [this, playback, preview](wxCollapsiblePaneEvent&) {
                 playback->FitInside();
@@ -375,6 +413,8 @@ public:
             selectedNode_ = data ? std::optional<std::size_t>(data->index) : std::nullopt;
             canvas_->setSelectedNode(selectedNode_);
             updateDetails(selectedNode_);
+            updateEditingControls();
+            changed_();
             event.Skip();
         });
         animationChoice_->Bind(wxEVT_CHOICE, [this](wxCommandEvent&) {
@@ -482,6 +522,18 @@ public:
     unsigned previewFeatures() const noexcept { return previewFeatures_; }
     ModelDocument& document() noexcept { return *document_; }
     AsciiEditor* asciiEditor() const noexcept { return asciiEditor_; }
+    model::GameVersion outputGame() const noexcept { return outputGame_; }
+    void setOutputGame(model::GameVersion game) noexcept { outputGame_ = game; }
+    bool canEditNode() const {
+        if (!asciiEditor_ || !asciiEditor_->previewCurrent() || !selectedNode_ || !canvas_->areaScene().empty()) return false;
+        const auto& name = document_->model().nodes[*selectedNode_].name;
+        return std::count_if(document_->sourceModel().nodes.begin(), document_->sourceModel().nodes.end(),
+            [&](const auto& node) { return wxui::toWx(node.name).CmpNoCase(wxui::toWx(name)) == 0; }) == 1;
+    }
+    void editSelectedNode() {
+        const auto sourceIndex = document_->model().partSourceNodes[*selectedNode_];
+        asciiEditor_->editNode(document_->sourceModel(), sourceIndex);
+    }
     bool asciiVisible() const noexcept { return asciiVisible_ && canvas_->areaScene().empty(); }
     void showAscii(bool visible) { asciiVisible_ = visible; updateAsciiVisibility(); }
     void setResourceSession(std::shared_ptr<GameResourceSession> session) {
@@ -687,6 +739,7 @@ public:
     }
 
 private:
+    void updateEditingControls() { editNode_->Enable(canEditNode()); }
     void populateAnimations() {
         animationChoice_->Clear();
         animationChoice_->Append("Bind pose");
@@ -704,6 +757,7 @@ private:
 
     void updateAsciiVisibility() {
         if (!asciiEditor_) return;
+        updateEditingControls();
         asciiEditor_->setPreviewEnabled(loadingSuspensions_ == 0u && canvas_->areaScene().empty());
         if (asciiVisible() && !sourceSplit_->IsSplit()) {
             asciiEditor_->Show();
@@ -715,6 +769,7 @@ private:
     }
 
     void applyAsciiPreview(std::unique_ptr<ModelDocument> document) {
+        const auto selection = selectedNode_ ? document_->model().nodes[*selectedNode_].name : std::string{};
         const auto animation = selectedAnimation();
         const auto clip = animation ? document_->animation(*animation).name : std::string{};
         const auto* run = selectedRun();
@@ -727,6 +782,11 @@ private:
         eventLog_.clear();
         selectedNode_.reset();
         populateTree();
+        for (std::size_t i = 0; i < document_->model().nodes.size(); ++i)
+            if (!selection.empty() && document_->model().nodes[i].name == selection) {
+                tree_->SelectItem(nodeItems_[i]);
+                break;
+            }
         populateAnimations();
         for (std::size_t index = 0; index < document_->animations().size(); ++index) {
             if (document_->animation(index).name == clip) {
@@ -739,7 +799,8 @@ private:
         }
         updatePreviewFeatures();
         updateAnimationControls();
-        updateDetails(std::nullopt);
+        updateDetails(selectedNode_);
+        updateEditingControls();
     }
 
     std::optional<std::size_t> selectedAnimation() const {
@@ -1049,12 +1110,14 @@ private:
         if (node.lightsaber) label += " [lightsaber]";
         if (node.trigger) label += " [trigger]";
         const auto item = tree_->AppendItem(parent, label, -1, -1, new NodeItemData(index));
+        nodeItems_[index] = item;
         for (const auto child : node.children) appendNode(item, child);
         return item;
     }
 
     void populateTree() {
         tree_->DeleteAllItems();
+        nodeItems_.resize(document_->model().nodes.size());
         const auto root = tree_->AddRoot("model");
         bool appended = false;
         for (std::size_t index = 0; index < document_->model().nodes.size(); ++index) {
@@ -1657,12 +1720,15 @@ private:
     std::function<void()> changed_;
     wxSplitterWindow* sourceSplit_{};
     AsciiEditor* asciiEditor_{};
+    model::GameVersion outputGame_{};
     bool asciiVisible_{true};
     unsigned previewFeatures_{};
     wxSplitterWindow* splitter_{};
     wxTreeCtrl* tree_{};
+    std::vector<wxTreeItemId> nodeItems_;
     wxTextCtrl* details_{};
     wxCheckBox* detailedDiagnostics_{};
+    wxButton* editNode_{};
     ModelCanvas* canvas_{};
     wxCollapsiblePane* advancedAnimation_{};
     wxChoice* animationChoice_{};
@@ -3503,6 +3569,7 @@ private:
         if(asciiNormalMode_!=0)options.explicitNormals=asciiNormalMode_==2;
         options.refineTangentRounding=asciiNormalMode_==3;
         options.refineNormalRounding=asciiNormalMode_==3;
+        options.includeAnimations=controls.includeAnimations;
         try {
             const auto output=neosettings::pathFromWx(file.GetPath());
             neoshared::checkResourceOutput(output,protectedInputs);
@@ -3513,7 +3580,7 @@ private:
             if(!runJob("Exporting ASCII model",[&](const neoshared::bif::JobControl& job) {
                 // runJob keeps documents alive and suspends scene updates.
                 job.check();
-                const auto edited = editor->source()->rebuildAscii(text, job);
+                const auto edited = editor->source()->rebuildAscii(text, job, std::nullopt, options.includeAnimations);
                 exported=model::exportAsciiModel(edited->sourceModel(),job,options);
                 bytes.assign(exported.text.begin(),exported.text.end());
                 job.check();
@@ -3536,10 +3603,13 @@ private:
         const auto& document=page->document();
         auto protectedInputs=document.openPaths();
         const auto filename=document.model().name+"-packed.mdl";
+        PackedExportControls controls(page->outputGame());
         wxFileDialog file(this,"Compile ASCII to Binary MDL/MDX",neosettings::pathToWx(document.path().parent_path()),
             wxui::toWx(filename),"Binary models (*.mdl)|*.mdl",
             wxFD_SAVE|wxFD_OVERWRITE_PROMPT);
+        file.SetCustomizeHook(controls);
         if(file.ShowModal()!=wxID_OK) return;
+        page->setOutputGame(controls.game);
         try {
             const auto output=neosettings::pathFromWx(file.GetPath());
             auto companion=output;companion.replace_extension(".mdx");
@@ -3554,7 +3624,7 @@ private:
             const auto text = editor->text();
             if(!runJob("Compiling packed model",[&](const neoshared::bif::JobControl& job) {
                 job.check();
-                const auto edited = editor->source()->rebuildAscii(text, job);
+                const auto edited = editor->source()->rebuildAscii(text, job, controls.game, controls.includeAnimations);
                 exported=model::exportPackedModel(edited->sourceModel(),job);
                 job.check();
             })) return;
@@ -3701,12 +3771,19 @@ private:
         file->Append(ID_ExportAscii, "Export ASCII MDL...", "Re-export the current ASCII using conversion options.");
         file->Append(ID_ExportPacked, "Compile ASCII to &Binary...",
                      "Compile the text in the ASCII editor to MDL/MDX.");
+        file->Append(ID_ExportTextures, "Export Texture List...", "Save the model's directly referenced texture names.");
         file->AppendSeparator();
         file->Append(ID_CloseModel, "&Close Model\tCtrl+W");
         file->Append(ID_CloseAll, "Close &All");
         file->AppendSeparator();
         file->Append(ID_Exit, "E&xit");
         bar->Append(file, "&File");
+
+        auto* edit = new wxMenu;
+        edit->Append(ID_NodeProperties, "Selected Node Properties...", "Edit the selected node through its ASCII source.");
+        edit->Append(ID_ModelProperties, "Model Properties...", "Choose the animation root and head link.");
+        edit->Append(ID_RenameTexture, "Rename Texture Throughout Model...", "Change matching texture references in this model.");
+        bar->Append(edit, "&Edit");
 
         viewMenu_ = new wxMenu;
         bar->Append(viewMenu_, "&View");
@@ -5166,6 +5243,10 @@ private:
             case ID_AsciiEditor: activePage()->showAscii(event.IsChecked()); updateState(); return;
             case ID_ExportAscii: exportAsciiModel(); return;
             case ID_ExportPacked: exportPackedModel(); return;
+            case ID_NodeProperties: activePage()->editSelectedNode(); return;
+            case ID_ModelProperties: activePage()->asciiEditor()->editModel(activePage()->document().sourceModel()); return;
+            case ID_RenameTexture: activePage()->asciiEditor()->renameTexture(); return;
+            case ID_ExportTextures: activePage()->asciiEditor()->exportTextureList(); return;
             case ID_AdvancedSettings: showAdvancedSettings(); return;
             case ID_DeveloperSettings: showAdvancedSettings(true); return;
             case ID_EngineGraphics: showEngineExecution(); return;
@@ -5318,6 +5399,10 @@ private:
         enableModuleCommand(ID_AsciiEditor,editor&&!area);
         enableModuleCommand(ID_ExportAscii,editor&&editor->ready());
         enableModuleCommand(ID_ExportPacked,editor&&editor->ready());
+        enableModuleCommand(ID_NodeProperties,active&&active->canEditNode());
+        enableModuleCommand(ID_ModelProperties,editor&&editor->previewCurrent()&&!area);
+        enableModuleCommand(ID_RenameTexture,editor&&editor->previewCurrent()&&!area);
+        enableModuleCommand(ID_ExportTextures,editor&&editor->previewCurrent()&&!area);
         enableModuleCommand(ID_ResourceProvenance,hasDocument);
         const bool looseModel = active && !active->document().path().empty() && !area;
         enableModuleCommand(ID_Reload, looseModel);
