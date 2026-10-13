@@ -96,9 +96,6 @@ enum CommandId {
     ID_RoomScriptAnimation,
     ID_TrackAnimation,
     ID_DoorState,
-    ID_DialoguePlayback,
-    ID_AreaWeather,
-    ID_SceneAudio,
     ID_LoadGrass,
     ID_CloseModel,
     ID_CloseAll,
@@ -118,8 +115,6 @@ enum CommandId {
     ID_NodeHelpers,
     ID_PreviewLights,
     ID_EngineShadows,
-    ID_EngineLensFlares,
-    ID_ForceSight,
     ID_PreviewEmitters,
     ID_ShowCameras,
     ID_ViewSelectedCamera,
@@ -131,8 +126,6 @@ enum CommandId {
     ID_PreviewLightsabers,
     ID_PreviewAabbs,
     ID_PreviewTriggers,
-    ID_CreatureAppearance,
-    ID_CreatureLipSync,
     ID_About,
     ID_Exit,
     ID_DetonateEmitters,
@@ -151,7 +144,9 @@ public:
         : wxPanel(parent), document_(std::move(document)) {
         timer_.SetOwner(this);
 
-        auto* playback = new wxPanel(this);
+        auto* preview = new wxSplitterWindow(this, wxID_ANY, wxDefaultPosition, wxDefaultSize,
+                                             wxSP_LIVE_UPDATE | wxSP_3D);
+        auto* playback = new wxScrolledWindow(preview);
         animationChoice_ = new wxChoice(playback, wxID_ANY, wxDefaultPosition,
                                         wxSize(FromDIP(190), wxDefaultCoord));
         animationChoice_->Append("Bind pose");
@@ -265,22 +260,23 @@ public:
         runRow->Add(timeLabel_, 0, wxALIGN_CENTER_VERTICAL);
 
         auto* playbackLayout = new wxBoxSizer(wxVERTICAL);
-        playbackLayout->Add(clipRow, 0, wxEXPAND);
-        playbackLayout->Add(runRow, 0, wxEXPAND | wxTOP, FromDIP(2));
+        playbackLayout->Add(clipRow, 0, wxEXPAND | wxALL, FromDIP(5));
+        playbackLayout->Add(runRow, 0, wxEXPAND | wxLEFT | wxRIGHT | wxBOTTOM, FromDIP(5));
         playback->SetSizer(playbackLayout);
+        playback->SetScrollRate(FromDIP(10), FromDIP(10));
 
-        splitter_ = new wxSplitterWindow(this, wxID_ANY, wxDefaultPosition, wxDefaultSize,
+        splitter_ = new wxSplitterWindow(preview, wxID_ANY, wxDefaultPosition, wxDefaultSize,
                                          wxSP_LIVE_UPDATE | wxSP_3D);
-        auto* inspector = new wxPanel(splitter_);
+        auto* inspector = new wxSplitterWindow(splitter_, wxID_ANY, wxDefaultPosition, wxDefaultSize,
+                                               wxSP_LIVE_UPDATE | wxSP_3D);
         tree_ = new wxTreeCtrl(inspector, wxID_ANY, wxDefaultPosition, wxDefaultSize,
                                wxTR_HAS_BUTTONS | wxTR_LINES_AT_ROOT | wxTR_SINGLE |
                                    wxTR_HIDE_ROOT);
         details_ = new wxTextCtrl(inspector, wxID_ANY, wxEmptyString, wxDefaultPosition,
                                   wxDefaultSize, wxTE_MULTILINE | wxTE_READONLY | wxTE_RICH2);
-        auto* inspectorLayout = new wxBoxSizer(wxVERTICAL);
-        inspectorLayout->Add(tree_, 3, wxEXPAND);
-        inspectorLayout->Add(details_, 2, wxEXPAND | wxTOP, FromDIP(5));
-        inspector->SetSizer(inspectorLayout);
+        inspector->SetMinimumPaneSize(FromDIP(80));
+        inspector->SplitHorizontally(tree_, details_, FromDIP(compact ? 220 : 320));
+        inspector->SetSashGravity(0.6);
 
         canvas_ = new ModelCanvas(splitter_);
         canvas_->setDocument(document_.get());
@@ -288,9 +284,11 @@ public:
         splitter_->SetMinimumPaneSize(FromDIP(160));
         splitter_->SplitVertically(inspector, canvas_, FromDIP(compact ? 220 : 300));
         splitter_->SetSashGravity(0.0);
+        preview->SetMinimumPaneSize(FromDIP(60));
+        preview->SplitHorizontally(playback, splitter_, playback->GetBestSize().y);
+        preview->SetSashGravity(0.0);
         auto* layout = new wxBoxSizer(wxVERTICAL);
-        layout->Add(playback, 0, wxEXPAND | wxALL, FromDIP(5));
-        layout->Add(splitter_, 1, wxEXPAND);
+        layout->Add(preview, 1, wxEXPAND);
         SetSizer(layout);
 
         populateTree();
@@ -2234,7 +2232,6 @@ private:
         auto* cameraFar=number(camera.farClip,.002,10000000,1);add("Far clip",cameraFar);
         auto* cameraRoom=new wxChoice(&dialog,wxID_ANY,wxDefaultPosition,wxDefaultSize,rooms);
         cameraRoom->SetSelection(roomSelection(camera.currentRoom));add("Camera-supplied room",cameraRoom);
-        auto* cameraCut=new wxCheckBox(&dialog,wxID_ANY,"Invalidate temporal postprocess history on apply");add("Camera cut",cameraCut);
         auto* clearReplay=new wxCheckBox(&dialog,wxID_ANY,"Clear all explicit environment/camera replay state");add("Reset",clearReplay);
         root->Add(grid,1,wxEXPAND|wxLEFT|wxRIGHT,10);
         root->Add(new wxStaticText(&dialog,wxID_ANY,
@@ -2274,7 +2271,7 @@ private:
             camera.farClip=static_cast<float>(cameraFar->GetValue());
             camera.currentRoom.reset();
             if(cameraRoom->GetSelection()>0)camera.currentRoom=area.rooms()[std::size_t(cameraRoom->GetSelection()-1)].id;
-            camera.cut=cameraCut->GetValue();state.camera=camera;
+            state.camera=camera;
             std::string error;
             if(!page->applyAreaEnvironmentReplay(std::move(state),error)) {
                 wxMessageBox(wxui::toWx(error),"Area replay not applied",wxOK|wxICON_WARNING,&dialog);continue;
@@ -3109,7 +3106,6 @@ private:
         auto* wind=check("Update near-bin wind",settings.wind);
         auto* lightmaps=check("Admit face lightmap tails",settings.lightmaps);
         auto* textured=check("Engine textured-grass branch",settings.textured);
-        box->Add(new wxStaticText(&dialog,wxID_ANY,"Force Sight follows the scene setting."),0,wxLEFT|wxRIGHT|wxBOTTOM,10);
         box->Add(dialog.CreateSeparatedButtonSizer(wxOK|wxCANCEL),0,wxEXPAND|wxALL,10);dialog.SetSizerAndFit(box);
         if(dialog.ShowModal()!=wxID_OK)return;
         settings.enabled=enabled->GetValue();settings.wind=wind->GetValue();settings.lightmaps=lightmaps->GetValue();
@@ -3334,7 +3330,6 @@ private:
         view->AppendCheckItem(ID_Headlight, "Preview Key Light");
         view->AppendCheckItem(ID_PreviewLights, "Authored Model Lights");
         view->AppendCheckItem(ID_EngineShadows, "Area Shadows");
-        view->AppendCheckItem(ID_EngineLensFlares, "Area Lens Flares");
         view->AppendCheckItem(ID_Fog, "Show Fog");
         view->Append(ID_LightingSettings, "Lighting and Fog Settings...");
         view->AppendSeparator();
@@ -3351,7 +3346,6 @@ private:
         inspection->AppendCheckItem(ID_ShowCameras, "Camera Markers");
         inspection->AppendCheckItem(ID_PreviewAabbs, "Collision Geometry");
         inspection->AppendCheckItem(ID_PreviewTriggers, "Trigger Volumes");
-        inspection->AppendCheckItem(ID_ForceSight, "KOTOR II Force Sight");
         view->AppendSubMenu(inspection, "&Inspection");
         view->AppendSeparator();
         view->Append(ID_ResetView, "Reset View Settings");
@@ -3368,12 +3362,7 @@ private:
         animation->Append(ID_TrackAnimation, "Track Follower Animation...");
         animation->Append(ID_DoorState, "Door State...");
         scene->AppendSubMenu(animation, "&Animation");
-        scene->Append(ID_CreatureAppearance, "Creature Appearance...");
-        scene->Append(ID_CreatureLipSync, "Creature Lip Sync...");
-        scene->Append(ID_DialoguePlayback, "Dialogue Playback...");
         scene->AppendSeparator();
-        scene->Append(ID_SceneAudio, "Scene Audio...");
-        scene->Append(ID_AreaWeather, "Area Weather...");
         scene->Append(ID_DetonateEmitters, "Detonate Explosion Emitters");
         bar->Append(scene, "&Scene");
 
@@ -3397,7 +3386,7 @@ private:
                         wxDEFAULT_DIALOG_STYLE|wxRESIZE_BORDER);
         auto* root=new wxBoxSizer(wxVERTICAL);
         root->Add(new wxStaticText(&dialog,wxID_ANY,
-            "Inspect rendering and replay captured runtime state. Changes affect the preview."),0,wxALL,10);
+            "Model and area rendering settings. Changes affect the preview."),0,wxALL,10);
         auto* notebook=new wxNotebook(&dialog,wxID_ANY);
         const auto tab=[&](const char* title) {
             auto* panel=new wxPanel(notebook);
@@ -3451,28 +3440,13 @@ private:
         action(rendering,"Lightsaber Rendering...",&ModelEditorPanelImpl::showLightsaberSettings);
         action(rendering,"Particle Settings...",&ModelEditorPanelImpl::showParticleSettings);
         action(rendering,"Graphics and Texture Uploads...",&ModelEditorPanelImpl::showEngineExecution);
-        action(rendering,"Manual Skin Blur...",&ModelEditorPanelImpl::showK2SkinSettings);
+        action(rendering,"Save Engine Execution Report...",&ModelEditorPanelImpl::saveEngineExecutionReport);
 
         auto* scene=tab("Scene");
-        action(scene,"World Playback...",&ModelEditorPanelImpl::chooseWorldPlayback);
         action(scene,"Area Environment / Camera Replay...",&ModelEditorPanelImpl::chooseAreaEnvironment,area);
         action(scene,"Shadow Inputs...",&ModelEditorPanelImpl::chooseSceneShadows);
         action(scene,"Shadow Casters...",&ModelEditorPanelImpl::chooseShadowCasters);
         action(scene,"Grass Settings...",&ModelEditorPanelImpl::chooseGrassOptions,area);
-        action(scene,"Motion-blur Owners...",&ModelEditorPanelImpl::showMotionBlurOwners);
-        action(scene,"Owner Visual Effects...",&ModelEditorPanelImpl::showOwnerVisualEffects);
-        action(scene,"Scene Effects...",&ModelEditorPanelImpl::showSceneEffects);
-        action(scene,"Video Effect Row...",&ModelEditorPanelImpl::showVideoEffectRow);
-        action(scene,"Texture Rotation...",&ModelEditorPanelImpl::showRuntimeTextureRotation);
-
-        auto* diagnostics=tab("Diagnostics");
-        action(diagnostics,"Legacy Dirty Material...",&ModelEditorPanelImpl::showDirtyMaterial,k2);
-        action(diagnostics,"Dirty Area Inputs...",&ModelEditorPanelImpl::showDirtyArea,k2);
-        action(diagnostics,"Trigger Highlight State...",&ModelEditorPanelImpl::showTriggerVisualState,
-            std::any_of(active->triggerScene().records().begin(),active->triggerScene().records().end(),
-                [](const auto& record){return record.source==RuntimeTriggerSource::AreaGit;}));
-        action(diagnostics,"Trap Runtime...",&ModelEditorPanelImpl::showTriggerMineRuntime,area);
-        action(diagnostics,"Save Engine Execution Report...",&ModelEditorPanelImpl::saveEngineExecutionReport);
         root->Add(notebook,1,wxEXPAND|wxLEFT|wxRIGHT,10);
         root->Add(new wxButton(&dialog,wxID_OK,"Close"),0,wxALIGN_RIGHT|wxALL,10);
         dialog.SetSizerAndFit(root);
@@ -3500,8 +3474,6 @@ private:
         setCheck(ID_NodeHelpers, options_.nodeHelpers);
         setCheck(ID_PreviewLights, options_.previewLights);
         setCheck(ID_EngineShadows, options_.engineShadows.value_or(active && active->areaScene().currentRoom().has_value()));
-        setCheck(ID_EngineLensFlares, options_.engineLensFlares.value_or(!standalone));
-        setCheck(ID_ForceSight, activePage()&&activePage()->sceneEffects().forceSight);
         setCheck(ID_PreviewEmitters, options_.previewEmitters);
         setCheck(ID_ShowCameras, options_.showCameras);
         setCheck(ID_ShowReferences, options_.showReferences);
@@ -4720,8 +4692,6 @@ private:
             case ID_ResourceProvenance: showResourceProvenance(); return;
             case ID_ClearArea: if (auto* page=activePage()) page->clearArea(); return;
             case ID_AreaRoom: chooseAreaRoom(); return;
-            case ID_AreaWeather: showAreaWeather(); return;
-            case ID_SceneAudio: showSceneAudio(); return;
             case ID_AreaAnimation: chooseAreaAnimation(); return;
             case ID_RoomScriptAnimation: chooseRoomScriptAnimation(); return;
             case ID_TrackAnimation: chooseTrackAnimation(); return;
@@ -4749,16 +4719,6 @@ private:
                 options_.nodeHelpers = event.IsChecked(); applyOptions(); return;
             case ID_EngineShadows:
                 options_.engineShadows = event.IsChecked(); applyOptions(); return;
-            case ID_EngineLensFlares:
-                options_.engineLensFlares = event.IsChecked(); applyOptions(); return;
-            case ID_ForceSight: {
-                if(auto* page=activePage()) {
-                    auto state=page->sceneEffects();state.forceSight=event.IsChecked();std::string error;
-                    if(!page->setSceneEffects(state,error,false))
-                        wxMessageBox(wxui::toWx(error),"Force Sight",wxOK|wxICON_WARNING,this);
-                }
-                updateState();return;
-            }
             case ID_PreviewLights:
                 options_.previewLights = event.IsChecked(); applyOptions(); return;
             case ID_DetonateEmitters: if(auto* page=activePage()) page->detonateEmitters();return;
@@ -4798,11 +4758,8 @@ private:
                 options_.previewAabbs = event.IsChecked(); applyOptions(); return;
             case ID_PreviewTriggers:
                 options_.previewTriggers = event.IsChecked(); applyOptions(); return;
-            case ID_CreatureAppearance: showCreatureAppearance(); return;
-            case ID_CreatureLipSync: showCreatureLipSync(); return;
-            case ID_DialoguePlayback: showDialoguePlayback(); return;
             case ID_About:
-                wxMessageBox("NeoMDL renders packed Odyssey MDL/MDX geometry and resolves model dependencies through same-directory overrides, the active host resource session, or a validated discovered KotOR installation.\n\nCurrent renderer: engine K1/K2 materials and compact-palette skinning; K1/K2 desktop animation scheduling, independent reference clocks, particle simulation and nested chunk emitters; engine dangly, lighting, shadows and lightsaber paths. K1/K2 desktop area queries, triggers, weather, facial playback, dialogue and cameras use verified engine behavior. The renderer uses the desktop desktop-derived behavior on all supported host platforms.",
+                wxMessageBox("NeoMDL is a model viewer and ASCII / binary MDL converter for Knights of the Old Republic I and II.\n\nInspect geometry, materials, animations, particles, lightsabers and area layouts. Model dependencies resolve through the model directory, the active resource session or a discovered game installation.",
                              "About NeoMDL", wxOK | wxICON_INFORMATION, this);
                 return;
             case ID_Exit: requestModuleClose(); return;
@@ -4825,12 +4782,9 @@ private:
         enableModuleCommand(ID_ClearArea,hasDocument&&!activePage()->areaScene().empty());
         enableModuleCommand(ID_AreaAnimation,hasDocument&&!activePage()->areaScene().objects().empty());
         enableModuleCommand(ID_AreaRoom,activePage()&&!activePage()->areaScene().empty());
-        enableModuleCommand(ID_SceneAudio,activePage()&&!activePage()->areaScene().empty());
         enableModuleCommand(ID_RoomScriptAnimation,activePage()&&!activePage()->areaScene().rooms().empty());
         enableModuleCommand(ID_TrackAnimation,activePage()&&std::any_of(activePage()->areaScene().objects().begin(),
             activePage()->areaScene().objects().end(),[](const auto& object){return object->kind()==AreaObjectKind::Track;}));
-        enableModuleCommand(ID_AreaWeather,activePage()&&!activePage()->areaScene().empty()&&
-            weatherRuntimeSupported(activePage()->areaScene().game()));
         enableModuleCommand(ID_CloseModel, hasDocument);
         enableModuleCommand(ID_CloseAll, tabs_->GetPageCount() != 0u);
         enableModuleCommand(ID_FrameModel, hasDocument);
@@ -4843,17 +4797,8 @@ private:
             !model::engineSceneStageOrder(active->document().model().game).empty();
         enableModuleCommand(ID_DoorState,active&&std::any_of(active->areaScene().objects().begin(),
             active->areaScene().objects().end(),[](const auto& object){return object->kind()==AreaObjectKind::Door;}));
-        const bool hasLoadedCreature=active&&
-            std::any_of(active->areaScene().placements().begin(),active->areaScene().placements().end(),
-                [](const auto& placement){return placement.creatureState&&placement.runtimeInstance;});
-        enableModuleCommand(ID_CreatureAppearance,hasLoadedCreature);
-        enableModuleCommand(ID_DialoguePlayback,engineScene);
         enableModuleCommand(ID_AdvancedSettings,engineScene);
         enableModuleCommand(ID_EngineShadows,active&&active->areaScene().currentRoom().has_value());
-        enableModuleCommand(ID_EngineLensFlares,active&&!active->areaScene().empty());
-        enableModuleCommand(ID_CreatureLipSync,engineScene&&
-            (active->document().hasModelOwner()||hasLoadedCreature));
-        enableModuleCommand(ID_ForceSight,active&&active->document().model().game==model::GameVersion::Kotor2);
         enableModuleCommand(ID_ViewSelectedCamera,
                             active && active->canViewThroughSelectedCamera());
         enableModuleCommand(ID_ViewCameraHook, active && active->hasCameraHook());
