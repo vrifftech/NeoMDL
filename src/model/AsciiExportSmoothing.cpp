@@ -163,7 +163,8 @@ struct Smoothing {
     }
 
     std::vector<std::uint8_t> fitSharedVertices(std::vector<std::uint8_t> joined,bool useTargetNormals=false,
-                                             bool deferScoring=false) const {
+                                             bool deferScoring=false,
+                                             std::vector<std::vector<std::uint8_t>>* relationCandidates=nullptr) const {
         // A retained vertex can require several joins together. Share the
         // current contribution sets of its corners, then score the whole move.
         std::map<std::pair<std::size_t,std::size_t>,std::vector<std::size_t>> groups;
@@ -197,6 +198,14 @@ struct Smoothing {
                        std::binary_search(faces.begin(),faces.end(),entry.face)) added.push_back(entry.relation);
             std::sort(added.begin(),added.end());
             added.erase(std::unique(added.begin(),added.end()),added.end());
+            if(relationCandidates) {
+                if(!added.empty()) {
+                    auto candidate=joined;
+                    for(const auto relation:added) candidate[relation]=1u;
+                    relationCandidates->push_back(std::move(candidate));
+                }
+                continue;
+            }
             if(deferScoring) {
                 // Score the combined move after mask encoding.
                 for(const auto relation:added) joined[relation]=1u;
@@ -365,7 +374,8 @@ ReconstructedSmoothing reconstructSmoothing(
     const std::vector<bool>* ignoredCorners,
     const std::vector<std::uint32_t>* seedMasks,bool useStoredRows,
     const TangentSmoothingSource* tangents,
-    const std::vector<std::uint8_t>* cornerRotations) {
+    const std::vector<std::uint8_t>* cornerRotations,
+    std::vector<std::vector<std::uint32_t>>* sharedCandidates) {
     Smoothing work{{},{},{},{},job,{}};
     work.faceRelations.resize(sourceFaces.size());
     std::vector<std::vector<std::size_t>> incident(sourceVertices.size());
@@ -541,6 +551,16 @@ ReconstructedSmoothing reconstructSmoothing(
         }
         if(!(best<previous)) break;
     }
+    if(sharedCandidates) {
+        std::vector<std::vector<std::uint8_t>> relationCandidates;
+        work.fitSharedVertices(joined,true,false,&relationCandidates);
+        std::set<std::vector<std::uint32_t>> unique;
+        for(const auto& candidate:relationCandidates) {
+            auto masks=work.encode(candidate);
+            if(masks!=result.masks) unique.insert(std::move(masks));
+        }
+        sharedCandidates->assign(unique.begin(),unique.end());
+    }
     result.squaredNormalError=tangents?0.0:best;
     for(std::size_t corner=0;corner<work.corners.size();++corner) {
         const auto actual=work.normal(corner,joined),target=work.corners[corner].target;
@@ -556,7 +576,7 @@ std::vector<std::vector<std::uint32_t>> sharedSeamSmoothingCandidates(
     const Mesh& mesh,const std::vector<Vertex>& vertices,
     const std::vector<std::array<std::uint32_t,3>>& sourceFaces,
     const std::vector<std::uint32_t>& masks,const std::vector<bool>& seamCorners,
-    const neoshared::bif::JobControl& job) {
+    const neoshared::bif::JobControl& job,bool differentNormals) {
     struct Group { Vec3 normal;std::vector<std::size_t> faces;bool seam{}; };
     std::map<std::size_t,std::vector<Group>> groups;
     for(std::size_t face=0;face<sourceFaces.size();++face) {
@@ -587,16 +607,29 @@ std::vector<std::vector<std::uint32_t>> sharedSeamSmoothingCandidates(
             if(candidate!=masks) proposals.insert(std::move(candidate));
         }
     };
-    for(const auto& source:groups)
-        for(const auto& group:source.second) if(group.seam) {
-            bool missing=false;
-            for(std::size_t a=0;a<group.faces.size();++a)
-                for(std::size_t b=a+1u;b<group.faces.size();++b)
-                    if(!(masks[group.faces[a]]&masks[group.faces[b]])) {
-                        missing=true;propose({group.faces[a],group.faces[b]});
-                    }
-            if(missing) propose(group.faces);
+    for(const auto& source:groups) {
+        if(!differentNormals) {
+            for(const auto& group:source.second) if(group.seam) {
+                bool missing=false;
+                for(std::size_t a=0;a<group.faces.size();++a)
+                    for(std::size_t b=a+1u;b<group.faces.size();++b)
+                        if(!(masks[group.faces[a]]&masks[group.faces[b]])) {
+                            missing=true;propose({group.faces[a],group.faces[b]});
+                        }
+                if(missing) propose(group.faces);
+            }
+            continue;
         }
+        // Ordered seams can leave different final normals on corners that
+        // shared smoothing before the seam pass.
+        if(!std::any_of(source.second.begin(),source.second.end(),
+            [](const Group& group){return group.seam;})) continue;
+        for(std::size_t a=0;a<source.second.size();++a)
+            for(std::size_t b=a+1u;b<source.second.size();++b)
+                for(const auto first:source.second[a].faces)
+                    for(const auto second:source.second[b].faces)
+                        if(first!=second && !(masks[first]&masks[second])) propose({first,second});
+    }
     return {proposals.begin(),proposals.end()};
 }
 

@@ -28,13 +28,15 @@ ReconstructedSmoothing reconstructSmoothing(
     const std::vector<std::uint32_t>* seedMasks = nullptr,
     bool useStoredRows = false,
     const TangentSmoothingSource* tangents = nullptr,
-    const std::vector<std::uint8_t>* cornerRotations = nullptr);
+    const std::vector<std::uint8_t>* cornerRotations = nullptr,
+    std::vector<std::vector<std::uint32_t>>* sharedCandidates = nullptr);
 
 std::vector<std::vector<std::uint32_t>> sharedSeamSmoothingCandidates(
     const Mesh&, const std::vector<Vertex>& compiledVertices,
     const std::vector<std::array<std::uint32_t,3>>& sourceFaces,
     const std::vector<std::uint32_t>& masks,
     const std::vector<bool>& seamCorners,
-    const neoshared::bif::JobControl&);
+    const neoshared::bif::JobControl&,
+    bool differentNormals = false);
 
 } // namespace neomdl::model::ascii_export
