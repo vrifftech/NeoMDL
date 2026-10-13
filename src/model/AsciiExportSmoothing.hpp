@@ -31,7 +31,12 @@ ReconstructedSmoothing reconstructSmoothing(
     const std::vector<std::uint8_t>* cornerRotations = nullptr,
     std::vector<std::vector<std::uint32_t>>* sharedCandidates = nullptr);
 
-std::vector<std::vector<std::uint32_t>> sharedSeamSmoothingCandidates(
+struct SeamSmoothingCandidate {
+    std::size_t source;
+    std::vector<std::uint32_t> masks;
+};
+
+std::vector<SeamSmoothingCandidate> sharedSeamSmoothingCandidates(
     const Mesh&, const std::vector<Vertex>& compiledVertices,
     const std::vector<std::array<std::uint32_t,3>>& sourceFaces,
     const std::vector<std::uint32_t>& masks,

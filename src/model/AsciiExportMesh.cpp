@@ -1718,7 +1718,7 @@ void reconstructNormalPositionPrecision(Writer& out,const Model& model,const Mod
             const auto masks=sharedSeamSmoothingCandidates(mesh,plan.vertices,plan.topology.sourceFaces,
                 plan.smoothing.masks,eligibleCorners,out.job(),false,true);
             for(const auto& candidate:masks) {
-                auto trial=plan;trial.smoothing.masks=candidate;
+                auto trial=plan;trial.smoothing.masks=candidate.masks;
                 if(accept(std::move(trial))) {accepted=true;break;}
             }
             if(accepted) {
@@ -2522,6 +2522,12 @@ void reconstructSkinSeamSmoothing(Writer& out,const Model& model) {
             auto seams=frames;
             const auto seamRows=generateGeometry(seams,model,plans,false,out.job());
             processAsciiSkinSeams(seams,out.job());
+            struct Join {const Mesh* mesh;Vec3 point;std::vector<std::uint32_t> masks;};
+            std::vector<Join> joins;
+            const auto apply=[](Plans& trial,const Join& join) {
+                auto& masks=trial.at(join.mesh).smoothing.masks;
+                for(std::size_t face=0;face<masks.size();++face) masks[face]|=join.masks[face];
+            };
             for(std::size_t index=0;index<model.meshes.size();++index) {
                 const auto& mesh=model.meshes[index];
                 const auto found=plans.find(&mesh);
@@ -2537,12 +2543,57 @@ void reconstructSkinSeamSmoothing(Writer& out,const Model& model) {
                 const auto candidates=sharedSeamSmoothingCandidates(mesh,found->second.vertices,
                     found->second.topology.sourceFaces,found->second.smoothing.masks,seamCorners,out.job(),
                     differentNormals);
-                for(const auto& masks:candidates) {
+                if(differentNormals) {
+                    // Coupled joins recover missing vertex sharing across meshes.
+                    std::vector<std::set<std::size_t>> retained(found->second.sourcePositions.size()),
+                        generated(retained.size());
+                    for(std::size_t face=0;face<mesh.faces.size();++face)
+                        for(std::size_t corner=0;corner<3u;++corner) {
+                            const auto source=found->second.topology.sourceFaces[face][corner];
+                            retained[source].insert(mesh.faces[face].indices[corner]);
+                            generated[source].insert(seamRows[index][face][corner]);
+                        }
+                    Vec3 position{};
+                    Quaternion orientation{};
+                    auto ancestor=std::optional<std::size_t>{mesh.nodeIndex};
+                    while(ancestor) {
+                        const auto& node=frames.nodes[*ancestor];
+                        const auto rotated=ascii::engineModelRotateVector(node.orientation,position);
+                        position={rotated.x+node.position.x,rotated.y+node.position.y,rotated.z+node.position.z};
+                        orientation=ascii::engineModelQuaternionProduct(node.orientation,orientation);
+                        ancestor=node.parent;
+                    }
+                    auto coupled=sharedSeamSmoothingCandidates(mesh,found->second.vertices,
+                        found->second.topology.sourceFaces,found->second.smoothing.masks,seamCorners,out.job());
+                    coupled.insert(coupled.end(),candidates.begin(),candidates.end());
+                    for(const auto& candidate:coupled)
+                        if(generated[candidate.source].size()>retained[candidate.source].size()) {
+                            const auto point=ascii::engineModelRotateVector(orientation,
+                                found->second.sourcePositions[candidate.source]);
+                            joins.push_back({&mesh,{point.x+position.x,point.y+position.y,point.z+position.z},candidate.masks});
+                        }
+                }
+                std::set<std::vector<std::uint32_t>> masks;
+                for(const auto& candidate:candidates) masks.insert(candidate.masks);
+                for(const auto& candidate:masks) {
                     auto trial=plans;
-                    trial.at(&mesh).smoothing.masks=masks;
+                    trial.at(&mesh).smoothing.masks=candidate;
                     considerRefit(std::move(trial));
                 }
             }
+            // Both sides of an ordered skin seam can need a join together;
+            // either change alone may increase the final normal error.
+            std::stable_sort(joins.begin(),joins.end(),[](const Join& a,const Join& b){return a.point.x<b.point.x;});
+            constexpr float tolerance=0.0010000000474974513f;
+            for(std::size_t a=0;a<joins.size();++a)
+                for(std::size_t b=a+1u;b<joins.size() && joins[b].point.x-joins[a].point.x<tolerance;++b) {
+                    const auto& first=joins[a];const auto& second=joins[b];
+                    if(first.mesh==second.mesh || !(std::abs(first.point.y-second.point.y)<tolerance) ||
+                       !(std::abs(first.point.z-second.point.z)<tolerance)) continue;
+                    auto trial=plans;
+                    apply(trial,first);apply(trial,second);
+                    considerRefit(std::move(trial));
+                }
         };
         refineSeamJoins(false);
         const bool tangentRefitted=refineTangents();

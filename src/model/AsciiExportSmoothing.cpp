@@ -54,7 +54,7 @@ Vec3 normalizeTangent(Vec3 value) {
 }
 
 struct Smoothing {
-    std::vector<Vec3> crosses;
+    std::vector<ascii::NormalFaceCross> crosses;
     std::vector<Corner> corners;
     std::vector<Relation> relations;
     std::vector<std::vector<std::size_t>> faceRelations;
@@ -70,7 +70,7 @@ struct Smoothing {
         for(const auto& entry:corners[corner].contributions)
             if(entry.relation==ownFace || joined[entry.relation]) {
                 const auto weighted=crosses[entry.face];
-                sum={sum.x+weighted.x,sum.y+weighted.y,weighted.z+sum.z};
+                sum=weighted.accumulate(sum);
             }
         return normalizeSmoothing(sum);
     }
@@ -343,7 +343,7 @@ struct Smoothing {
                             for(std::size_t block=0;block<blocks.size();++block)
                                 if(included[block] && std::any_of(blocks[block].begin(),blocks[block].end(),
                                    [&](std::size_t other){return other/3u==entry.face;})) take=true;
-                            if(take) {const auto v=crosses[entry.face];sum={sum.x+v.x,sum.y+v.y,v.z+sum.z};}
+                            if(take) {const auto v=crosses[entry.face];sum=v.accumulate(sum);}
                         }
                         total+=difference(normalizeSmoothing(sum),corners[corner].target);
                     }
@@ -611,7 +611,7 @@ std::vector<std::size_t> reconstructNormalFaceOrder(
         std::vector<std::size_t> faces,corners;
     };
     std::vector<Source> sources(sourceVertices.size());
-    std::vector<Vec3> crosses;
+    std::vector<ascii::NormalFaceCross> crosses;
     std::map<Triangle,std::vector<std::size_t>> coincident;
     for(std::size_t face=0;face<sourceFaces.size();++face) {
         job.check();
@@ -634,8 +634,9 @@ std::vector<std::size_t> reconstructNormalFaceOrder(
                 (*precisePositions)[indices[rotation%3u]],
                 (*precisePositions)[indices[(rotation+1u)%3u]],
                 (*precisePositions)[indices[(rotation+2u)%3u]]}};
-            crosses.push_back(ascii::normalPositionFaceCross({{a,b,c}},precise));
-        } else crosses.push_back(cross(subtract(b,a),subtract(c,b)));
+            const auto value=ascii::normalPositionFaceCross({{a,b,c}},precise);
+            crosses.push_back({value.x,value.y,value.z});
+        } else crosses.push_back(ascii::normalFaceCross(subtract(b,a),subtract(c,b)));
     }
     std::vector<std::size_t> anchors;
     for(const auto& entry:coincident) {
@@ -681,7 +682,7 @@ std::vector<std::size_t> reconstructNormalFaceOrder(
                 Vec3 sum{};
                 for(const auto other:incident) if(other==face || (mask&masks[other])) {
                     const auto weighted=crosses[other];
-                    sum={sum.x+weighted.x,sum.y+weighted.y,weighted.z+sum.z};
+                    sum=weighted.accumulate(sum);
                 }
                 normal=normalizeSmoothing(sum);
                 if(mask) shared.emplace(mask,normal);
@@ -765,9 +766,9 @@ ReconstructedNormalStars reconstructNormalCornerStars(
         }
         return result;
     };
-    const auto same=[](Vec3 a,Vec3 b) {return a.x==b.x && a.y==b.y && a.z==b.z;};
+    const auto same=[](const auto& a,const auto& b) {return a.x==b.x && a.y==b.y && a.z==b.z;};
     std::vector<std::vector<std::size_t>> incident(sourceVertices.size());
-    std::vector<std::array<Vec3,3>> alternatives(sourceFaces.size());
+    std::vector<std::array<ascii::NormalFaceCross,3>> alternatives(sourceFaces.size());
     std::map<Triangle,std::vector<std::size_t>> coincident;
     for(const auto face:faceOrder) {
         job.check();
@@ -786,8 +787,9 @@ ReconstructedNormalStars reconstructNormalCornerStars(
                     (*precisePositions)[indices[corner]],
                     (*precisePositions)[indices[(corner+1u)%3u]],
                     (*precisePositions)[indices[(corner+2u)%3u]]}};
-                alternatives[face][corner]=ascii::normalPositionFaceCross({{a,b,c}},precise);
-            } else alternatives[face][corner]=cross(subtract(b,a),subtract(c,b));
+                const auto value=ascii::normalPositionFaceCross({{a,b,c}},precise);
+                alternatives[face][corner]={value.x,value.y,value.z};
+            } else alternatives[face][corner]=ascii::normalFaceCross(subtract(b,a),subtract(c,b));
         }
         coincident[canonical(triangle)].push_back(face);
     }
@@ -827,7 +829,7 @@ ReconstructedNormalStars reconstructNormalCornerStars(
     auto current=rotations;
     auto currentOrder=faceOrder;
     const SourceFaceNeighbors neighbors(mesh,sourceFaces,faceOrder);
-    std::vector<Vec3> crosses(sourceFaces.size());
+    std::vector<ascii::NormalFaceCross> crosses(sourceFaces.size());
     for(std::size_t face=0;face<crosses.size();++face) crosses[face]=alternatives[face][current[face]];
     const auto angle=[](Vec3 a,Vec3 b) {
         if(a.x==b.x && a.y==b.y && a.z==b.z) return 0.0;
@@ -845,7 +847,7 @@ ReconstructedNormalStars reconstructNormalCornerStars(
         Vec3 sum{};
         for(const auto face:groups[index].faces) {
             const auto weighted=crosses[face];
-            sum={sum.x+weighted.x,sum.y+weighted.y,weighted.z+sum.z};
+            sum=weighted.accumulate(sum);
         }
         return normalizeSmoothing(sum);
     };
@@ -1007,7 +1009,7 @@ ReconstructedNormalStars reconstructNormalCornerStars(
             // freedom to recover; avoid enumerating equivalent permutations.
             const auto movingZero=std::all_of(faces.begin(),faces.end(),[&](std::size_t face) {
                 return std::all_of(alternatives[face].begin(),alternatives[face].end(),
-                    [&](Vec3 value){return same(value,Vec3{});});
+                    [&](const auto& value){return same(value,Vec3{});});
             });
             bool orderSensitive=false;
             if(!movingZero) for(const auto& entry:last) {
@@ -1059,7 +1061,7 @@ ReconstructedNormalRounding reconstructNormalRounding(
         }
         return result;
     };
-    const auto same=[](Vec3 a,Vec3 b) {return a.x==b.x && a.y==b.y && a.z==b.z;};
+    const auto same=[](const auto& a,const auto& b) {return a.x==b.x && a.y==b.y && a.z==b.z;};
     const auto component=[](Vec3 p,std::size_t axis) {return axis==0u?p.x:axis==1u?p.y:p.z;};
     const auto setComponent=[](Vec3& p,std::size_t axis,float value) {
         if(axis==0u) p.x=value;else if(axis==1u) p.y=value;else p.z=value;
@@ -1111,20 +1113,20 @@ ReconstructedNormalRounding reconstructNormalRounding(
                 if(sourceFaces[face][corner]==source) group.corners.push_back(face*3u+corner);
         }
     }
-    using Crosses=std::vector<std::array<Vec3,3>>;
+    using Crosses=std::vector<std::array<ascii::NormalFaceCross,3>>;
     const auto updateCross=[&](Crosses& crosses,std::size_t face,const std::vector<Vec3>& positions) {
         const auto& indices=sourceFaces[face];
         for(std::size_t corner=0;corner<3u;++corner) {
             const auto a=positions[indices[corner]],b=positions[indices[(corner+1u)%3u]],
                 c=positions[indices[(corner+2u)%3u]];
-            crosses[face][corner]=cross(subtract(b,a),subtract(c,b));
+            crosses[face][corner]=ascii::normalFaceCross(subtract(b,a),subtract(c,b));
         }
     };
     const auto normal=[&](std::size_t group,const Crosses& crosses,const std::vector<std::uint8_t>& starts) {
         Vec3 sum{};
         for(const auto face:groups[group].faces) {
             const auto weighted=crosses[face][starts[face]];
-            sum={sum.x+weighted.x,sum.y+weighted.y,weighted.z+sum.z};
+            sum=weighted.accumulate(sum);
         }
         return normalizeSmoothing(sum);
     };
@@ -1293,7 +1295,7 @@ ReconstructedSmoothing reconstructSmoothing(
         const auto a=vertices[sourceVertices[indices[rotation%3u]]].position;
         const auto b=vertices[sourceVertices[indices[(1u+rotation)%3u]]].position;
         const auto c=vertices[sourceVertices[indices[(2u+rotation)%3u]]].position;
-        work.crosses.push_back(cross(subtract(b,a),subtract(c,b)));
+        work.crosses.push_back(ascii::normalFaceCross(subtract(b,a),subtract(c,b)));
         for(const auto source:indices) {
             auto& faces=incident[source];
             if(faces.empty() || faces.back()!=face) faces.push_back(face);
@@ -1312,7 +1314,7 @@ ReconstructedSmoothing reconstructSmoothing(
             TangentBasis basis;
             basis.bitangent=normalizeTangent({q.x*pu-p.x*qu,q.y*pu-p.y*qu,q.z*pu-p.z*qu});
             basis.tangent=normalizeTangent({q.x*pv-p.x*qv,q.y*pv-p.y*qv,q.z*pv-p.z*qv});
-            basis.normal=ascii::tangentBasisNormal(basis.bitangent,basis.tangent,work.crosses.back());
+            basis.normal=ascii::tangentBasisNormal(basis.bitangent,basis.tangent,cross(subtract(b,a),subtract(c,b)));
             const auto n=tangents->firstCornerNormals[face];
             if((basis.normal.x*n.x+basis.normal.y*n.y)+basis.normal.z*n.z<0.0f) {
                 basis.tangent={-basis.tangent.x,-basis.tangent.y,-basis.tangent.z};
@@ -1490,7 +1492,7 @@ ReconstructedSmoothing reconstructSmoothing(
     return result;
 }
 
-std::vector<std::vector<std::uint32_t>> sharedSeamSmoothingCandidates(
+std::vector<SeamSmoothingCandidate> sharedSeamSmoothingCandidates(
     const Mesh& mesh,const std::vector<Vertex>& vertices,
     const std::vector<std::array<std::uint32_t,3>>& sourceFaces,
     const std::vector<std::uint32_t>& masks,const std::vector<bool>& seamCorners,
@@ -1516,13 +1518,13 @@ std::vector<std::vector<std::uint32_t>> sharedSeamSmoothingCandidates(
     for(const auto mask:masks) bits|=mask;
     for(std::uint32_t bit=1u;bit;bit<<=1u)
         if(!(bits&bit)) { bits|=bit;break; }
-    std::set<std::vector<std::uint32_t>> proposals;
-    const auto propose=[&](const std::vector<std::size_t>& faces) {
+    std::set<std::pair<std::vector<std::uint32_t>,std::size_t>> proposals;
+    const auto propose=[&](std::size_t source,const std::vector<std::size_t>& faces) {
         for(std::uint32_t bit=1u;bit;bit<<=1u) if(bits&bit) {
             job.check();
             auto candidate=masks;
             for(const auto face:faces) candidate[face]|=bit;
-            if(candidate!=masks) proposals.insert(std::move(candidate));
+            if(candidate!=masks) proposals.emplace(std::move(candidate),source);
         }
     };
     for(const auto& source:groups) {
@@ -1533,13 +1535,13 @@ std::vector<std::vector<std::uint32_t>> sharedSeamSmoothingCandidates(
                 for(std::size_t a=0;a<group.faces.size();++a)
                     for(std::size_t b=a+1u;b<group.faces.size();++b)
                         if(!(masks[group.faces[a]]&masks[group.faces[b]])) {
-                            missing=true;propose({group.faces[a],group.faces[b]});
+                            missing=true;propose(source.first,{group.faces[a],group.faces[b]});
                             if(missingComponents) {
                                 unjoined[a].push_back(b);unjoined[b].push_back(a);
                             }
                         }
                 if(missing) {
-                    propose(group.faces);
+                    propose(source.first,group.faces);
                     if(!missingComponents) continue;
                     std::vector<bool> visited(group.faces.size());
                     for(std::size_t seed=0;seed<group.faces.size();++seed) {
@@ -1552,7 +1554,7 @@ std::vector<std::vector<std::uint32_t>> sharedSeamSmoothingCandidates(
                                 visited[next]=true;pending.push_back(next);
                             }
                         }
-                        if(component.size()>1u) propose(component);
+                        if(component.size()>1u) propose(source.first,component);
                     }
                 }
             }
@@ -1566,9 +1568,11 @@ std::vector<std::vector<std::uint32_t>> sharedSeamSmoothingCandidates(
             for(std::size_t b=a+1u;b<source.second.size();++b)
                 for(const auto first:source.second[a].faces)
                     for(const auto second:source.second[b].faces)
-                        if(first!=second && !(masks[first]&masks[second])) propose({first,second});
+                        if(first!=second && !(masks[first]&masks[second])) propose(source.first,{first,second});
     }
-    return {proposals.begin(),proposals.end()};
+    std::vector<SeamSmoothingCandidate> result;
+    for(const auto& proposal:proposals) result.push_back({proposal.second,proposal.first});
+    return result;
 }
 
 } // namespace neomdl::model::ascii_export

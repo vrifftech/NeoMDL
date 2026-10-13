@@ -189,6 +189,20 @@ void postProcessSkinNode(RawNode& raw,const neoshared::bif::JobControl& job);
 void buildMesh(Model& model, RawNode& raw, std::size_t nodeIndex,
                const neoshared::bif::JobControl& job);
 Vec3 tangentBasisNormal(Vec3 bitangent,Vec3 tangent,Vec3 faceArea);
+struct NormalFaceCross {
+    float x,y;
+    double z;
+    Vec3 accumulate(Vec3 sum) const {
+        return {sum.x+x,sum.y+y,static_cast<float>(z+sum.z)};
+    }
+};
+inline NormalFaceCross normalFaceCross(Vec3 a,Vec3 b) {
+    // XY are stored before accumulation; Z retains its product precision
+    // through the addition to the float normal accumulator.
+    return {static_cast<float>(double(a.y)*b.z-double(a.z)*b.y),
+        static_cast<float>(double(a.z)*b.x-double(a.x)*b.z),
+        double(a.x)*b.y-double(a.y)*b.x};
+}
 std::array<Vec3,2> normalPositionFaceProducts(const std::array<Vec3,3>& positions,
     const std::array<std::array<double,3>,3>& precise);
 Vec3 normalPositionFaceCross(const std::array<Vec3,3>& positions,

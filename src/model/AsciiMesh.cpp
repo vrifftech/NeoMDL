@@ -184,14 +184,15 @@ Vec3 faceCross(const RawFace& face,const std::vector<Vec3>& vertices) {
     return cross(subtract(b,a),subtract(c,b));
 }
 
-Vec3 preciseNormalCross(const RawFace& face,const RawNode& raw) {
+NormalFaceCross preciseNormalCross(const RawFace& face,const RawNode& raw) {
     std::array<Vec3,3> positions;
     std::array<std::array<double,3>,3> precise;
     for(std::size_t corner=0;corner<3u;++corner) {
         positions[corner]=raw.vertices.at(face.vertices[corner]);
         precise[corner]=raw.normalPositions64.at(face.vertices[corner]);
     }
-    return normalPositionFaceCross(positions,precise);
+    const auto value=normalPositionFaceCross(positions,precise);
+    return {value.x,value.y,value.z};
 }
 
 // ProcessVerts K1 0x5c3950, K2 0x6e1a50. Smoothing uses source vertex
@@ -228,11 +229,13 @@ std::vector<std::array<std::size_t,3>> processVertices(RawNode& raw,Mesh& mesh,
     } else {
         raw.normals.clear();
         std::vector<std::vector<std::pair<std::size_t,std::size_t>>> incident(raw.vertices.size());
-        std::vector<Vec3> crosses;
+        std::vector<NormalFaceCross> crosses;
         for(std::size_t face=0;face<raw.faces.size();++face) {
             const auto& candidate=raw.faces[face];
+            const auto a=raw.vertices.at(candidate.vertices[0]),
+                b=raw.vertices.at(candidate.vertices[1]),c=raw.vertices.at(candidate.vertices[2]);
             crosses.push_back(raw.normalPositionPrecision==64u?
-                preciseNormalCross(candidate,raw):faceCross(candidate,raw.vertices));
+                preciseNormalCross(candidate,raw):normalFaceCross(subtract(b,a),subtract(c,b)));
             // The engine chooses the last matching corner of a repeated vertex.
             for(std::size_t corner=0;corner<3u;++corner) {
                 auto& faces=incident.at(candidate.vertices[corner]);
@@ -250,7 +253,7 @@ std::vector<std::array<std::size_t,3>> processVertices(RawNode& raw,Mesh& mesh,
                     const auto& candidate=raw.faces[j];
                     if(i!=j && !(current.smoothing&candidate.smoothing)) continue;
                     const auto weighted=crosses[j];
-                    sum={sum.x+weighted.x,sum.y+weighted.y,weighted.z+sum.z};
+                    sum=weighted.accumulate(sum);
                     if(j<i && current.smoothing==candidate.smoothing) {
                         indices[i][corner]=indices[j][entry.second];
                         reused=true;break;
