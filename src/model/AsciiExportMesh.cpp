@@ -2179,44 +2179,31 @@ void reconstructTangentUvPrecision(Writer& out,const Model& model,const Model& f
                         }
                     }
             }
-            while(!accepted && !searches.empty()) {
-                std::vector<Search> next;
-                for(auto search:searches) {
-                    out.job().check();
-                    const auto endpoint=derivative(search,search.end);
-                    if(same(search.value,endpoint)) continue;
-                    const auto belowNormalization=[](Vec3 value) {
-                        return double(std::sqrt((value.x*value.x+value.y*value.y)+value.z*value.z))<1e-9;
-                    };
-                    if(belowNormalization(search.value)) {
-                        const auto initial=search.value;
-                        const auto bound=[&](Vec3 value) {
-                            return Vec3{std::max(std::abs(initial.x),std::abs(value.x)),
-                                std::max(std::abs(initial.y),std::abs(value.y)),
-                                std::max(std::abs(initial.z),std::abs(value.z))};
-                        };
-                        // Each raw component is monotone. Its endpoint bounds
-                        // prove this whole interval has the same normalized axis.
-                        if(belowNormalization(bound(endpoint))) continue;
-                        double low=search.cursor,high=search.end;
-                        while(std::nextafter(low,high)!=high) {
-                            const double middle=low+(high-low)*0.5;
-                            if(belowNormalization(bound(derivative(search,middle)))) low=middle;
-                            else high=middle;
-                        }
-                        search.cursor=low;search.value=derivative(search,low);
-                    }
+            // Search the derivative's component and normalization boundaries.
+            // Near a singular UV, enumerating every intervening float can
+            // take billions of steps.
+            for(const auto& search:searches) {
+                const auto boundary=[&](const auto& state) {
+                    const auto initial=state(search.value);
+                    if(initial==state(derivative(search,search.end))) return false;
                     double low=search.cursor,high=search.end;
                     while(std::nextafter(low,high)!=high) {
                         const double middle=low+(high-low)*0.5;
-                        if(same(search.value,derivative(search,middle))) low=middle;
+                        if(state(derivative(search,middle))==initial) low=middle;
                         else high=middle;
                     }
-                    search.cursor=high;search.value=derivative(search,high);
-                    if(consider(search,high)) {accepted=true;break;}
-                    next.push_back(search);
+                    return consider(search,low) || consider(search,high);
+                };
+                for(std::size_t axis=0;axis<3u && !accepted;++axis) {
+                    const auto component=[&](Vec3 value) {return axis==0u?value.x:axis==1u?value.y:value.z;};
+                    accepted=boundary(component) || boundary([&](Vec3 value) {
+                        const auto v=component(value);return v<0.0f?-1:v>0.0f?1:0;
+                    });
                 }
-                searches=std::move(next);
+                if(!accepted) accepted=boundary([](Vec3 value) {
+                    return double(std::sqrt((value.x*value.x+value.y*value.y)+value.z*value.z))<1e-9;
+                });
+                if(accepted) break;
             }
             if(!accepted) break;
         }

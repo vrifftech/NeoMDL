@@ -166,6 +166,17 @@ Vec3 normal(Vec3 v) {
     const float scale=1.0f/length; return {v.x*scale,v.y*scale,v.z*scale};
 }
 bool same(Vec3 a,Vec3 b) {return a.x==b.x && a.y==b.y && a.z==b.z;}
+// Numeric equality treats both zero signs as the same position.
+std::array<std::uint32_t,3> positionKey(Vec3 position) {
+    std::array<std::uint32_t,3> key;
+    std::size_t axis{};
+    for(const auto value:{position.x,position.y,position.z}) {
+        std::memcpy(&key[axis],&value,sizeof(value));
+        if(value==0.0f) key[axis]=0u;
+        ++axis;
+    }
+    return key;
+}
 Vec3 faceCross(const RawFace& face,const std::vector<Vec3>& vertices) {
     const auto a=vertices.at(face.vertices[0]);
     const auto b=vertices.at(face.vertices[1]);
@@ -507,16 +518,7 @@ std::vector<GeneratedVertex> generateVertices(RawNode& raw,Mesh& mesh,
                 if(!raw.texcoords[channel].empty())
                     vertex.texcoords[channel]=raw.texcoords[channel].at(raw.faces[i].texcoords[channel][corner]);
             if(dangly) vertex.constraint=raw.constraints.at(vertex.source);
-            std::array<std::uint32_t,3> key;
-            std::size_t axis{};
-            for(const auto value:{vertex.position.x,vertex.position.y,vertex.position.z}) {
-                // Numeric equality joins both zero signs; other attributes
-                // still use NodeVertex equality within each position bucket.
-                std::memcpy(&key[axis],&value,sizeof(value));
-                if(value==0.0f) key[axis]=0u;
-                ++axis;
-            }
-            auto& candidates=positions[key];
+            auto& candidates=positions[positionKey(vertex.position)];
             const auto found=std::find_if(candidates.begin(),candidates.end(),
                 [&](std::size_t index){return same(vertices[index],vertex,dangly);});
             const auto index=found==candidates.end()?vertices.size():*found;
@@ -1240,6 +1242,10 @@ void buildTangentBasis(Mesh& mesh,const neoshared::bif::JobControl& job) {
                                  source.generatedPositions.at(c)},{auv,buv,cuv}});
     }
     orientSingularTangentComponents(tangentFaces,faceBasis,job);
+    std::map<std::array<std::uint32_t,3>,std::vector<std::pair<std::size_t,std::int16_t>>> incident;
+    for(std::size_t face=0;face<mesh.faces.size();++face)
+        for(const auto index:mesh.faces[face].indices)
+            incident[positionKey(source.generatedPositions.at(static_cast<std::size_t>(index)))].emplace_back(face,index);
     for(std::size_t i=0;i<mesh.faces.size();++i) {
         job.check();
         for(const auto index:mesh.faces[i].indices) {
@@ -1248,15 +1254,14 @@ void buildTangentBasis(Mesh& mesh,const neoshared::bif::JobControl& job) {
             result.bitangent=add(faceBasis[i].bitangent,result.bitangent);
             result.tangent=add(faceBasis[i].tangent,result.tangent);
             result.normal=add(faceBasis[i].normal,result.normal);
-            for(std::size_t other=0;other<mesh.faces.size();++other) {
-                if(other==i) continue;
-                for(const auto candidate:mesh.faces[other].indices)
-                    if(same(position,source.generatedPositions.at(static_cast<std::size_t>(candidate))) &&
-                       (source.faceSmoothing.at(i)&source.faceSmoothing.at(other))) {
-                        result.bitangent=add(result.bitangent,faceBasis[other].bitangent);
-                        result.tangent=add(result.tangent,faceBasis[other].tangent);
-                        result.normal=add(result.normal,faceBasis[other].normal);
-                    }
+            for(const auto& entry:incident.at(positionKey(position))) {
+                const auto other=entry.first;
+                if(other!=i && same(position,source.generatedPositions.at(static_cast<std::size_t>(entry.second))) &&
+                   (source.faceSmoothing.at(i)&source.faceSmoothing.at(other))) {
+                    result.bitangent=add(result.bitangent,faceBasis[other].bitangent);
+                    result.tangent=add(result.tangent,faceBasis[other].tangent);
+                    result.normal=add(result.normal,faceBasis[other].normal);
+                }
             }
             result.bitangent=normalize(result.bitangent);
             result.tangent=normalize(result.tangent);

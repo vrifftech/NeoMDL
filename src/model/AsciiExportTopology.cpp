@@ -2,7 +2,10 @@
 
 #include <algorithm>
 #include <cstring>
+#include <cmath>
+#include <tuple>
 #include <map>
+#include <iterator>
 #include <numeric>
 #include <utility>
 
@@ -159,7 +162,46 @@ std::vector<ReconstructedTopology> reconstructTopologies(
     };
     appendCandidate();
 
-    const auto proposeJoins=[&](const std::vector<std::size_t>& corners) {
+    std::vector<std::vector<std::size_t>> members(mesh.faces.size()*3u);
+    std::vector<Vec3> crosses;
+    for(std::size_t face=0;face<mesh.faces.size();++face) {
+        for(std::size_t corner=0;corner<3u;++corner) members[groups.find(face*3u+corner)].push_back(face*3u+corner);
+        const auto x=compiledVertices[compiled(face,0u)].position;
+        const auto y=compiledVertices[compiled(face,1u)].position;
+        const auto z=compiledVertices[compiled(face,2u)].position;
+        const Vec3 p{y.x-x.x,y.y-x.y,y.z-x.z},q{z.x-y.x,z.y-y.y,z.z-y.z};
+        crosses.push_back({p.y*q.z-p.z*q.y,p.z*q.x-p.x*q.z,p.x*q.y-p.y*q.x});
+    }
+    const auto normalJoinImprovement=[&](std::size_t a,std::size_t b) {
+        a=groups.find(a);b=groups.find(b);
+        const auto target=compiledVertices[compiled(a/3u,a%3u)].normal;
+        std::array<std::vector<std::size_t>,3> faces;
+        std::size_t index{};
+        for(const auto group:{a,b}) {
+            for(const auto corner:members[group]) {
+                if(!same(compiledVertices[compiled(corner/3u,corner%3u)].normal,target)) return 0.0;
+                auto& list=faces[index];
+                if(list.empty() || list.back()!=corner/3u) list.push_back(corner/3u);
+            }
+            ++index;
+        }
+        std::set_union(faces[0].begin(),faces[0].end(),faces[1].begin(),faces[1].end(),std::back_inserter(faces[2]));
+        const auto error=[&](const std::vector<std::size_t>& faces) {
+            Vec3 value{};
+            for(const auto face:faces) {const auto v=crosses[face];value={value.x+v.x,value.y+v.y,v.z+value.z};}
+            const float length=std::sqrt((value.x*value.x+value.y*value.y)+value.z*value.z);
+            if(length!=0.0f) {
+                if(double(length)<1e-9) value={1.0f,0.0f,0.0f};
+                else {const float scale=1.0f/length;value={value.x*scale,value.y*scale,value.z*scale};}
+            }
+            const double x=double(value.x)-target.x,y=double(value.y)-target.y,z=double(value.z)-target.z;
+            return (x*x+y*y)+z*z;
+        };
+        return members[a].size()*error(faces[0])+members[b].size()*error(faces[1])-
+            (members[a].size()+members[b].size())*error(faces[2]);
+    };
+
+    const auto proposeJoins=[&](const std::vector<std::size_t>& corners,bool improveNormals=false) {
         job.check();
         std::vector<std::size_t> candidates;
         for(const auto corner:corners) {
@@ -170,6 +212,7 @@ std::vector<ReconstructedTopology> reconstructTopologies(
         for(std::size_t i=0;i<candidates.size();++i)
             for(std::size_t j=i+1u;j<candidates.size();++j) {
                 if(groups.find(candidates[i])==groups.find(candidates[j])) continue;
+                if(improveNormals && !(normalJoinImprovement(candidates[i],candidates[j])>0.0)) continue;
                 // A point join is a reconstruction candidate, not proof of
                 // original source identity. Retain it only when every
                 // directed neighbor survives, including boundary entries.
@@ -181,7 +224,13 @@ std::vector<ReconstructedTopology> reconstructTopologies(
                     for(std::size_t corner=0;corner<3u;++corner)
                         faces[face][corner]=static_cast<std::uint32_t>(proposed.find(face*3u+corner));
                 }
-                if(changedAdjacency(mesh,faces,job)==0u) groups=std::move(proposed);
+                if(changedAdjacency(mesh,faces,job)==0u) {
+                    const auto first=groups.find(candidates[i]),second=groups.find(candidates[j]);
+                    auto& merged=members[std::min(first,second)];auto& removed=members[std::max(first,second)];
+                    merged.insert(merged.end(),removed.begin(),removed.end());
+                    std::sort(merged.begin(),merged.end());removed.clear();
+                    groups=std::move(proposed);
+                }
             }
     };
     std::vector<std::vector<std::size_t>> compiledCorners(compiledVertices.size());
@@ -190,6 +239,31 @@ std::vector<ReconstructedTopology> reconstructTopologies(
         for(std::size_t corner=0;corner<3u;++corner)
             compiledCorners.at(compiled(i,corner)).push_back(i*3u+corner);
     }
+    // Prioritize the missing smooth joins before ambiguous flat point joins
+    // can consume their boundary adjacency.
+    std::map<std::vector<std::uint32_t>,std::vector<std::size_t>> smoothCorners;
+    for(std::size_t i=0;i<compiledVertices.size();++i) {
+        auto key=sourceAttributes.at(i);
+        const auto& v=compiledVertices[i];
+        for(const auto value:{v.position.x,v.position.y,v.position.z,v.normal.x,v.normal.y,v.normal.z})
+            key.push_back(bits(value));
+        for(const auto corner:compiledCorners[i]) smoothCorners[key].push_back(groups.find(corner));
+    }
+    std::vector<std::tuple<double,std::size_t,std::size_t>> joins;
+    for(auto& entry:smoothCorners) {
+        auto& corners=entry.second;
+        std::sort(corners.begin(),corners.end());
+        corners.erase(std::unique(corners.begin(),corners.end()),corners.end());
+        for(std::size_t a=0;a<corners.size();++a)
+            for(std::size_t b=a+1u;b<corners.size();++b) {
+                const auto improvement=normalJoinImprovement(corners[a],corners[b]);
+                if(improvement>0.0) joins.emplace_back(-improvement,corners[a],corners[b]);
+            }
+    }
+    std::sort(joins.begin(),joins.end());
+    for(const auto& join:joins) proposeJoins({std::get<1>(join),std::get<2>(join)},true);
+    appendCandidate();
+
     // InternalGenVertices can merge source rows at a single point, outside
     // any shared edge. A shared compiled row retains equal source payloads.
     for(const auto& corners:compiledCorners) proposeJoins(corners);
