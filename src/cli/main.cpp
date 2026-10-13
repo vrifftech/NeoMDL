@@ -12,9 +12,10 @@
 
 int main(int argc, char** argv) {
     const auto printUsage = [] {
-        std::cout << "Usage: neomdl-info [--game=k1|--game=k2] [--export-ascii output.mdl] [--explicit-normals|--smoothing-groups] [--refine-tangent-rounding] [--refine-normal-rounding] [--export-packed output.mdl] <model.mdl> [model.mdx]\n"
+        std::cout << "Usage: neomdl-info [--game=k1|--game=k2] [--geometry-only] [--export-ascii output.mdl] [--explicit-normals|--smoothing-groups] [--refine-tangent-rounding] [--refine-normal-rounding] [--export-packed output.mdl] <model.mdl> [model.mdx]\n"
                      "ASCII models use the shared x86-layout builder and require an explicit target game.\n"
                      "ASCII export writes one model asset and its own animations to a separate file.\n"
+                     "--geometry-only omits the model's own animations; binary input skips animation decoding.\n"
                      "--explicit-normals preserves normals in a NeoMDL ASCII extension.\n"
                      "--smoothing-groups reconstructs smoothing groups instead of explicit mesh normals.\n"
                      "Without either option, export preserves the mesh's input mode; compiled meshes use smoothing groups.\n"
@@ -35,6 +36,7 @@ int main(int argc, char** argv) {
         const std::string_view argument(argv[i]);
         if(argument=="--game=k1")game=neomdl::model::GameVersion::Kotor1;
         else if(argument=="--game=k2")game=neomdl::model::GameVersion::Kotor2;
+        else if(argument=="--geometry-only")asciiOptions.includeAnimations=false;
         else if(argument=="--explicit-normals")asciiOptions.explicitNormals=true;
         else if(argument=="--smoothing-groups")asciiOptions.explicitNormals=false;
         else if(argument=="--refine-tangent-rounding")asciiOptions.refineTangentRounding=true;
@@ -66,13 +68,13 @@ int main(int argc, char** argv) {
         if(packedOutput) {
             // Use the same resource-aware construction as the editor: TXI
             // bump materials change the authored MDX channel layout.
-            document.openFile(paths[0],{},{},game);
+            document.openFile(paths[0],{},{},game,asciiOptions.includeAnimations);
             // converttobinary spawns before Write (K2 0x72f2c9..0x72f34e).
             // NewCAurObject runs seams after Part::PostProcess (0x6ede8f).
             neomdl::model::processAsciiSkinSeams(document.model());
             model=document.sourceModel();
         } else {
-            model=neomdl::model::readModelFile(paths[0], mdx, {}, game);
+            model=neomdl::model::readModelFile(paths[0], mdx, {}, game, {},asciiOptions.includeAnimations);
             if(asciiOutput) neomdl::model::processAsciiSkinSeams(model);
         }
         std::cout << neomdl::model::modelSummary(model) << '\n';

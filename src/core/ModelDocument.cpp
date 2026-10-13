@@ -193,7 +193,8 @@ model::AsciiResourceResolver looseAsciiResources(const std::filesystem::path& di
 bool ModelDocument::openFile(const std::filesystem::path& requestedPath,
                              const ResourceResolver& fallbackResolver,
                              const neoshared::bif::JobControl& job,
-                             std::optional<model::GameVersion> asciiGame) {
+                             std::optional<model::GameVersion> asciiGame,
+                             bool includeAnimations) {
     const ResourceLoadScope loading(job);
     job.update(0u, 0u, "Opening model: " + neoshared::pathToUtf8(requestedPath.filename()));
     auto mdlPath = requestedPath;
@@ -218,7 +219,7 @@ bool ModelDocument::openFile(const std::filesystem::path& requestedPath,
     const auto resolver = overlayResolver(localResolver, fallbackResolver);
     // AurResGet's standalone authoring path can open .lmt sidecars. The
     // installed game's resource callback has no .lmt type mapping.
-    openResource(std::move(primary), resolver,job,asciiGame,looseAsciiResources(directory));
+    openResource(std::move(primary), resolver,job,asciiGame,looseAsciiResources(directory),includeAnimations);
     // Local documents retain their filesystem identity even though companion
     // resources may have come from an installed-game archive session.
     runtimeScopePinned_=bool(fallbackResolver);
@@ -230,7 +231,8 @@ bool ModelDocument::openResource(neoshared::ResourceDocument resource,
                                  const ResourceResolver& suppliedResolver,
                                  const neoshared::bif::JobControl& job,
                                  std::optional<model::GameVersion> asciiGame,
-                                 const model::AsciiResourceResolver& asciiResources) {
+                                 const model::AsciiResourceResolver& asciiResources,
+                                 bool includeAnimations) {
     const ResourceLoadScope loading(job);
     job.update(0u, 0u, "Resolving model companions: " + resource.fileName);
     auto trace=std::make_shared<ResourceTrace>();
@@ -288,7 +290,7 @@ bool ModelDocument::openResource(neoshared::ResourceDocument resource,
         return asciiResources ? asciiResources(name,extension) : std::nullopt;
     };
     auto nextModel = neomdl::model::decodeModelBytes(
-        mdlResource.bytes, mdx, mdlResource.sourceDescription, job,asciiGame,loadResources);
+        mdlResource.bytes, mdx, mdlResource.sourceDescription, job,asciiGame,loadResources,includeAnimations);
     originalAscii_ = nextModel.asciiBuilt
         ? std::optional<std::string>{std::string(mdlResource.bytes.begin(), mdlResource.bytes.end())}
         : std::nullopt;
@@ -402,7 +404,8 @@ bool ModelDocument::openResource(neoshared::ResourceDocument resource,
 }
 
 std::unique_ptr<ModelDocument> ModelDocument::rebuildAscii(const std::string& text,
-    const neoshared::bif::JobControl& job) const {
+    const neoshared::bif::JobControl& job, std::optional<model::GameVersion> game,
+    bool includeAnimations) const {
     neoshared::ResourceDocument resource;
     resource.fileName = title_;
     resource.type = kMdlResourceType;
@@ -411,7 +414,8 @@ std::unique_ptr<ModelDocument> ModelDocument::rebuildAscii(const std::string& te
     resource.sourceDescription = title_ + " (edited ASCII)";
     resource.protectedInputs = openPaths();
     auto result = std::make_unique<ModelDocument>();
-    result->openResource(std::move(resource), resolver_, job, model_.game, asciiResources_);
+    result->openResource(std::move(resource), resolver_, job, game.value_or(model_.game),
+                         asciiResources_, includeAnimations);
     result->path_ = path_;
     result->runtimeScopePinned_ = runtimeScopePinned_;
     return result;

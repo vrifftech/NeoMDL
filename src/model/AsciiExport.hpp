@@ -9,6 +9,7 @@ struct AsciiExportOptions {
     std::optional<bool> explicitNormals;
     bool refineTangentRounding{};
     bool refineNormalRounding{};
+    bool includeAnimations{true};
 };
 
 struct AsciiExportResult {
@@ -17,7 +18,7 @@ struct AsciiExportResult {
     std::vector<std::string> warnings;
 };
 
-// Exports one model asset, including its own animations. References and the
+// Exports one model asset, optionally including its own animations. References and the
 // supermodel remain resource names; scene instances and live state are not
 // flattened into the authoring model. No packed MDL/MDX writer is involved.
 AsciiExportResult exportAsciiModel(const Model& model,

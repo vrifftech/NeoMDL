@@ -73,13 +73,17 @@ public:
     bool openFile(const std::filesystem::path& path,
                   const ResourceResolver& fallbackResolver = {},
                   const neoshared::bif::JobControl& job = resourceLoadJob(),
-                  std::optional<model::GameVersion> asciiGame = std::nullopt);
+                  std::optional<model::GameVersion> asciiGame = std::nullopt,
+                  bool includeAnimations = true);
     bool openResource(neoshared::ResourceDocument resource, const ResourceResolver& resolver,
                       const neoshared::bif::JobControl& job = resourceLoadJob(),
                       std::optional<model::GameVersion> asciiGame = std::nullopt,
-                      const model::AsciiResourceResolver& asciiResources = {});
+                      const model::AsciiResourceResolver& asciiResources = {},
+                      bool includeAnimations = true);
     std::unique_ptr<ModelDocument> rebuildAscii(const std::string& text,
-        const neoshared::bif::JobControl& job = resourceLoadJob()) const;
+        const neoshared::bif::JobControl& job = resourceLoadJob(),
+        std::optional<model::GameVersion> game = std::nullopt,
+        bool includeAnimations = true) const;
     const std::optional<std::string>& originalAscii() const noexcept { return originalAscii_; }
 
     // Immutable scene partition over an already resolved asset. The supplied

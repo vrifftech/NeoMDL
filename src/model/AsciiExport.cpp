@@ -231,7 +231,8 @@ AsciiExportResult exportAsciiModel(const Model& model,const neoshared::bif::JobC
     // tokens so whitespace in the actual name cannot shift a later argument.
     const auto modelTarget=name.empty() || name.find_first_of(" \t\v\f\"[")!=std::string::npos
         ? std::string("_") : name;
-    job.update(0u,model.animations.size()+1u,"Exporting ASCII model: "+name);
+    const auto animationCount=options.includeAnimations?model.animations.size():0u;
+    job.update(0u,animationCount+1u,"Exporting ASCII model: "+name);
     if(model.collapsedRoomParts||!model.sceneNodeAdmission.empty())
         throw ModelError("ASCII export requires the source model asset, not a collapsed scene partition");
     writer.line("# NeoMDL generated ASCII model");
@@ -283,9 +284,9 @@ AsciiExportResult exportAsciiModel(const Model& model,const neoshared::bif::JobC
     } else
         writer.warning("The absent model animation-root selection cannot be preserved: engine ASCII load assigns the tree root, enabling animation controllers that compiled playback leaves disabled.");
     writer.line("endmodelgeom "+modelTarget);writer.line();
-    for(std::size_t i=0;i<model.animations.size();++i) {
+    for(std::size_t i=0;i<animationCount;++i) {
         const auto& animation=model.animations[i];
-        job.update(i+1u,model.animations.size()+1u,"Exporting animation: "+animation.name);
+        job.update(i+1u,animationCount+1u,"Exporting animation: "+animation.name);
         const auto clip=writer.token(animation.name,"animation name");
         if(clip.size()>=32u)
             throw ModelError("ASCII export cannot represent the animation name in its engine 32-byte field");
@@ -306,7 +307,7 @@ AsciiExportResult exportAsciiModel(const Model& model,const neoshared::bif::JobC
         writer.line("doneanim "+clip+" "+modelTarget);writer.line();
     }
     writer.line("donemodel "+modelTarget);
-    job.update(model.animations.size()+1u,model.animations.size()+1u,"ASCII model export complete");
+    job.update(animationCount+1u,animationCount+1u,"ASCII model export complete");
     return writer.finish();
 }
 

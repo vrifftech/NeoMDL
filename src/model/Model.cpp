@@ -290,7 +290,7 @@ public:
         : mdlBytes_(mdlBytes), mdxBytes_(mdxBytes), label_(std::move(sourceLabel)),
           job_(job), whole_(mdlBytes_.data(), mdlBytes_.size(), label_, job_) {}
 
-    Model parse() {
+    Model parse(bool includeAnimations) {
         job_.update(0u, 5u, "Reading model header: " + label_);
         if (mdlBytes_.size() < 4u) throw ModelError(sourcePrefix(label_) + "MDL is truncated");
 
@@ -336,8 +336,10 @@ public:
                                       ") differs from the model header (" +
                                       std::to_string(declaredNodeCount_) + ").");
         }
-        job_.update(2u, 5u, "Decoding model animations: " + label_);
-        parseAnimations();
+        if (includeAnimations) {
+            job_.update(2u, 5u, "Decoding model animations: " + label_);
+            parseAnimations();
+        }
         // Packed Input::Reset sets the geometry-type 0x80 flag. Engine
         // ProcessSkinSeams returns immediately for that flag.
         // Preserve the compiled MDX normals, including for the lazy CPU path.
@@ -2891,12 +2893,15 @@ Model decodeModelBytes(const std::vector<std::uint8_t>& mdlBytes,
                        const std::string& sourceLabel,
                        const neoshared::bif::JobControl& job,
                        std::optional<GameVersion> asciiGame,
-                       const AsciiResourceResolver& asciiResources) {
+                       const AsciiResourceResolver& asciiResources,
+                       bool includeAnimations) {
     if(isAsciiModelInput(mdlBytes)) {
         if(!asciiGame)throw AsciiModelGameRequired();
-        return decodeAsciiModelBytes(mdlBytes,*asciiGame,sourceLabel,job,asciiResources);
+        auto model=decodeAsciiModelBytes(mdlBytes,*asciiGame,sourceLabel,job,asciiResources);
+        if(!includeAnimations) model.animations.clear();
+        return model;
     }
-    auto model=Parser(mdlBytes, mdxBytes, sourceLabel, job).parse();
+    auto model=Parser(mdlBytes, mdxBytes, sourceLabel, job).parse(includeAnimations);
     initializeProceduralUvPools(model);
     return model;
 }
@@ -2905,7 +2910,8 @@ Model readModelFile(const std::filesystem::path& mdlPath,
                     const std::optional<std::filesystem::path>& mdxPath,
                     const neoshared::bif::JobControl& job,
                     std::optional<GameVersion> asciiGame,
-                    const AsciiResourceResolver& asciiResources) {
+                    const AsciiResourceResolver& asciiResources,
+                    bool includeAnimations) {
     const auto mdl = readModelFileBytes(mdlPath, job);
     std::vector<std::uint8_t> mdx;
     if (!isAsciiModelInput(mdl)) {
@@ -2921,7 +2927,7 @@ Model readModelFile(const std::filesystem::path& mdlPath,
         return readModelFileBytes(*file,job);
     };
     return decodeModelBytes(mdl, mdx, neoshared::pathToUtf8(mdlPath), job,
-                            asciiGame,asciiResources?asciiResources:looseResources);
+                            asciiGame,asciiResources?asciiResources:looseResources,includeAnimations);
 }
 
 Mat4 identityMatrix() noexcept {

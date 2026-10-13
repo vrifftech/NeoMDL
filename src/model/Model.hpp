@@ -809,18 +809,22 @@ bool isAsciiModelInput(const std::vector<std::uint8_t>& mdlBytes) noexcept;
 using AsciiResourceResolver = std::function<std::optional<std::vector<std::uint8_t>>(
     const std::string& resourceName, const std::string& extension)>;
 
+// Geometry-only reads skip packed animation decoding. ASCII still follows its
+// construction commands; its resulting own-animation list is then omitted.
 Model decodeModelBytes(const std::vector<std::uint8_t>& mdlBytes,
                        const std::vector<std::uint8_t>& mdxBytes = {},
                        const std::string& sourceLabel = {},
                        const neoshared::bif::JobControl& job = {},
                        std::optional<GameVersion> asciiGame = std::nullopt,
-                       const AsciiResourceResolver& asciiResources = {});
+                       const AsciiResourceResolver& asciiResources = {},
+                       bool includeAnimations = true);
 
 Model readModelFile(const std::filesystem::path& mdlPath,
                     const std::optional<std::filesystem::path>& mdxPath = std::nullopt,
                     const neoshared::bif::JobControl& job = {},
                     std::optional<GameVersion> asciiGame = std::nullopt,
-                    const AsciiResourceResolver& asciiResources = {});
+                    const AsciiResourceResolver& asciiResources = {},
+                    bool includeAnimations = true);
 
 // Material-finalized source Model -> engine CreateInstanceTreeR topology.
 // Every child link creates a distinct live Part, including repeated links to
