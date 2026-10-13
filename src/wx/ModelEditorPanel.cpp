@@ -2031,6 +2031,7 @@ private:
                 pending.load(path,resolver,{},job);
             }))return;
             page->installArea(std::move(pending));
+            updateState();
             setModuleStatusText("Area context loaded; room selection follows the camera when WOK data is available.",0);
         } catch (const neoshared::bif::JobCancelled&) {
             // The joined job retained the current area.
@@ -3312,12 +3313,35 @@ private:
         bar->Append(file, "&File");
 
         viewMenu_ = new wxMenu;
+        bar->Append(viewMenu_, "&View");
+        sceneMenu_ = new wxMenu;
+        bar->Append(sceneMenu_, "&Scene");
+        buildPreviewMenus(false);
+
+        auto* tools = new wxMenu;
+        tools->Append(ID_ResourceProvenance, "Resource Scope and Load Report...");
+        tools->Append(ID_AdvancedSettings, "Advanced / Diagnostics...");
+        bar->Append(tools, "&Tools");
+
+        helpMenu_ = new wxMenu;
+        helpMenu_->Append(ID_About, "&About NeoMDL");
+        bar->Append(helpMenu_, "&Help");
+        setModuleMenus(bar);
+        updateMenuChecks();
+    }
+
+    void buildPreviewMenus(bool area) {
+        areaMenus_ = area;
+        for (auto* menu : {viewMenu_, sceneMenu_})
+            while (menu->GetMenuItemCount() != 0u)
+                menu->Destroy(menu->FindItemByPosition(0));
+
         auto* view = viewMenu_;
         view->Append(ID_FrameModel, "&Frame Model\tF");
         auto* camera = new wxMenu;
         camera->Append(ID_ViewSelectedCamera, "View Through Selected Camera");
         camera->Append(ID_ViewCameraHook, "Attach to Camera Hook");
-        camera->Append(ID_ViewAreaCamera, "View Through Area Camera...");
+        if (area) camera->Append(ID_ViewAreaCamera, "View Through Area Camera...");
         camera->Append(ID_OrbitCamera, "Return to Orbit Camera");
         camera->AppendSeparator();
         camera->Append(ID_CameraSettings, "Projection Settings...");
@@ -3330,7 +3354,7 @@ private:
         view->AppendCheckItem(ID_Lighting, "&Lighting");
         view->AppendCheckItem(ID_Headlight, "Preview Key Light");
         view->AppendCheckItem(ID_PreviewLights, "Authored Model Lights");
-        view->AppendCheckItem(ID_EngineShadows, "Area Shadows");
+        if (area) view->AppendCheckItem(ID_EngineShadows, "Area Shadows");
         view->AppendCheckItem(ID_Fog, "Show Fog");
         view->Append(ID_LightingSettings, "Lighting and Fog Settings...");
         view->AppendSeparator();
@@ -3346,38 +3370,27 @@ private:
         inspection->AppendCheckItem(ID_NodeHelpers, "Node Helpers");
         inspection->AppendCheckItem(ID_ShowCameras, "Camera Markers");
         inspection->AppendCheckItem(ID_PreviewAabbs, "Collision Geometry");
-        inspection->AppendCheckItem(ID_PreviewTriggers, "Trigger Volumes");
+        if (area) inspection->AppendCheckItem(ID_PreviewTriggers, "Trigger Volumes");
         view->AppendSubMenu(inspection, "&Inspection");
         view->AppendSeparator();
         view->Append(ID_ResetView, "Reset View Settings");
-        bar->Append(view, "&View");
 
-        auto* scene = new wxMenu;
-        scene->Append(ID_AreaRoom, "Current Area Room...");
-        scene->Append(ID_ClearArea, "Clear Area Context");
-        scene->Append(ID_LoadGrass, "Load Grass from ARE...");
-        scene->AppendSeparator();
-        auto* animation = new wxMenu;
-        animation->Append(ID_AreaAnimation, "Area Object Animation...");
-        animation->Append(ID_RoomScriptAnimation, "Room Animation...");
-        animation->Append(ID_DoorState, "Door State...");
-        scene->AppendSubMenu(animation, "&Animation");
-        scene->AppendSeparator();
-        scene->Append(ID_SceneAudio, "Scene Audio...");
-        scene->Append(ID_AreaWeather, "Area Weather...");
+        auto* scene = sceneMenu_;
+        if (area) {
+            scene->Append(ID_AreaRoom, "Current Area Room...");
+            scene->Append(ID_ClearArea, "Clear Area Context");
+            scene->Append(ID_LoadGrass, "Load Grass from ARE...");
+            scene->AppendSeparator();
+            auto* animation = new wxMenu;
+            animation->Append(ID_AreaAnimation, "Area Object Animation...");
+            animation->Append(ID_RoomScriptAnimation, "Room Animation...");
+            animation->Append(ID_DoorState, "Door State...");
+            scene->AppendSubMenu(animation, "&Animation");
+            scene->AppendSeparator();
+            scene->Append(ID_SceneAudio, "Scene Audio...");
+            scene->Append(ID_AreaWeather, "Area Weather...");
+        }
         scene->Append(ID_DetonateEmitters, "Detonate Explosion Emitters");
-        bar->Append(scene, "&Scene");
-
-        auto* tools = new wxMenu;
-        tools->Append(ID_ResourceProvenance, "Resource Scope and Load Report...");
-        tools->Append(ID_AdvancedSettings, "Advanced / Diagnostics...");
-        bar->Append(tools, "&Tools");
-
-        helpMenu_ = new wxMenu;
-        helpMenu_->Append(ID_About, "&About NeoMDL");
-        bar->Append(helpMenu_, "&Help");
-        setModuleMenus(bar);
-        updateMenuChecks();
     }
 
     void showAdvancedSettings() {
@@ -3388,7 +3401,7 @@ private:
                         wxDEFAULT_DIALOG_STYLE|wxRESIZE_BORDER);
         auto* root=new wxBoxSizer(wxVERTICAL);
         root->Add(new wxStaticText(&dialog,wxID_ANY,
-            "Model and area rendering settings. Changes affect the preview."),0,wxALL,10);
+            "Rendering settings for the active preview."),0,wxALL,10);
         auto* notebook=new wxNotebook(&dialog,wxID_ANY);
         const auto tab=[&](const char* title) {
             auto* panel=new wxPanel(notebook);
@@ -3397,9 +3410,8 @@ private:
             return panel;
         };
         const auto action=[&](wxPanel* panel,const char* label,
-                              void (ModelEditorPanelImpl::*handler)(),bool enabled=true) {
+                              void (ModelEditorPanelImpl::*handler)()) {
             auto* button=new wxButton(panel,wxID_ANY,label);
-            button->Enable(enabled);
             button->Bind(wxEVT_BUTTON,[this,handler](wxCommandEvent&) {
                 (this->*handler)();updateState();
             });
@@ -3415,21 +3427,23 @@ private:
         };
         auto* rendering=tab("Rendering");
         toggle(rendering,"K2 nearest-light object-only mode",&RenderOptions::nearestLightsOnlyGobs,k2&&!area);
-        toggle(rendering,"Two-sided shadow stencil",&RenderOptions::engineTwoSidedShadows);
-        rendering->GetSizer()->Add(new wxStaticText(rendering,wxID_ANY,"Shadow rendering"),0,wxLEFT|wxTOP,8);
-        wxArrayString shadows;
-        shadows.Add("Hard shadows");shadows.Add("Soft shadows (ARB)");shadows.Add("Soft shadows (ATI compatibility)");
-        auto* shadow=new wxChoice(rendering,wxID_ANY,wxDefaultPosition,wxDefaultSize,shadows);
-        shadow->SetSelection(!options_.engineSoftShadows?0:
-            options_.engineSoftShadowMode==render::EngineSoftShadowMode::DesktopARB?1:2);
-        shadow->Bind(wxEVT_CHOICE,[this,shadow](wxCommandEvent&) {
-            options_.engineSoftShadows=shadow->GetSelection()!=0;
-            options_.engineSoftShadowMode=shadow->GetSelection()==2
-                ?render::EngineSoftShadowMode::DesktopATI:render::EngineSoftShadowMode::DesktopARB;
-            applyOptions();
-        });
-        rendering->GetSizer()->Add(shadow,0,wxEXPAND|wxALL,8);
-        toggle(rendering,"Inspect mesh projection volumes",&RenderOptions::inspectMeshProjections,k2&&area);
+        if (area) {
+            toggle(rendering,"Two-sided shadow stencil",&RenderOptions::engineTwoSidedShadows);
+            rendering->GetSizer()->Add(new wxStaticText(rendering,wxID_ANY,"Shadow rendering"),0,wxLEFT|wxTOP,8);
+            wxArrayString shadows;
+            shadows.Add("Hard shadows");shadows.Add("Soft shadows (ARB)");shadows.Add("Soft shadows (ATI compatibility)");
+            auto* shadow=new wxChoice(rendering,wxID_ANY,wxDefaultPosition,wxDefaultSize,shadows);
+            shadow->SetSelection(!options_.engineSoftShadows?0:
+                options_.engineSoftShadowMode==render::EngineSoftShadowMode::DesktopARB?1:2);
+            shadow->Bind(wxEVT_CHOICE,[this,shadow](wxCommandEvent&) {
+                options_.engineSoftShadows=shadow->GetSelection()!=0;
+                options_.engineSoftShadowMode=shadow->GetSelection()==2
+                    ?render::EngineSoftShadowMode::DesktopATI:render::EngineSoftShadowMode::DesktopARB;
+                applyOptions();
+            });
+            rendering->GetSizer()->Add(shadow,0,wxEXPAND|wxALL,8);
+            toggle(rendering,"Inspect mesh projection volumes",&RenderOptions::inspectMeshProjections,k2);
+        }
         rendering->GetSizer()->Add(new wxStaticText(rendering,wxID_ANY,"Object light-query radius"),0,wxLEFT|wxTOP,8);
         auto* radius=new wxSpinCtrlDouble(rendering,wxID_ANY,wxEmptyString,wxDefaultPosition,wxDefaultSize,
             wxSP_ARROW_KEYS,0,1000000,options_.objectLightRadius,0.1);
@@ -3444,11 +3458,13 @@ private:
         action(rendering,"Graphics and Texture Uploads...",&ModelEditorPanelImpl::showEngineExecution);
         action(rendering,"Save Engine Execution Report...",&ModelEditorPanelImpl::saveEngineExecutionReport);
 
-        auto* scene=tab("Scene");
-        action(scene,"Area Environment / Camera Replay...",&ModelEditorPanelImpl::chooseAreaEnvironment,area);
-        action(scene,"Shadow Inputs...",&ModelEditorPanelImpl::chooseSceneShadows);
-        action(scene,"Shadow Casters...",&ModelEditorPanelImpl::chooseShadowCasters);
-        action(scene,"Grass Settings...",&ModelEditorPanelImpl::chooseGrassOptions,area);
+        if (area) {
+            auto* scene=tab("Scene");
+            action(scene,"Area Environment / Camera Replay...",&ModelEditorPanelImpl::chooseAreaEnvironment);
+            action(scene,"Shadow Inputs...",&ModelEditorPanelImpl::chooseSceneShadows);
+            action(scene,"Shadow Casters...",&ModelEditorPanelImpl::chooseShadowCasters);
+            action(scene,"Grass Settings...",&ModelEditorPanelImpl::chooseGrassOptions);
+        }
         root->Add(notebook,1,wxEXPAND|wxLEFT|wxRIGHT,10);
         root->Add(new wxButton(&dialog,wxID_OK,"Close"),0,wxALIGN_RIGHT|wxALL,10);
         dialog.SetSizerAndFit(root);
@@ -4692,7 +4708,10 @@ private:
             case ID_LoadArea: chooseArea(); return;
             case ID_ModuleArea: chooseModuleArea(); return;
             case ID_ResourceProvenance: showResourceProvenance(); return;
-            case ID_ClearArea: if (auto* page=activePage()) page->clearArea(); return;
+            case ID_ClearArea:
+                if (auto* page=activePage()) page->clearArea();
+                updateState();
+                return;
             case ID_AreaRoom: chooseAreaRoom(); return;
             case ID_AreaWeather: showAreaWeather(); return;
             case ID_SceneAudio: showSceneAudio(); return;
@@ -4776,7 +4795,10 @@ private:
     }
 
     void updateState() {
-        const bool hasDocument = activePage() != nullptr;
+        const auto* active = activePage();
+        const bool hasDocument = active != nullptr;
+        const bool area = active && !active->areaScene().empty();
+        if (area != areaMenus_) buildPreviewMenus(area);
         enableModuleCommand(ID_ExportAscii,activePage()&&activePage()->document().hasModelOwner());
         enableModuleCommand(ID_ExportPacked,activePage()&&activePage()->document().hasModelOwner()&&
             activePage()->document().model().asciiBuilt);
@@ -4793,7 +4815,6 @@ private:
         enableModuleCommand(ID_CloseAll, tabs_->GetPageCount() != 0u);
         enableModuleCommand(ID_FrameModel, hasDocument);
         enableModuleCommand(ID_DetonateEmitters, hasDocument && options_.previewEmitters);
-        const auto* active = activePage();
         const bool grassArea=active&&!active->areaScene().empty()&&
             engineAreaRuntimeSupported(active->areaScene().game());
         enableModuleCommand(ID_LoadGrass,grassArea);
@@ -4835,6 +4856,8 @@ private:
     bool dark_{};
     wxMenu* fileMenu_{};
     wxMenu* viewMenu_{};
+    wxMenu* sceneMenu_{};
+    bool areaMenus_{};
     wxMenu* helpMenu_{};
     std::unique_ptr<neogames::OpenGameDirectoryMenu> gameDirectoryMenu_;
     std::map<std::string, std::shared_ptr<GameResourceSession>> installationSessions_;
