@@ -13,6 +13,7 @@
 #include <numeric>
 #include <set>
 #include <tuple>
+#include <unordered_set>
 
 namespace neomdl::model::ascii_export {
 namespace {
@@ -526,7 +527,8 @@ bool preservesSkinChannels(const Model& model,const CornerRows& rows) {
 }
 
 double measureSeamNormals(const Model& rebuilt,const Model& source,const CornerRows& rows,
-                         std::map<const Mesh*,MeshReconstruction>& plans) {
+                         std::map<const Mesh*,MeshReconstruction>& plans,
+                         const Mesh* changed=nullptr,bool record=true) {
     double error{};
     for(std::size_t index=0;index<source.meshes.size();++index) {
         const auto& mesh=source.meshes[index];
@@ -534,21 +536,32 @@ double measureSeamNormals(const Model& rebuilt,const Model& source,const CornerR
         if(found==plans.end() || !found->second.hasNormals) continue;
         auto& plan=found->second;
         auto& result=plan.smoothing;
-        result.squaredNormalError=0.0;
-        result.changedCornerNormals=0u;
-        result.maxNormalComponentDifference=0.0f;
+        if(changed && &mesh!=changed && !(changed->render && mesh.render)) {
+            error+=result.squaredNormalError;
+            continue;
+        }
+        double squared{};
+        std::size_t changedCorners{};
+        float maxDifference{};
         for(std::size_t face=0;face<mesh.faces.size();++face)
             for(std::size_t corner=0;corner<3u;++corner) {
                 const auto target=plan.vertices[mesh.faces[face].indices[corner]].normal;
                 const auto actual=rebuilt.meshes[index].normalAt(rows[index][face][corner]);
                 const double x=double(actual.x)-target.x,y=double(actual.y)-target.y,z=double(actual.z)-target.z;
-                result.squaredNormalError+=(x*x+y*y)+z*z;
-                const float delta=std::max({std::abs(actual.x-target.x),std::abs(actual.y-target.y),
-                    std::abs(actual.z-target.z)});
-                result.changedCornerNormals+=delta!=0.0f;
-                result.maxNormalComponentDifference=std::max(result.maxNormalComponentDifference,delta);
+                squared+=(x*x+y*y)+z*z;
+                if(record) {
+                    const float delta=std::max({std::abs(actual.x-target.x),std::abs(actual.y-target.y),
+                        std::abs(actual.z-target.z)});
+                    changedCorners+=delta!=0.0f;
+                    maxDifference=std::max(maxDifference,delta);
+                }
             }
-        error+=result.squaredNormalError;
+        if(record) {
+            result.squaredNormalError=squared;
+            result.changedCornerNormals=changedCorners;
+            result.maxNormalComponentDifference=maxDifference;
+        }
+        error+=squared;
     }
     return error;
 }
@@ -705,25 +718,18 @@ void reconstructCyclicCornerPass(Writer& out,const Model& model,const Model& fra
             auto selected=plans;
             auto selectedGeometry=current;
             auto selectedRows=rows;
-            const auto consider=[&](std::map<const Mesh*,MeshReconstruction> trial) {
+            const auto consider=[&](const Mesh* mesh,MeshReconstruction trial) {
                 std::map<const Mesh*,MeshReconstruction> changed;
-                for(const auto& entry:trial)
-                    if(entry.second.cornerRotations!=plans.at(entry.first).cornerRotations)
-                        changed.emplace(entry);
+                changed.emplace(mesh,std::move(trial));
                 auto rebuilt=current;
                 auto generated=rows;
-                for(const auto& entry:changed) {
-                    const auto index=static_cast<std::size_t>(entry.first-model.meshes.data());
-                    rebuilt.meshes[index]=frames.meshes[index];
-                }
-                const auto changedRows=generateGeometry(rebuilt,model,changed,false,out.job());
-                for(const auto& entry:changed) {
-                    const auto index=static_cast<std::size_t>(entry.first-model.meshes.data());
-                    generated[index]=changedRows[index];
-                }
+                const auto index=static_cast<std::size_t>(mesh-model.meshes.data());
+                rebuilt.meshes[index]=frames.meshes[index];
+                auto changedRows=generateGeometry(rebuilt,model,changed,false,out.job());
+                generated[index]=std::move(changedRows[index]);
                 if(!preservesSkinChannels(model,generated)) return;
-                auto error=measureTangentBasis(rebuilt,model,generated,trial,out.job(),&changed);
-                if(std::any_of(changed.begin(),changed.end(),[](const auto& entry){return entry.first->render;}))
+                auto error=measureTangentBasis(rebuilt,model,generated,plans,out.job(),&changed);
+                if(mesh->render)
                     processAsciiSkinSeams(rebuilt,out.job());
                 else {
                     // CreateSkinNodeList excludes non-rendered meshes. Changing
@@ -732,9 +738,9 @@ void reconstructCyclicCornerPass(Writer& out,const Model& model,const Model& fra
                         if(model.meshes[index].render)
                             rebuilt.meshes[index].asciiNormalPool=current.meshes[index].asciiNormalPool;
                 }
-                error+=measureSeamNormals(rebuilt,model,generated,trial);
+                error+=measureSeamNormals(rebuilt,model,generated,plans,mesh,false);
                 if(error<best) {
-                    best=error;selected=std::move(trial);improved=true;
+                    best=error;selected=plans;selected.at(mesh)=std::move(changed.at(mesh));improved=true;
                     selectedGeometry=std::move(rebuilt);selectedRows=std::move(generated);
                 }
             };
@@ -742,9 +748,9 @@ void reconstructCyclicCornerPass(Writer& out,const Model& model,const Model& fra
                 const auto& candidate=candidates[index];
                 for(std::uint8_t rotation=0u;rotation<3u;++rotation) {
                     if(plans.at(candidate.first).cornerRotations[candidate.second]==rotation) continue;
-                    auto trial=plans;
-                    trial.at(candidate.first).cornerRotations[candidate.second]=rotation;
-                    consider(std::move(trial));
+                    auto trial=plans.at(candidate.first);
+                    trial.cornerRotations[candidate.second]=rotation;
+                    consider(candidate.first,std::move(trial));
                 }
             }
             // Opposing contributions can require two cyclic starts to move
@@ -757,10 +763,10 @@ void reconstructCyclicCornerPass(Writer& out,const Model& model,const Model& fra
                     for(std::uint8_t b=0u;b<3u;++b) {
                         if(plans.at(first.first).cornerRotations[first.second]==a ||
                            plans.at(second.first).cornerRotations[second.second]==b) continue;
-                        auto trial=plans;
-                        trial.at(first.first).cornerRotations[first.second]=a;
-                        trial.at(second.first).cornerRotations[second.second]=b;
-                        consider(std::move(trial));
+                        auto trial=plans.at(first.first);
+                        trial.cornerRotations[first.second]=a;
+                        trial.cornerRotations[second.second]=b;
+                        consider(first.first,std::move(trial));
                     }
             }
             // Keep the established single/source-pair search first. Only
@@ -774,14 +780,15 @@ void reconstructCyclicCornerPass(Writer& out,const Model& model,const Model& fra
                         for(std::uint8_t b=0u;b<3u;++b) {
                             if(plans.at(mesh).cornerRotations[pair[0]]==a ||
                                plans.at(mesh).cornerRotations[pair[1]]==b) continue;
-                            auto trial=plans;
-                            trial.at(mesh).cornerRotations[pair[0]]=a;
-                            trial.at(mesh).cornerRotations[pair[1]]=b;
-                            consider(std::move(trial));
+                            auto trial=plans.at(mesh);
+                            trial.cornerRotations[pair[0]]=a;
+                            trial.cornerRotations[pair[1]]=b;
+                            consider(mesh,std::move(trial));
                         }
             }
             if(improved) {
                 plans=std::move(selected);current=std::move(selectedGeometry);rows=std::move(selectedRows);
+                measureSeamNormals(current,model,rows,plans);
             }
         } while(improved);
     }
@@ -1393,7 +1400,14 @@ void reconstructNormalPositionPrecision(Writer& out,const Model& model,const Mod
                 });
             }
             if(invariant && !cyclicStates) return;
-            std::set<std::vector<std::uint32_t>> visited;
+            struct StateHash {
+                std::size_t operator()(const std::vector<std::uint32_t>& words) const {
+                    std::size_t hash{};
+                    for(const auto word:words) hash=(hash^word)*16777619u;
+                    return hash;
+                }
+            };
+            std::unordered_set<std::vector<std::uint32_t>,StateHash> visited;
             struct AxisState {
                 double value;
                 std::vector<std::array<Vec3,2>> products;
