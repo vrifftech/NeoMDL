@@ -96,6 +96,8 @@ enum CommandId {
     ID_RoomScriptAnimation,
     ID_TrackAnimation,
     ID_DoorState,
+    ID_AreaWeather,
+    ID_SceneAudio,
     ID_LoadGrass,
     ID_CloseModel,
     ID_CloseAll,
@@ -3363,6 +3365,8 @@ private:
         animation->Append(ID_DoorState, "Door State...");
         scene->AppendSubMenu(animation, "&Animation");
         scene->AppendSeparator();
+        scene->Append(ID_SceneAudio, "Scene Audio...");
+        scene->Append(ID_AreaWeather, "Area Weather...");
         scene->Append(ID_DetonateEmitters, "Detonate Explosion Emitters");
         bar->Append(scene, "&Scene");
 
@@ -4692,6 +4696,8 @@ private:
             case ID_ResourceProvenance: showResourceProvenance(); return;
             case ID_ClearArea: if (auto* page=activePage()) page->clearArea(); return;
             case ID_AreaRoom: chooseAreaRoom(); return;
+            case ID_AreaWeather: showAreaWeather(); return;
+            case ID_SceneAudio: showSceneAudio(); return;
             case ID_AreaAnimation: chooseAreaAnimation(); return;
             case ID_RoomScriptAnimation: chooseRoomScriptAnimation(); return;
             case ID_TrackAnimation: chooseTrackAnimation(); return;
@@ -4782,9 +4788,12 @@ private:
         enableModuleCommand(ID_ClearArea,hasDocument&&!activePage()->areaScene().empty());
         enableModuleCommand(ID_AreaAnimation,hasDocument&&!activePage()->areaScene().objects().empty());
         enableModuleCommand(ID_AreaRoom,activePage()&&!activePage()->areaScene().empty());
+        enableModuleCommand(ID_SceneAudio,activePage()&&!activePage()->areaScene().empty());
         enableModuleCommand(ID_RoomScriptAnimation,activePage()&&!activePage()->areaScene().rooms().empty());
         enableModuleCommand(ID_TrackAnimation,activePage()&&std::any_of(activePage()->areaScene().objects().begin(),
             activePage()->areaScene().objects().end(),[](const auto& object){return object->kind()==AreaObjectKind::Track;}));
+        enableModuleCommand(ID_AreaWeather,activePage()&&!activePage()->areaScene().empty()&&
+            weatherRuntimeSupported(activePage()->areaScene().game()));
         enableModuleCommand(ID_CloseModel, hasDocument);
         enableModuleCommand(ID_CloseAll, tabs_->GetPageCount() != 0u);
         enableModuleCommand(ID_FrameModel, hasDocument);
