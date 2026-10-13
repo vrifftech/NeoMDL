@@ -231,7 +231,7 @@ void materialFields(Writer& out,const Model& model,const Node& node,const Mesh& 
     }
 }
 
-MeshReconstruction reconstructMesh(Writer& out,const Node& node,const Mesh& mesh) {
+MeshReconstruction reconstructMesh(Writer& out,const Node& node,const Mesh& mesh,bool refine=true) {
     auto vertices=sourceVertices(mesh,node,out);
     const auto* animation=node.animmesh?&*node.animmesh:nullptr;
     if(animation && (mesh.mdxBitmap&2u)==0u)
@@ -314,7 +314,7 @@ MeshReconstruction reconstructMesh(Writer& out,const Node& node,const Mesh& mesh
         const auto& topology=topologies[i];
         ReconstructedSmoothing candidate;
         if(!animation && hasNormals)
-            candidate=reconstructSmoothing(mesh,vertices,topology.sourceVertices,topology.sourceFaces,out.job());
+            candidate=reconstructSmoothing(mesh,vertices,topology.sourceVertices,topology.sourceFaces,out.job(),nullptr,refine);
         else candidate.masks.assign(mesh.faces.size(),animation?1u:0u);
         const auto candidateSphereError=sphereError(mesh,vertices,topology);
         // Source identity is not retained uniquely. A point-join candidate
@@ -449,60 +449,132 @@ double measureSeamNormals(const Model& rebuilt,const Model& source,const CornerR
 
 void reconstructSkinSeamSmoothing(Writer& out,const Model& model) {
     if(std::none_of(model.meshes.begin(),model.meshes.end(),[](const Mesh& mesh){return mesh.skinned;})) return;
+    using Plans=std::map<const Mesh*,MeshReconstruction>;
+    const auto reconstruct=[&](bool refine) {
+        Plans result;
+        for(const auto& mesh:model.meshes) {
+            const auto& node=model.nodes[mesh.nodeIndex];
+            if(!node.lightsaber) result.emplace(&mesh,reconstructMesh(out,node,mesh,refine));
+        }
+        return result;
+    };
     auto& plans=out.meshReconstructions;
-    for(const auto& mesh:model.meshes) {
-        const auto& node=model.nodes[mesh.nodeIndex];
-        if(!node.lightsaber) plans.emplace(&mesh,reconstructMesh(out,node,mesh));
-    }
+    plans=reconstruct(false);
     if(std::none_of(plans.begin(),plans.end(),[](const auto& entry) {
         return entry.second.hasNormals && !entry.second.explicitNormals && !entry.first->animated;
     })) return;
-    // The saved normals can be outputs of ProcessSkinSeams. Generate one
-    // geometric precursor candidate, and let that same producer identify
-    // the corners it changes. Other corners keep their original targets.
     auto frames=model;
     reconstructExportedNodeFrames(frames,out.job());
-    auto smooth=frames;
-    const auto smoothRows=generateGeometry(smooth,model,plans,true,out.job());
-    processAsciiSkinSeams(smooth,out.job());
-    auto candidate=plans;
-    bool changed=false;
-    for(std::size_t index=0;index<model.meshes.size();++index) {
-        const auto& mesh=model.meshes[index];
-        const auto found=candidate.find(&mesh);
-        if(found==candidate.end() || mesh.animated || !found->second.hasNormals || found->second.explicitNormals) continue;
-        auto& plan=found->second;
-        std::vector<Vec3> targets;
-        bool adjusted=false;
-        for(std::size_t face=0;face<mesh.faces.size();++face)
-            for(std::size_t corner=0;corner<3u;++corner) {
-                const auto row=smoothRows[index][face][corner];
-                const auto before=smooth.meshes[index].vertices[row].normal;
-                const auto after=smooth.meshes[index].normalAt(row);
-                const bool seam=!same(before,after);
-                targets.push_back(seam?before:plan.vertices[mesh.faces[face].indices[corner]].normal);
-                adjusted|=seam;
+    const auto precursor=[&](const Plans& source,bool refine,bool splitOpposing=false) {
+        // Saved normals can be outputs of ProcessSkinSeams. Reconstruct
+        // geometric precursors only where that producer changes a corner.
+        auto smooth=frames;
+        auto rows=generateGeometry(smooth,model,source,true,out.job());
+        processAsciiSkinSeams(smooth,out.job());
+        if(splitOpposing) {
+            auto flatPlans=source,hybrid=source;
+            for(auto& entry:flatPlans) {
+                const auto& mesh=*entry.first;
+                auto& plan=entry.second;
+                if(mesh.animated || !plan.hasNormals || plan.explicitNormals) continue;
+                plan.smoothing.masks.assign(mesh.faces.size(),0u);
+                hybrid.at(&mesh).smoothing.masks.assign(mesh.faces.size(),1u);
             }
-        if(adjusted) {
-            const auto& topology=plan.topology;
-            plan.smoothing=reconstructSmoothing(mesh,plan.vertices,topology.sourceVertices,
-                topology.sourceFaces,out.job(),&targets);
-            changed|=plan.smoothing.masks!=plans.at(&mesh).smoothing.masks;
+            auto flat=frames;
+            const auto flatRows=generateGeometry(flat,model,flatPlans,false,out.job());
+            bool split=false;
+            for(std::size_t index=0;index<model.meshes.size();++index) {
+                const auto& mesh=model.meshes[index];
+                const auto found=hybrid.find(&mesh);
+                if(found==hybrid.end() || mesh.animated || !found->second.hasNormals || found->second.explicitNormals) continue;
+                for(std::size_t face=0;face<mesh.faces.size();++face)
+                    for(std::size_t corner=0;corner<3u;++corner) {
+                        out.job().check();
+                        const auto row=rows[index][face][corner];
+                        const auto before=smooth.meshes[index].vertices[row].normal;
+                        if(same(before,smooth.meshes[index].normalAt(row))) continue;
+                        const auto normal=flat.meshes[index].vertices[flatRows[index][face][corner]].normal;
+                        if((normal.x*before.x+normal.y*before.y)+normal.z*before.z<0.0f) {
+                            found->second.smoothing.masks[face]=0u;
+                            split=true;
+                        }
+                    }
+            }
+            if(!split) return source;
+            // Opposing faces can require separate normals before a seam.
+            // This supplies targets only; nonseam corners still constrain
+            // the final masks below, including other joins on these faces.
+            smooth=frames;
+            rows=generateGeometry(smooth,model,hybrid,false,out.job());
+            processAsciiSkinSeams(smooth,out.job());
         }
-    }
+        auto candidate=source;
+        for(std::size_t index=0;index<model.meshes.size();++index) {
+            const auto& mesh=model.meshes[index];
+            const auto found=candidate.find(&mesh);
+            if(found==candidate.end() || mesh.animated || !found->second.hasNormals || found->second.explicitNormals) continue;
+            auto& plan=found->second;
+            std::vector<Vec3> targets;
+            bool adjusted=false;
+            for(std::size_t face=0;face<mesh.faces.size();++face)
+                for(std::size_t corner=0;corner<3u;++corner) {
+                    const auto row=rows[index][face][corner];
+                    const auto before=smooth.meshes[index].vertices[row].normal;
+                    const auto after=smooth.meshes[index].normalAt(row);
+                    const bool seam=!same(before,after);
+                    targets.push_back(seam?before:plan.vertices[mesh.faces[face].indices[corner]].normal);
+                    adjusted|=seam;
+                }
+            if(adjusted) {
+                const auto& topology=plan.topology;
+                plan.smoothing=reconstructSmoothing(mesh,plan.vertices,topology.sourceVertices,
+                    topology.sourceFaces,out.job(),&targets,refine);
+            }
+        }
+        return candidate;
+    };
+    // A closer per-mesh fit can be worse after seams, including through
+    // changed vertex sharing. Retain both searches until after that pass.
+    std::vector<Plans> alternatives;
+    alternatives.push_back(plans);
+    alternatives.push_back(precursor(plans,false));
+    alternatives.push_back(reconstruct(true));
+    alternatives.push_back(precursor(alternatives.back(),true));
+    alternatives.push_back(precursor(alternatives[2],true,true));
     auto baseline=frames;
     const auto baselineRows=generateGeometry(baseline,model,plans,false,out.job());
     processAsciiSkinSeams(baseline,out.job());
-    const auto before=measureSeamNormals(baseline,model,baselineRows,plans);
-    if(changed) {
+    auto best=measureSeamNormals(baseline,model,baselineRows,plans);
+    const auto consider=[&](Plans trial) {
         auto rebuilt=frames;
-        const auto rows=generateGeometry(rebuilt,model,candidate,false,out.job());
+        const auto rows=generateGeometry(rebuilt,model,trial,false,out.job());
         processAsciiSkinSeams(rebuilt,out.job());
         // NodeVertex equality excludes skin influences. Changed smoothing
         // may create new welds, which must still retain every corner's weights.
-        if(preservesSkinChannels(model,rows) &&
-           measureSeamNormals(rebuilt,model,rows,candidate)<before) plans=std::move(candidate);
-    }
+        if(!preservesSkinChannels(model,rows)) return;
+        const auto error=measureSeamNormals(rebuilt,model,rows,trial);
+        if(error<best) {best=error;plans=std::move(trial);}
+    };
+    for(std::size_t i=1u;i<alternatives.size();++i) consider(alternatives[i]);
+    // Precursor fits can help one mesh and hurt another. Select them
+    // individually, scoring the complete ordered seam pass each time.
+    double previous;
+    do {
+        previous=best;
+        for(const auto& mesh:model.meshes)
+            for(const auto& alternative:alternatives) {
+                const auto found=alternative.find(&mesh);
+                if(found==alternative.end()) continue;
+                const auto& current=plans.at(&mesh);
+                const auto& candidate=found->second;
+                if(current.smoothing.masks==candidate.smoothing.masks &&
+                   current.topology.sourceVertices==candidate.topology.sourceVertices &&
+                   current.topology.sourceFaces==candidate.topology.sourceFaces) continue;
+                auto trial=plans;
+                trial.at(&mesh)=candidate;
+                consider(std::move(trial));
+            }
+    } while(best<previous);
 }
 
 ReconstructedMesh writeMesh(Writer& out,const Model& model,const Node& node,const Mesh& mesh) {

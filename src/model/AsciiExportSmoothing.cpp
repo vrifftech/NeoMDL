@@ -91,6 +91,40 @@ struct Smoothing {
         return joined;
     }
 
+    std::vector<std::uint8_t> fitPairs(std::vector<std::uint8_t> joined) const {
+        std::vector<std::pair<std::size_t,std::size_t>> pairs;
+        for(const auto& corner:corners)
+            for(std::size_t a=0;a<corner.contributions.size();++a) {
+                const auto first=corner.contributions[a].relation;
+                if(first==ownFace) continue;
+                for(std::size_t b=a+1u;b<corner.contributions.size();++b) {
+                    const auto second=corner.contributions[b].relation;
+                    if(second!=ownFace) pairs.push_back(std::minmax(first,second));
+                }
+            }
+        std::sort(pairs.begin(),pairs.end());
+        pairs.erase(std::unique(pairs.begin(),pairs.end()),pairs.end());
+        auto current=errors(joined);
+        for(const auto& pair:pairs) {
+            job.check();
+            auto affected=relations[pair.first].corners;
+            const auto& other=relations[pair.second].corners;
+            affected.insert(affected.end(),other.begin(),other.end());
+            std::sort(affected.begin(),affected.end());
+            affected.erase(std::unique(affected.begin(),affected.end()),affected.end());
+            double before{},after{};
+            for(const auto corner:affected) before+=current[corner];
+            joined[pair.first]^=1u;joined[pair.second]^=1u;
+            for(const auto corner:affected) after+=error(corner,joined);
+            if(after<before) {
+                for(const auto corner:affected) current[corner]=error(corner,joined);
+            } else {
+                joined[pair.first]^=1u;joined[pair.second]^=1u;
+            }
+        }
+        return joined;
+    }
+
     std::pair<std::vector<std::uint8_t>,std::vector<std::uint8_t>> normalGroups() const {
         std::vector<std::uint8_t> any(relations.size()),all(relations.size(),1u);
         for(std::size_t relation=0;relation<relations.size();++relation) {
@@ -187,7 +221,7 @@ ReconstructedSmoothing reconstructSmoothing(
     const std::vector<std::size_t>& sourceVertices,
     const std::vector<std::array<std::uint32_t,3>>& sourceFaces,
     const neoshared::bif::JobControl& job,
-    const std::vector<Vec3>* cornerTargets) {
+    const std::vector<Vec3>* cornerTargets,bool refine) {
     Smoothing work{{},{},{},{},job};
     work.faceRelations.resize(sourceFaces.size());
     std::vector<std::vector<std::size_t>> incident(sourceVertices.size());
@@ -275,6 +309,16 @@ ReconstructedSmoothing reconstructSmoothing(
             best=score;joined=std::move(candidate);
             result.masks.assign(sourceFaces.size(),mask);
         }
+    }
+    // Two intersecting relations can improve together even when either
+    // change alone increases error. Refit the encoded intersections until
+    // the actual representable result stops improving.
+    while(refine) {
+        const auto previous=best;
+        consider(work.fit(joined,false));
+        consider(work.fit(joined,true));
+        consider(work.fitPairs(joined));
+        if(!(best<previous)) break;
     }
     result.squaredNormalError=best;
     for(std::size_t corner=0;corner<work.corners.size();++corner) {

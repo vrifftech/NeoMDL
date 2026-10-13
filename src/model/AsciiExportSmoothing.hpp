@@ -16,6 +16,7 @@ ReconstructedSmoothing reconstructSmoothing(
     const std::vector<std::size_t>& sourceVertices,
     const std::vector<std::array<std::uint32_t,3>>& sourceFaces,
     const neoshared::bif::JobControl&,
-    const std::vector<Vec3>* cornerTargets = nullptr);
+    const std::vector<Vec3>* cornerTargets = nullptr,
+    bool refine = true);
 
 } // namespace neomdl::model::ascii_export
