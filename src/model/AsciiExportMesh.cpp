@@ -1,4 +1,5 @@
 #include <model/AsciiExportInternal.hpp>
+#include <model/AsciiModelInternal.hpp>
 #include <model/AsciiExportSmoothing.hpp>
 #include <model/AsciiExportTopology.hpp>
 #include <model/EngineCpuSkin.hpp>
@@ -230,15 +231,8 @@ void materialFields(Writer& out,const Model& model,const Node& node,const Mesh& 
     }
 }
 
-} // namespace
-
-ReconstructedMesh writeMesh(Writer& out,const Model& model,const Node& node,const Mesh& mesh) {
-    materialFields(out,model,node,mesh);
-    if(node.lightsaber) {
-        writeLightsaber(out,node);
-        return {};
-    }
-    const auto vertices=sourceVertices(mesh,node,out);
+MeshReconstruction reconstructMesh(Writer& out,const Node& node,const Mesh& mesh) {
+    auto vertices=sourceVertices(mesh,node,out);
     const auto* animation=node.animmesh?&*node.animmesh:nullptr;
     if(animation && (mesh.mdxBitmap&2u)==0u)
         throw ModelError("Cannot export animmesh "+node.name+": its static UV source pool is unavailable; engine authoring requires tverts even when animtverts is empty");
@@ -247,7 +241,6 @@ ReconstructedMesh writeMesh(Writer& out,const Model& model,const Node& node,cons
     const auto skin=mesh.skinned?decodeEngineFloatSkinChannels(mesh):std::vector<EngineFloatSkinChannels>{};
     const bool hasNormals=!mesh.enginePrelightInput || (mesh.mdxBitmap&0x20u)!=0u;
     const bool hasColors=mesh.hasVertexColors || (mesh.enginePrelightInput && (mesh.mdxBitmap&0x40u)!=0u);
-    ReconstructedMesh result;
     if(mesh.skinned) {
         // Engine NodeVertex equality deliberately excludes skin influences.
         // Splitting a source vertex on weights alone cannot preserve two
@@ -335,12 +328,193 @@ ReconstructedMesh writeMesh(Writer& out,const Model& model,const Node& node,cons
         }
     }
     auto& topology=topologies[selected];
-    result.sourceVertices=std::move(topology.sourceVertices);
-    result.sourceFaces=std::move(topology.sourceFaces);
-    if(topology.changedAdjacency)
+    return {std::move(vertices),{std::move(topology.sourceVertices),std::move(topology.sourceFaces)},
+        std::move(reconstructed),topology.changedAdjacency,hasNormals};
+}
+
+using CornerRows=std::vector<std::vector<std::array<std::int16_t,3>>>;
+
+CornerRows generateGeometry(Model& rebuilt,const Model& source,
+                           const std::map<const Mesh*,MeshReconstruction>& plans,
+                           bool smooth,const neoshared::bif::JobControl& job) {
+    rebuilt.partSourceModel.reset();
+    rebuilt.asciiBuilt=true;
+    CornerRows rows(source.meshes.size());
+    for(std::size_t index=0;index<source.meshes.size();++index) {
+        const auto& mesh=source.meshes[index];
+        const auto found=plans.find(&mesh);
+        if(found==plans.end()) continue; // Saber geometry has its own producer.
+        const auto& plan=found->second;
+        ascii::RawNode raw;
+        raw.node=source.nodes[mesh.nodeIndex];
+        const auto* animation=raw.node.animmesh?&*raw.node.animmesh:nullptr;
+        const bool colors=mesh.hasVertexColors || (mesh.enginePrelightInput && (mesh.mdxBitmap&0x40u));
+        for(const auto vertex:plan.topology.sourceVertices) {
+            const auto& value=plan.vertices[vertex];
+            raw.vertices.push_back(value.position);
+            if(animation && plan.hasNormals) raw.normals.push_back(value.normal);
+            if(colors) raw.colors.push_back({float(value.color[0])/255.0f,
+                float(value.color[1])/255.0f,float(value.color[2])/255.0f});
+            if(mesh.dangly) raw.constraints.push_back(mesh.dangly->constraints.at(vertex));
+            if(animation && !animation->staticTangents.empty())
+                raw.animTangents.push_back(animation->staticTangents.at(vertex));
+        }
+        for(std::size_t channel=0;channel<4u;++channel)
+            if(mesh.mdxBitmap&(2u<<channel))
+                for(const auto& vertex:plan.vertices) {
+                    const auto value=uv(vertex,channel);
+                    raw.texcoords[channel].push_back({value.x,value.y,0.0f});
+                }
+        for(std::size_t face=0;face<mesh.faces.size();++face) {
+            ascii::RawFace value;
+            value.vertices=plan.topology.sourceFaces[face];
+            value.smoothing=smooth && !animation && plan.hasNormals?1u:plan.smoothing.masks[face];
+            value.material=mesh.faces[face].surfaceMaterial;
+            for(auto& channel:value.texcoords)
+                for(std::size_t corner=0;corner<3u;++corner)
+                    channel[corner]=static_cast<std::uint32_t>(mesh.faces[face].indices[corner]);
+            raw.faces.push_back(value);
+        }
+        if(animation) {
+            raw.samplePeriod=animation->samplePeriod;
+            for(std::size_t frame=0;frame<animation->positionSampleCount;++frame)
+                for(const auto vertex:plan.topology.sourceVertices)
+                    raw.animatedVertices.push_back(animation->positionSamples.at(
+                        vertex*animation->positionSampleCount+frame));
+            for(std::size_t frame=0;frame<animation->texcoordSampleCount;++frame)
+                for(std::size_t vertex=0;vertex<plan.vertices.size();++vertex) {
+                    const auto value=animation->texcoordSamples.at(vertex*animation->texcoordSampleCount+frame);
+                    raw.animatedTexcoords.push_back({value.x,value.y,0.0f});
+                }
+        }
+        rows[index]=ascii::generateAsciiMeshGeometry(rebuilt,raw,rebuilt.meshes[index],job);
+    }
+    initializeAsciiSkinSeamPools(rebuilt);
+    return rows;
+}
+
+bool preservesSkinChannels(const Model& model,const CornerRows& rows) {
+    for(std::size_t index=0;index<model.meshes.size();++index) {
+        const auto& mesh=model.meshes[index];
+        if(!mesh.skinned) continue;
+        const auto channels=decodeEngineFloatSkinChannels(mesh);
+        std::map<std::int16_t,std::size_t> first;
+        for(std::size_t face=0;face<mesh.faces.size();++face)
+            for(std::size_t corner=0;corner<3u;++corner) {
+                const auto source=static_cast<std::size_t>(mesh.faces[face].indices[corner]);
+                const auto inserted=first.emplace(rows[index][face][corner],source);
+                const auto& previous=channels[inserted.first->second];
+                const auto& current=channels[source];
+                if(previous.weights!=current.weights || previous.indices!=current.indices) return false;
+            }
+    }
+    return true;
+}
+
+double measureSeamNormals(const Model& rebuilt,const Model& source,const CornerRows& rows,
+                         std::map<const Mesh*,MeshReconstruction>& plans) {
+    double error{};
+    for(std::size_t index=0;index<source.meshes.size();++index) {
+        const auto& mesh=source.meshes[index];
+        const auto found=plans.find(&mesh);
+        if(found==plans.end() || !found->second.hasNormals) continue;
+        auto& plan=found->second;
+        auto& result=plan.smoothing;
+        result.squaredNormalError=0.0;
+        result.changedCornerNormals=0u;
+        result.maxNormalComponentDifference=0.0f;
+        for(std::size_t face=0;face<mesh.faces.size();++face)
+            for(std::size_t corner=0;corner<3u;++corner) {
+                const auto target=plan.vertices[mesh.faces[face].indices[corner]].normal;
+                const auto actual=rebuilt.meshes[index].normalAt(rows[index][face][corner]);
+                const double x=double(actual.x)-target.x,y=double(actual.y)-target.y,z=double(actual.z)-target.z;
+                result.squaredNormalError+=(x*x+y*y)+z*z;
+                const float delta=std::max({std::abs(actual.x-target.x),std::abs(actual.y-target.y),
+                    std::abs(actual.z-target.z)});
+                result.changedCornerNormals+=delta!=0.0f;
+                result.maxNormalComponentDifference=std::max(result.maxNormalComponentDifference,delta);
+            }
+        error+=result.squaredNormalError;
+    }
+    return error;
+}
+
+} // namespace
+
+void reconstructSkinSeamSmoothing(Writer& out,const Model& model) {
+    if(std::none_of(model.meshes.begin(),model.meshes.end(),[](const Mesh& mesh){return mesh.skinned;})) return;
+    auto& plans=out.meshReconstructions;
+    for(const auto& mesh:model.meshes) {
+        const auto& node=model.nodes[mesh.nodeIndex];
+        if(!node.lightsaber) plans.emplace(&mesh,reconstructMesh(out,node,mesh));
+    }
+    // The saved normals can be outputs of ProcessSkinSeams. Generate one
+    // geometric precursor candidate, and let that same producer identify
+    // the corners it changes. Other corners keep their original targets.
+    auto frames=model;
+    reconstructExportedNodeFrames(frames,out.job());
+    auto smooth=frames;
+    const auto smoothRows=generateGeometry(smooth,model,plans,true,out.job());
+    processAsciiSkinSeams(smooth,out.job());
+    auto candidate=plans;
+    bool changed=false;
+    for(std::size_t index=0;index<model.meshes.size();++index) {
+        const auto& mesh=model.meshes[index];
+        const auto found=candidate.find(&mesh);
+        if(found==candidate.end() || mesh.animated || !found->second.hasNormals) continue;
+        auto& plan=found->second;
+        std::vector<Vec3> targets;
+        bool adjusted=false;
+        for(std::size_t face=0;face<mesh.faces.size();++face)
+            for(std::size_t corner=0;corner<3u;++corner) {
+                const auto row=smoothRows[index][face][corner];
+                const auto before=smooth.meshes[index].vertices[row].normal;
+                const auto after=smooth.meshes[index].normalAt(row);
+                const bool seam=!same(before,after);
+                targets.push_back(seam?before:plan.vertices[mesh.faces[face].indices[corner]].normal);
+                adjusted|=seam;
+            }
+        if(adjusted) {
+            const auto& topology=plan.topology;
+            plan.smoothing=reconstructSmoothing(mesh,plan.vertices,topology.sourceVertices,
+                topology.sourceFaces,out.job(),&targets);
+            changed|=plan.smoothing.masks!=plans.at(&mesh).smoothing.masks;
+        }
+    }
+    auto baseline=frames;
+    const auto baselineRows=generateGeometry(baseline,model,plans,false,out.job());
+    processAsciiSkinSeams(baseline,out.job());
+    const auto before=measureSeamNormals(baseline,model,baselineRows,plans);
+    if(changed) {
+        auto rebuilt=frames;
+        const auto rows=generateGeometry(rebuilt,model,candidate,false,out.job());
+        processAsciiSkinSeams(rebuilt,out.job());
+        // NodeVertex equality excludes skin influences. Changed smoothing
+        // may create new welds, which must still retain every corner's weights.
+        if(preservesSkinChannels(model,rows) &&
+           measureSeamNormals(rebuilt,model,rows,candidate)<before) plans=std::move(candidate);
+    }
+}
+
+ReconstructedMesh writeMesh(Writer& out,const Model& model,const Node& node,const Mesh& mesh) {
+    materialFields(out,model,node,mesh);
+    if(node.lightsaber) {
+        writeLightsaber(out,node);
+        return {};
+    }
+    const auto cached=out.meshReconstructions.find(&mesh);
+    auto reconstruction=cached==out.meshReconstructions.end()?reconstructMesh(out,node,mesh):
+        std::move(cached->second);
+    const auto& vertices=reconstruction.vertices;
+    auto& result=reconstruction.topology;
+    const auto& reconstructed=reconstruction.smoothing;
+    const auto* animation=node.animmesh?&*node.animmesh:nullptr;
+    const bool hasNormals=reconstruction.hasNormals;
+    const bool hasColors=mesh.hasVertexColors || (mesh.enginePrelightInput && (mesh.mdxBitmap&0x40u)!=0u);
+    if(reconstruction.changedAdjacency)
         out.warning("Mesh "+node.name+": source edge connectivity cannot reproduce "+
-            std::to_string(topology.changedAdjacency)+" stored face-neighbour entries");
-    auto smoothing=std::move(reconstructed.masks);
+            std::to_string(reconstruction.changedAdjacency)+" stored face-neighbour entries");
+    const auto& smoothing=reconstructed.masks;
     if(reconstructed.changedCornerNormals)
         out.warning("Mesh "+node.name+": reconstructed smoothing changes "+
             std::to_string(reconstructed.changedCornerNormals)+" corner normals; maximum component difference "+
@@ -451,7 +625,7 @@ ReconstructedMesh writeMesh(Writer& out,const Model& model,const Node& node,cons
         if(different)
             out.warning("Mesh "+node.name+": compiled dangly rest positions differ from its drawing positions; the ASCII builder derives its rest pool from verts");
     }
-    return result;
+    return std::move(result);
 }
 
 } // namespace neomdl::model::ascii_export

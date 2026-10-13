@@ -1,8 +1,24 @@
 #pragma once
 
 #include <model/AsciiExport.hpp>
+#include <model/AsciiExportSmoothing.hpp>
+
+#include <map>
 
 namespace neomdl::model::ascii_export {
+
+struct ReconstructedMesh {
+    std::vector<std::size_t> sourceVertices;
+    std::vector<std::array<std::uint32_t,3>> sourceFaces;
+};
+
+struct MeshReconstruction {
+    std::vector<Vertex> vertices;
+    ReconstructedMesh topology;
+    ReconstructedSmoothing smoothing;
+    std::size_t changedAdjacency{};
+    bool hasNormals{};
+};
 
 class Writer {
 public:
@@ -17,6 +33,7 @@ public:
     GameVersion game() const noexcept { return game_; }
     const neoshared::bif::JobControl& job() const noexcept { return job_; }
     AsciiExportResult finish();
+    std::map<const Mesh*,MeshReconstruction> meshReconstructions;
 private:
     GameVersion game_;
     const neoshared::bif::JobControl& job_;
@@ -24,10 +41,8 @@ private:
     AsciiExportResult result_;
 };
 
-struct ReconstructedMesh {
-    std::vector<std::size_t> sourceVertices;
-    std::vector<std::array<std::uint32_t,3>> sourceFaces;
-};
+void reconstructSkinSeamSmoothing(Writer&, const Model&);
+void reconstructExportedNodeFrames(Model&, const neoshared::bif::JobControl&);
 
 void writeControllers(Writer&, const Node&, std::uint16_t fieldFlags);
 void writeNodeFields(Writer&, const Model&, const Node&);

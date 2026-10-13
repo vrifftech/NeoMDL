@@ -1,5 +1,6 @@
 #include <model/Model.hpp>
 #include <model/AsciiExport.hpp>
+#include <model/AsciiModel.hpp>
 #include <model/PackedExport.hpp>
 #include <core/ModelDocument.hpp>
 #include <neoshared/ResourceDocument.hpp>
@@ -56,6 +57,9 @@ int main(int argc, char** argv) {
             // Use the same resource-aware construction as the editor: TXI
             // bump materials change the authored MDX channel layout.
             document.openFile(paths[0],{},{},game);
+            // converttobinary spawns before Write (K2 0x72f2c9..0x72f34e).
+            // NewCAurObject runs seams after Part::PostProcess (0x6ede8f).
+            neomdl::model::processAsciiSkinSeams(document.model());
             model=document.sourceModel();
         } else model=neomdl::model::readModelFile(paths[0], mdx, {}, game);
         std::cout << neomdl::model::modelSummary(model) << '\n';

@@ -1,4 +1,5 @@
 #include <model/AsciiExportInternal.hpp>
+#include <model/AsciiModelInternal.hpp>
 
 #include <algorithm>
 #include <array>
@@ -275,6 +276,28 @@ void writeTree(Writer& writer,const Model& model,const std::vector<Node>& nodes,
 }
 
 } // namespace
+
+void reconstructExportedNodeFrames(Model& model,const neoshared::bif::JobControl& job) {
+    for(auto& node:model.nodes) {
+        Writer writer(model.game,job);
+        headerTransforms(writer,node);
+        writeControllers(writer,node,node.flags);
+        const auto text=writer.finish().text;
+        const std::vector<std::uint8_t> bytes(text.begin(),text.end());
+        ascii::Reader reader(bytes,model.game,node.name,job);
+        ascii::RawNode raw;
+        raw.node.flags=node.flags;
+        raw.node.name=node.name;
+        raw.modelClassification=model.classification;
+        ascii::initializeNode(raw,model.game);
+        ascii::Line line;
+        while(reader.next(line))
+            ascii::parseControllerField(line,reader,raw,model.game);
+        node.position=raw.node.position;
+        node.orientation=raw.node.orientation;
+    }
+}
+
 } // namespace neomdl::model::ascii_export
 
 namespace neomdl::model {
@@ -333,6 +356,7 @@ AsciiExportResult exportAsciiModel(const Model& model,const neoshared::bif::JobC
     writer.line("ignorefog "+std::to_string(model.fog?0:1));
     writer.line("setanimationscale "+writer.scalar(model.animationScale));
     writer.line("beginmodelgeom "+modelTarget);
+    reconstructSkinSeamSmoothing(writer,model);
     writeTree(writer,model,model.nodes,false);
     if(model.engineBounds.valid) {
         writer.line("bmin "+writer.vector(model.engineBounds.minimum));

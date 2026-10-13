@@ -13,8 +13,8 @@ struct ReconstructedTopology {
 // Each compiled row supplies the attributes that ASCII indexes through verts
 // (weights, constraints and animation samples). Normals and UVs are independent
 // for ordinary meshes; animmesh's explicit source normals belong in this key.
-// Candidates retain edges alone, then also point joins supported by a compiled
-// row or equal retained normals. The caller compares reconstructed field errors.
+// Candidates retain edges alone, then add point joins sharing a compiled row,
+// equal normals, or only source attributes. The caller compares rebuilt fields.
 std::vector<ReconstructedTopology> reconstructTopologies(
     const Mesh& mesh,
     const std::vector<Vertex>& compiledVertices,

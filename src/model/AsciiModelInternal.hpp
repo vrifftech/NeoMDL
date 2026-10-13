@@ -182,6 +182,10 @@ void applyAsciiLightmap(RawNode& raw, Reader& reader);
 void postProcessSkinNode(RawNode& raw,const neoshared::bif::JobControl& job);
 void buildMesh(Model& model, RawNode& raw, std::size_t nodeIndex,
                const neoshared::bif::JobControl& job);
+// Reuse the mesh producers for exporter seam evaluation. Returns
+// authored face-corner rows before duplicate-index faces are removed.
+std::vector<std::array<std::int16_t,3>> generateAsciiMeshGeometry(
+    Model& model, RawNode& raw, Mesh& mesh, const neoshared::bif::JobControl& job);
 void finalizeNodeTree(Model& model, std::vector<RawNode>& raw, Animation* animation);
 void buildSkin(Model& model, RawNode& raw, Mesh& mesh,
                const std::vector<std::size_t>& sources,

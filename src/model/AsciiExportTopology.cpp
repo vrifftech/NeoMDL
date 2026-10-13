@@ -195,23 +195,26 @@ std::vector<ReconstructedTopology> reconstructTopologies(
     for(const auto& corners:compiledCorners) proposeJoins(corners);
     appendCandidate();
 
-    if(!mesh.enginePrelightInput || (mesh.mdxBitmap&0x20u)!=0u) {
-        // UV seams can give the same source point distinct compiled rows.
-        // Retained normals and source-indexed payloads constrain these joins;
-        // equal positions on their own never generate a candidate.
-        std::map<std::vector<std::uint32_t>,std::vector<std::size_t>> normalCorners;
+    for(const bool requireNormal:{true,false}) {
+        if(requireNormal && mesh.enginePrelightInput && (mesh.mdxBitmap&0x20u)==0u) continue;
+        // UV seams and different smoothing masks can split one source point
+        // into distinct compiled rows. First retain equal normals, then allow
+        // hard edges; the caller checks rebuilt normals and sphere together.
+        std::map<std::vector<std::uint32_t>,std::vector<std::size_t>> matchingCorners;
         for(std::size_t i=0;i<compiledVertices.size();++i) {
             job.check();
             if(compiledCorners[i].empty()) continue;
             const auto& vertex=compiledVertices[i];
             auto key=sourceAttributes.at(i);
-            for(const auto value:{vertex.position.x,vertex.position.y,vertex.position.z,
-                                  vertex.normal.x,vertex.normal.y,vertex.normal.z})
+            for(const auto value:{vertex.position.x,vertex.position.y,vertex.position.z})
                 key.push_back(bits(value));
-            auto& corners=normalCorners[std::move(key)];
+            if(requireNormal)
+                for(const auto value:{vertex.normal.x,vertex.normal.y,vertex.normal.z})
+                    key.push_back(bits(value));
+            auto& corners=matchingCorners[std::move(key)];
             corners.insert(corners.end(),compiledCorners[i].begin(),compiledCorners[i].end());
         }
-        for(const auto& entry:normalCorners) proposeJoins(entry.second);
+        for(const auto& entry:matchingCorners) proposeJoins(entry.second);
         appendCandidate();
     }
     return result;

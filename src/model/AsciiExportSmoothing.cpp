@@ -186,7 +186,8 @@ ReconstructedSmoothing reconstructSmoothing(
     const Mesh& mesh,const std::vector<Vertex>& vertices,
     const std::vector<std::size_t>& sourceVertices,
     const std::vector<std::array<std::uint32_t,3>>& sourceFaces,
-    const neoshared::bif::JobControl& job) {
+    const neoshared::bif::JobControl& job,
+    const std::vector<Vec3>* cornerTargets) {
     Smoothing work{{},{},{},{},job};
     work.faceRelations.resize(sourceFaces.size());
     std::vector<std::vector<std::size_t>> incident(sourceVertices.size());
@@ -219,7 +220,9 @@ ReconstructedSmoothing reconstructSmoothing(
     for(std::size_t face=0;face<sourceFaces.size();++face)
         for(std::size_t corner=0;corner<3u;++corner) {
             const auto index=work.corners.size();
-            Corner value{vertices[static_cast<std::size_t>(mesh.faces[face].indices[corner])].normal,sourceFaces[face][corner],{}};
+            const auto target=cornerTargets?(*cornerTargets)[face*3u+corner]:
+                vertices[static_cast<std::size_t>(mesh.faces[face].indices[corner])].normal;
+            Corner value{target,sourceFaces[face][corner],{}};
             for(const auto candidate:incident[sourceFaces[face][corner]]) {
                 const auto relation=candidate==face?ownFace:
                     relationIndices.at(std::minmax(face,candidate));
@@ -248,13 +251,23 @@ ReconstructedSmoothing reconstructSmoothing(
     const auto considerGroup=[&](const std::vector<std::uint8_t>& group) {
         consider(group);
         const auto added=work.fit(group,false),removed=work.fit(group,true);
-        if(added!=group) consider(added);
-        if(removed!=group) consider(removed);
+        if(added!=group) {
+            consider(added);
+            consider(work.fit(added,true));
+        }
+        if(removed!=group) {
+            consider(removed);
+            consider(work.fit(removed,false));
+        }
     };
     considerGroup(groups.first);
     if(groups.second!=groups.first) considerGroup(groups.second);
-    consider(work.fit(std::vector<std::uint8_t>(work.relations.size()),false));
-    consider(work.fit(std::vector<std::uint8_t>(work.relations.size(),1u),true));
+    const auto added=work.fit(std::vector<std::uint8_t>(work.relations.size()),false);
+    consider(added);
+    consider(work.fit(added,true));
+    const auto removed=work.fit(std::vector<std::uint8_t>(work.relations.size(),1u),true);
+    consider(removed);
+    consider(work.fit(removed,false));
     for(const auto mask:{0u,1u}) {
         std::vector<std::uint8_t> candidate(work.relations.size(),mask);
         const auto score=work.score(candidate);

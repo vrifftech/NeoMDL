@@ -423,7 +423,8 @@ std::vector<GeneratedVertex> generateAnimVertices(RawNode& raw,Mesh& mesh,
 
 std::vector<GeneratedVertex> generateVertices(RawNode& raw,Mesh& mesh,
         const std::vector<std::array<std::size_t,3>>& normals,
-        const neoshared::bif::JobControl& job) {
+        const neoshared::bif::JobControl& job,
+        std::vector<std::array<std::int16_t,3>>* authoredCorners=nullptr) {
     // K1 0x5c358c, K2 0x6e1640; NodeVertex equality K1 0x5c8cac,
     // equal(Vector) 0x664744 compares all three components exactly, including
     // the third authoring UV coordinate that is omitted from final MDX rows.
@@ -452,6 +453,7 @@ std::vector<GeneratedVertex> generateVertices(RawNode& raw,Mesh& mesh,
             if(found==vertices.end()) vertices.push_back(vertex);
             face.indices[corner]=static_cast<std::int16_t>(index);
         }
+        if(authoredCorners) authoredCorners->push_back(face.indices);
     }
     // InternalGenVertices removes duplicate-index faces backwards, except AABB.
     // BuildNeighborLists subsequently continues to index the raw face array.
@@ -693,6 +695,44 @@ void postProcessSkinNode(RawNode& raw,const neoshared::bif::JobControl& job) {
 
     if(static_cast<std::int16_t>(raw.mesh->enginePrelightVertexCount)<=0)
         raw.processedSkinNormals=processVertices(raw,*raw.mesh,job);
+}
+
+std::vector<std::array<std::int16_t,3>> generateAsciiMeshGeometry(
+        Model& model,RawNode& raw,Mesh& mesh,const neoshared::bif::JobControl& job) {
+    const bool animated=raw.node.animmesh.has_value();
+    const auto normals=animated?processAnimVertices(raw,mesh,job):processVertices(raw,mesh,job);
+    std::vector<std::array<std::int16_t,3>> corners;
+    corners.reserve(raw.faces.size());
+    const auto generated=animated?generateAnimVertices(raw,mesh,normals,job):
+        generateVertices(raw,mesh,normals,job,&corners);
+    if(animated)
+        for(const auto& face:mesh.faces) corners.push_back(face.indices);
+    mesh.enginePrelightVertexCount=static_cast<std::uint16_t>(generated.size());
+    mesh.vertices.clear();
+    mesh.vertices.reserve(mesh.enginePrelightVertexCount);
+    for(std::size_t i=0;i<mesh.enginePrelightVertexCount;++i) {
+        const auto& source=generated[i];
+        Vertex vertex;vertex.position=source.position;vertex.normal=source.normal;
+        mesh.vertices.push_back(vertex);
+    }
+    mesh.asciiNormalPool.reset();
+    if(animated) {
+        mesh.animated=true;
+        mesh.asciiMdxAllocation.reset();
+        mesh.mdxRowSize=0u;
+        // The animmesh producer publishes its static N+1 seam row only
+        // when faces exist. Give that publication a real private ledger entry.
+        if(!raw.faces.empty()) {
+            mesh.mdxRowSize=24u;
+            for(const auto& texcoords:raw.texcoords)
+                if(!texcoords.empty()) mesh.mdxRowSize+=8u;
+            if(!raw.colors.empty()) mesh.mdxRowSize+=4u;
+            mesh.asciiMdxAllocation=model.asciiMdxAllocations.size();
+            model.asciiMdxAllocations.push_back({mesh.enginePrelightVertexCount,
+                mesh.mdxRowSize,{},false,std::make_shared<Mesh>(mesh)});
+        }
+    }
+    return corners;
 }
 
 void buildMesh(Model& model,RawNode& raw,std::size_t nodeIndex,
