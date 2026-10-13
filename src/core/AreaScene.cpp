@@ -1232,7 +1232,6 @@ std::vector<LightRoomId> AreaScene::ownerRooms(std::uint16_t classification,
     }
     model::Vec3 local{};
     if ((classification & model::kK2ModelCharacter) == 0u) {
-        require(localBounds.valid, "non-character owner requires local bounds");
         local = {(localBounds.minimum.x+localBounds.maximum.x)*0.5f,
                  (localBounds.minimum.y+localBounds.maximum.y)*0.5f,
                  (localBounds.minimum.z+localBounds.maximum.z)*0.5f};

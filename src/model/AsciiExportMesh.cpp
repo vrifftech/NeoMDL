@@ -9,6 +9,10 @@
 #include <cmath>
 #include <cstring>
 #include <map>
+#include <limits>
+#include <numeric>
+#include <set>
+#include <tuple>
 
 namespace neomdl::model::ascii_export {
 namespace {
@@ -183,7 +187,7 @@ void diagnoseTopology(Writer& out,const Node& node,const Mesh& mesh) {
     std::sort(sortedAuthored.begin(),sortedAuthored.end());
     std::sort(sortedRendered.begin(),sortedRendered.end());
     if(sortedAuthored==sortedRendered)
-        out.warning("Mesh "+node.name+": engine triangle draw order differs from MDL face order; ASCII retains MDL face order");
+        out.warning("Mesh "+node.name+": engine triangle draw order differs from MDL face order; ASCII retains the MDL triangles");
     else
         out.warning("Mesh "+node.name+": engine draw geometry differs from the MDL face/query stream; ASCII exports the MDL faces and does not replace them with draw triangles");
 }
@@ -306,6 +310,45 @@ MeshReconstruction reconstructMesh(Writer& out,const Node& node,const Mesh& mesh
         for(const auto index:face.indices)
             if(index<0)
                 throw ModelError("Cannot export mesh "+node.name+": an engine face has a negative vertex index");
+    if(mesh.asciiNormalPositionSource) {
+        const auto& retained=*mesh.asciiNormalPositionSource;
+        using Key=std::pair<std::uint32_t,std::vector<std::uint32_t>>;
+        std::map<Key,std::size_t> sources;
+        std::vector<std::array<Key,3>> cornerKeys(mesh.faces.size());
+        for(std::size_t face=0;face<mesh.faces.size();++face)
+            for(std::size_t corner=0;corner<3u;++corner) {
+                const auto row=static_cast<std::size_t>(mesh.faces[face].indices[corner]);
+                auto attributes=sourceAttributes[row];
+                const auto p=vertices[row].position;
+                for(const auto value:{p.x,p.y,p.z}) attributes.push_back(rawBits(value));
+                Key key{retained.faces[retained.authoredFaceIndices[face]][corner],std::move(attributes)};
+                sources.emplace(key,row);cornerKeys[face][corner]=std::move(key);
+            }
+        MeshReconstruction result;
+        result.vertices=std::move(vertices);result.hasNormals=hasNormals;result.explicitNormals=explicitNormals;
+        for(auto& source:sources) {
+            const auto row=source.second;
+            source.second=result.topology.sourceVertices.size();
+            result.topology.sourceVertices.push_back(row);
+            const auto p=result.vertices[row].position;
+            result.sourcePositions.push_back(p);
+            auto high=retained.positions[source.first.first];
+            const std::array<float,3> low{{p.x,p.y,p.z}};
+            for(std::size_t axis=0;axis<3u;++axis)
+                if(rawBits(static_cast<float>(high[axis]))!=rawBits(low[axis])) high[axis]=low[axis];
+            result.preciseSourcePositions.push_back(high);
+        }
+        for(std::size_t face=0;face<mesh.faces.size();++face) {
+            std::array<std::uint32_t,3> indices;
+            for(std::size_t corner=0;corner<3u;++corner)
+                indices[corner]=static_cast<std::uint32_t>(sources.at(cornerKeys[face][corner]));
+            result.topology.sourceFaces.push_back(indices);
+            result.smoothing.masks.push_back(retained.faceSmoothing[retained.authoredFaceIndices[face]]);
+            result.faceOrder.push_back(face);result.cornerRotations.push_back(0u);
+        }
+        if(mesh.asciiTangentSource) result.preciseFaceTexcoords=mesh.asciiTangentSource->faceTexcoords64;
+        return result;
+    }
     auto topologies=reconstructTopologies(mesh,vertices,sourceAttributes,out.job());
     std::size_t selected{};
     ReconstructedSmoothing reconstructed;
@@ -330,12 +373,51 @@ MeshReconstruction reconstructMesh(Writer& out,const Node& node,const Mesh& mesh
         }
     }
     auto& topology=topologies[selected];
+    std::vector<std::size_t> faceOrder(mesh.faces.size());
+    std::iota(faceOrder.begin(),faceOrder.end(),std::size_t{});
+    std::vector<Vec3> positions;
+    for(const auto vertex:topology.sourceVertices) positions.push_back(vertices[vertex].position);
     return {std::move(vertices),{std::move(topology.sourceVertices),std::move(topology.sourceFaces)},
         std::move(reconstructed),topology.changedAdjacency,hasNormals,explicitNormals,
-        std::vector<std::uint8_t>(mesh.faces.size(),0u)};
+        std::vector<std::uint8_t>(mesh.faces.size(),0u),std::move(faceOrder),std::move(positions),
+        mesh.asciiTangentSource?mesh.asciiTangentSource->faceTexcoords64:
+            std::vector<std::array<std::array<double,2>,3>>{}, {}};
 }
 
 using CornerRows=std::vector<std::vector<std::array<std::int16_t,3>>>;
+
+struct PreciseUvPool {
+    std::vector<std::array<double,2>> values;
+    std::vector<std::array<std::uint32_t,3>> indices;
+};
+
+PreciseUvPool preciseUvPool(const Mesh& mesh,const MeshReconstruction& plan) {
+    PreciseUvPool result;
+    if(plan.preciseFaceTexcoords.empty()) return result;
+    for(const auto& vertex:plan.vertices)
+        result.values.push_back({vertex.texcoord0.x,vertex.texcoord0.y});
+    const auto words=[](const std::array<double,2>& value) {
+        std::array<std::uint64_t,2> result;
+        std::memcpy(result.data(),value.data(),sizeof(result));
+        return result;
+    };
+    std::map<std::array<std::uint64_t,2>,std::uint32_t> additions;
+    for(std::size_t face=0;face<mesh.faces.size();++face) {
+        std::array<std::uint32_t,3> indices;
+        for(std::size_t corner=0;corner<3u;++corner) {
+            const auto original=static_cast<std::uint32_t>(mesh.faces[face].indices[corner]);
+            const auto& value=plan.preciseFaceTexcoords[face][corner];
+            if(words(value)==words(result.values[original])) indices[corner]=original;
+            else {
+                const auto inserted=additions.emplace(words(value),static_cast<std::uint32_t>(result.values.size()));
+                if(inserted.second) result.values.push_back(value);
+                indices[corner]=inserted.first->second;
+            }
+        }
+        result.indices.push_back(indices);
+    }
+    return result;
+}
 
 CornerRows generateGeometry(Model& rebuilt,const Model& source,
                            const std::map<const Mesh*,MeshReconstruction>& plans,
@@ -348,14 +430,20 @@ CornerRows generateGeometry(Model& rebuilt,const Model& source,
         const auto found=plans.find(&mesh);
         if(found==plans.end()) continue; // Saber geometry has its own producer.
         const auto& plan=found->second;
+        const auto precise=preciseUvPool(mesh,plan);
         ascii::RawNode raw;
         rebuilt.meshes[index].explicitNormals=plan.explicitNormals;
         raw.node=source.nodes[mesh.nodeIndex];
+        if(!plan.preciseSourcePositions.empty()) {
+            raw.normalPositionPrecision=64u;
+            raw.normalPositions64=plan.preciseSourcePositions;
+        }
         const auto* animation=raw.node.animmesh?&*raw.node.animmesh:nullptr;
         const bool colors=mesh.hasVertexColors || (mesh.enginePrelightInput && (mesh.mdxBitmap&0x40u));
-        for(const auto vertex:plan.topology.sourceVertices) {
+        for(std::size_t source=0;source<plan.topology.sourceVertices.size();++source) {
+            const auto vertex=plan.topology.sourceVertices[source];
             const auto& value=plan.vertices[vertex];
-            raw.vertices.push_back(value.position);
+            raw.vertices.push_back(plan.sourcePositions[source]);
             if(animation && plan.hasNormals) raw.normals.push_back(value.normal);
             if(colors) raw.colors.push_back({float(value.color[0])/255.0f,
                 float(value.color[1])/255.0f,float(value.color[2])/255.0f});
@@ -371,17 +459,27 @@ CornerRows generateGeometry(Model& rebuilt,const Model& source,
                     const auto value=uv(vertex,channel);
                     raw.texcoords[channel].push_back({value.x,value.y,0.0f});
                 }
-        for(std::size_t face=0;face<mesh.faces.size();++face) {
+        if(!precise.values.empty()) {
+            raw.tangentUvPrecision=64u;
+            raw.tangentTexcoords64=precise.values;
+            raw.texcoords[0].clear();
+            for(const auto& value:precise.values)
+                raw.texcoords[0].push_back({static_cast<float>(value[0]),static_cast<float>(value[1]),0.0f});
+        }
+        for(const auto face:plan.faceOrder) {
             ascii::RawFace value;
             for(std::size_t corner=0;corner<3u;++corner)
                 value.vertices[corner]=plan.topology.sourceFaces[face][plan.sourceCorner(face,corner)];
-            value.smoothing=smooth && !animation && plan.hasNormals?1u:plan.smoothing.masks[face];
+            value.smoothing=smooth && !animation && plan.hasNormals && !mesh.asciiNormalPositionSource?1u:plan.smoothing.masks[face];
             value.material=mesh.faces[face].surfaceMaterial;
             for(auto& channel:value.texcoords)
                 for(std::size_t corner=0;corner<3u;++corner)
                     channel[corner]=static_cast<std::uint32_t>(
                         mesh.faces[face].indices[plan.sourceCorner(face,corner)]);
             if(plan.explicitNormals) raw.normalIndices.push_back(value.texcoords[0]);
+            if(!precise.values.empty())
+                for(std::size_t corner=0;corner<3u;++corner)
+                    value.texcoords[0][corner]=precise.indices[face][plan.sourceCorner(face,corner)];
             raw.faces.push_back(value);
         }
         if(animation) {
@@ -396,11 +494,12 @@ CornerRows generateGeometry(Model& rebuilt,const Model& source,
                     raw.animatedTexcoords.push_back({value.x,value.y,0.0f});
                 }
         }
-        rows[index]=ascii::generateAsciiMeshGeometry(rebuilt,raw,rebuilt.meshes[index],job);
-        for(std::size_t face=0;face<rows[index].size();++face) {
-            const auto generated=rows[index][face];
+        const auto generated=ascii::generateAsciiMeshGeometry(rebuilt,raw,rebuilt.meshes[index],job);
+        rows[index].resize(generated.size());
+        for(std::size_t output=0;output<generated.size();++output) {
+            const auto face=plan.faceOrder[output];
             for(std::size_t corner=0;corner<3u;++corner)
-                rows[index][face][plan.sourceCorner(face,corner)]=generated[corner];
+                rows[index][face][plan.sourceCorner(face,corner)]=generated[output][corner];
         }
     }
     initializeAsciiSkinSeamPools(rebuilt);
@@ -479,9 +578,9 @@ double measureTangentBasis(Model& rebuilt,const Model& source,const CornerRows& 
     return error;
 }
 
-void reconstructCyclicCorners(Writer& out,const Model& model,const Model& frames,
-                              std::map<const Mesh*,MeshReconstruction>& plans,
-                              const Mesh* changedMesh=nullptr) {
+void reconstructCyclicCornerPass(Writer& out,const Model& model,const Model& frames,
+                                std::map<const Mesh*,MeshReconstruction>& plans,
+                                const Mesh* changedMesh,bool axisTangents,bool neighbors) {
     auto current=frames;
     auto rows=generateGeometry(current,model,plans,false,out.job());
     auto best=measureTangentBasis(current,model,rows,plans,out.job());
@@ -489,18 +588,23 @@ void reconstructCyclicCorners(Writer& out,const Model& model,const Model& frames
     best+=measureSeamNormals(current,model,rows,plans);
     std::vector<std::pair<const Mesh*,std::size_t>> candidates;
     std::vector<std::array<std::size_t,2>> pairs;
+    std::map<const Mesh*,std::vector<std::array<std::size_t,2>>> compensatingPairs;
     for(std::size_t index=0;index<model.meshes.size();++index) {
         const auto& mesh=model.meshes[index];
         if(changedMesh && (changedMesh->render?!mesh.render:&mesh!=changedMesh)) continue;
         const auto found=plans.find(&mesh);
         if(found==plans.end() || mesh.animated || !found->second.hasNormals ||
-           found->second.explicitNormals) continue;
+           found->second.explicitNormals || mesh.asciiNormalPositionSource) continue;
         const auto& plan=found->second;
         std::vector<bool> cancelled(plan.topology.sourceVertices.size(),false);
         std::vector<bool> singular(mesh.faces.size(),false);
         std::vector<Vec3> cancelledTangents;
         const auto cancellationOutput=[](Vec3 normal) {
             return same(normal,{}) || same(normal,{1.0f,0.0f,0.0f});
+        };
+        const auto axisAligned=[](Vec3 value) {
+            return (value.x==0.0f && value.y==0.0f) ||
+                (value.x==0.0f && value.z==0.0f) || (value.y==0.0f && value.z==0.0f);
         };
         const bool tangents=(mesh.mdxBitmap&0x80u) && !mesh.dangly;
         for(std::size_t face=0;face<mesh.faces.size();++face) {
@@ -509,7 +613,8 @@ void reconstructCyclicCorners(Writer& out,const Model& model,const Model& frames
                 const auto actual=current.meshes[index].normalAt(rows[index][face][corner]);
                 const auto target=plan.vertices[mesh.faces[face].indices[corner]].normal;
                 const auto source=plan.topology.sourceFaces[face][corner];
-                if(!same(actual,target) && (cancellationOutput(actual) || cancellationOutput(target)))
+                if(!axisTangents && !same(actual,target) &&
+                   (cancellationOutput(actual) || cancellationOutput(target)))
                     cancelled[source]=true;
                 if(tangents) {
                     const auto& generated=current.meshes[index].vertices[rows[index][face][corner]];
@@ -517,7 +622,8 @@ void reconstructCyclicCorners(Writer& out,const Model& model,const Model& frames
                     const auto inspect=[&](Vec3 value,Vec3 wanted) {
                         if(same(value,wanted)) return;
                         changedBasis=true;
-                        if(cancellationOutput(value) || cancellationOutput(wanted))
+                        const bool original=cancellationOutput(value) || cancellationOutput(wanted);
+                        if(axisTangents ? !original && axisAligned(value) && axisAligned(wanted) : original)
                             cancelledTangents.push_back(generated.position);
                     };
                     inspect(generated.tangentBasis.bitangent,retained.bitangent);
@@ -525,7 +631,7 @@ void reconstructCyclicCorners(Writer& out,const Model& model,const Model& frames
                     inspect(generated.tangentBasis.normal,retained.normal);
                 }
             }
-            if(changedBasis) {
+            if(changedBasis && !axisTangents) {
                 const auto texcoord=[&](std::size_t corner) {
                     return uv(plan.vertices[mesh.faces[face].indices[plan.sourceCorner(face,corner)]],0u);
                 };
@@ -540,9 +646,11 @@ void reconstructCyclicCorners(Writer& out,const Model& model,const Model& frames
             if(std::any_of(cancelledTangents.begin(),cancelledTangents.end(),
                 [&](Vec3 other){return same(point,other);})) cancelled[source]=true;
         }
-        std::vector<std::vector<std::size_t>> incident(cancelled.size());
+        const auto firstCandidate=candidates.size();
+        std::vector<std::vector<std::size_t>> incident(cancelled.size()),allIncident(cancelled.size());
         for(std::size_t face=0;face<mesh.faces.size();++face) {
             const auto& vertices=plan.topology.sourceFaces[face];
+            if(neighbors) for(const auto vertex:vertices) allIncident[vertex].push_back(face);
             if(singular[face] || std::any_of(vertices.begin(),vertices.end(),
                 [&](auto vertex){return cancelled[vertex];})) {
                 for(const auto vertex:vertices)
@@ -550,10 +658,31 @@ void reconstructCyclicCorners(Writer& out,const Model& model,const Model& frames
                 candidates.emplace_back(&mesh,face);
             }
         }
+        const auto firstPair=pairs.size();
         for(const auto& faces:incident)
             for(std::size_t first=0;first<faces.size();++first)
                 for(std::size_t second=first+1u;second<faces.size();++second)
                     if(faces[first]!=faces[second]) pairs.push_back({faces[first],faces[second]});
+        if(!neighbors || firstCandidate==candidates.size()) continue;
+        // A changed cyclic start also affects the face's other source
+        // normals. An incident face can compensate for those changes even
+        // when none of its own corners has a cancelled output.
+        auto& neighborPairs=compensatingPairs[&mesh];
+        for(std::size_t index=firstCandidate;index<candidates.size();++index) {
+            const auto face=candidates[index].second;
+            for(const auto vertex:plan.topology.sourceFaces[face])
+                for(const auto other:allIncident[vertex])
+                    if(face!=other) neighborPairs.push_back({std::min(face,other),std::max(face,other)});
+        }
+        std::sort(neighborPairs.begin(),neighborPairs.end());
+        neighborPairs.erase(std::unique(neighborPairs.begin(),neighborPairs.end()),neighborPairs.end());
+        std::vector<std::array<std::size_t,2>> existing;
+        for(std::size_t index=firstPair;index<pairs.size();++index)
+            existing.push_back({candidates[pairs[index][0]].second,candidates[pairs[index][1]].second});
+        std::sort(existing.begin(),existing.end());
+        neighborPairs.erase(std::remove_if(neighborPairs.begin(),neighborPairs.end(),[&](const auto& pair) {
+            return std::binary_search(existing.begin(),existing.end(),pair);
+        }),neighborPairs.end());
     }
     std::sort(pairs.begin(),pairs.end());
     pairs.erase(std::unique(pairs.begin(),pairs.end()),pairs.end());
@@ -633,6 +762,23 @@ void reconstructCyclicCorners(Writer& out,const Model& model,const Model& frames
                         consider(std::move(trial));
                     }
             }
+            // Keep the established single/source-pair search first. Only
+            // at its fixed point try compensating neighbors, then resume it
+            // after accepting an improvement.
+            if(!improved) for(const auto& entry:compensatingPairs) {
+                const auto* mesh=entry.first;
+                if((mesh->render?nullptr:mesh)!=group.first) continue;
+                for(const auto& pair:entry.second)
+                    for(std::uint8_t a=0u;a<3u;++a)
+                        for(std::uint8_t b=0u;b<3u;++b) {
+                            if(plans.at(mesh).cornerRotations[pair[0]]==a ||
+                               plans.at(mesh).cornerRotations[pair[1]]==b) continue;
+                            auto trial=plans;
+                            trial.at(mesh).cornerRotations[pair[0]]=a;
+                            trial.at(mesh).cornerRotations[pair[1]]=b;
+                            consider(std::move(trial));
+                        }
+            }
             if(improved) {
                 plans=std::move(selected);current=std::move(selectedGeometry);rows=std::move(selectedRows);
             }
@@ -640,10 +786,1166 @@ void reconstructCyclicCorners(Writer& out,const Model& model,const Model& frames
     }
 }
 
+void reconstructCyclicCorners(Writer& out,const Model& model,const Model& frames,
+                              std::map<const Mesh*,MeshReconstruction>& plans,
+                              const Mesh* changedMesh=nullptr) {
+    reconstructCyclicCornerPass(out,model,frames,plans,changedMesh,false,false);
+}
+
+bool improvesReconstructedShading(const Model& model,
+        const std::map<const Mesh*,MeshReconstruction>& plans,
+        const Model& current,const CornerRows& rows,
+        const Model& rebuilt,const CornerRows& generated,bool retainAngles=false) {
+    const auto difference=[](Vec3 a,Vec3 b) {
+        const double x=double(a.x)-b.x,y=double(a.y)-b.y,z=double(a.z)-b.z;
+        return (x*x+y*y)+z*z;
+    };
+    const auto angle=[](Vec3 a,Vec3 b) {
+        if(same(a,b)) return 0.0;
+        if(same(a,Vec3{}) || same(b,Vec3{})) return std::acos(-1.0);
+        const double x=double(a.y)*b.z-double(a.z)*b.y;
+        const double y=double(a.z)*b.x-double(a.x)*b.z;
+        const double z=double(a.x)*b.y-double(a.y)*b.x;
+        return std::atan2(std::sqrt((x*x+y*y)+z*z),
+            (double(a.x)*b.x+double(a.y)*b.y)+double(a.z)*b.z);
+    };
+    bool retained=true,improved=false;
+    const auto compare=[&](Vec3 before,Vec3 after,Vec3 target) {
+        const auto oldError=difference(before,target),newError=difference(after,target);
+        retained=retained && newError<=oldError;
+        if(retainAngles) retained=retained && angle(after,target)<=angle(before,target);
+        improved=improved || newError<oldError;
+    };
+    for(std::size_t index=0;index<model.meshes.size() && retained;++index) {
+        const auto& source=model.meshes[index];
+        const auto existing=plans.find(&source);
+        if(existing==plans.end()) continue;
+        const auto& plan=existing->second;
+        for(std::size_t face=0;face<source.faces.size() && retained;++face)
+            for(std::size_t corner=0;corner<3u;++corner) {
+                const auto beforeRow=rows[index][face][corner],afterRow=generated[index][face][corner];
+                const auto& target=plan.vertices[source.faces[face].indices[corner]];
+                if(plan.hasNormals)
+                    compare(current.meshes[index].normalAt(beforeRow),
+                        rebuilt.meshes[index].normalAt(afterRow),target.normal);
+                if((source.mdxBitmap&0x80u) && !source.animated && !source.dangly) {
+                    const auto& before=current.meshes[index].vertices[beforeRow].tangentBasis;
+                    const auto& after=rebuilt.meshes[index].vertices[afterRow].tangentBasis;
+                    compare(before.bitangent,after.bitangent,target.tangentBasis.bitangent);
+                    compare(before.tangent,after.tangent,target.tangentBasis.tangent);
+                    compare(before.normal,after.normal,target.tangentBasis.normal);
+                }
+            }
+    }
+    return retained && improved;
+}
+
+void reconstructFaceOrder(Writer& out,const Model& model,const Model& frames,
+                          std::map<const Mesh*,MeshReconstruction>& plans) {
+    auto current=frames;
+    auto rows=generateGeometry(current,model,plans,false,out.job());
+    measureTangentBasis(current,model,rows,plans,out.job());
+    processAsciiSkinSeams(current,out.job());
+    for(const auto& mesh:model.meshes) {
+        const auto found=plans.find(&mesh);
+        if(found==plans.end() || mesh.animated || !found->second.hasNormals ||
+           found->second.explicitNormals || mesh.asciiNormalPositionSource) continue;
+        // AABB leaves address the retained face indices directly.
+        if(model.nodes[mesh.nodeIndex].aabb) continue;
+        const auto& plan=found->second;
+        auto order=reconstructNormalFaceOrder(mesh,plan.vertices,plan.topology.sourceVertices,
+            plan.topology.sourceFaces,plan.smoothing.masks,plan.cornerRotations,plan.faceOrder,plan.sourcePositions,out.job());
+        auto stars=reconstructNormalCornerStars(mesh,plan.vertices,plan.topology.sourceVertices,
+            plan.topology.sourceFaces,plan.smoothing.masks,plan.cornerRotations,order,plan.sourcePositions,out.job());
+        if(stars.faceOrder==plan.faceOrder && stars.rotations==plan.cornerRotations) continue;
+        auto trial=plans;
+        trial.at(&mesh).faceOrder=std::move(stars.faceOrder);
+        trial.at(&mesh).cornerRotations=std::move(stars.rotations);
+        auto rebuilt=frames;
+        const auto generated=generateGeometry(rebuilt,model,trial,false,out.job());
+        if(!preservesSkinChannels(model,generated)) continue;
+        measureTangentBasis(rebuilt,model,generated,trial,out.job());
+        processAsciiSkinSeams(rebuilt,out.job());
+        if(improvesReconstructedShading(model,plans,current,rows,rebuilt,generated)) {
+            plans=std::move(trial);current=std::move(rebuilt);rows=generated;
+        }
+    }
+    measureSeamNormals(current,model,rows,plans);
+}
+
+void reconstructTangentRounding(Writer& out,const Model& model,const Model& frames,
+                               std::map<const Mesh*,MeshReconstruction>& plans) {
+    if(!out.refineTangentRounding()) return;
+    auto current=frames;
+    auto rows=generateGeometry(current,model,plans,false,out.job());
+    measureTangentBasis(current,model,rows,plans,out.job());
+    processAsciiSkinSeams(current,out.job());
+    const auto opposite=[](Vec3 value,Vec3 target) {
+        return !same(value,target) && (value.x*target.x+value.y*target.y)+value.z*target.z<=0.0f;
+    };
+    struct Score {
+        double total{};
+        std::size_t directions{};
+        std::vector<double> maxima;
+    };
+    const auto score=[&](const Model& rebuilt,const CornerRows& generated) {
+        Score result;result.maxima.resize(model.meshes.size());
+        for(std::size_t index=0;index<model.meshes.size();++index) {
+            const auto& mesh=model.meshes[index];
+            const auto found=plans.find(&mesh);
+            if(found==plans.end()) continue;
+            const auto difference=[](Vec3 actual,Vec3 target) {
+                const double x=double(actual.x)-target.x,y=double(actual.y)-target.y,z=double(actual.z)-target.z;
+                return (x*x+y*y)+z*z;
+            };
+            for(std::size_t face=0;face<mesh.faces.size();++face)
+                for(std::size_t corner=0;corner<3u;++corner) {
+                    const auto& target=found->second.vertices[mesh.faces[face].indices[corner]];
+                    const auto row=generated[index][face][corner];
+                    double error{};
+                    if(found->second.hasNormals) error+=difference(rebuilt.meshes[index].normalAt(row),target.normal);
+                    if((mesh.mdxBitmap&0x80u) && !mesh.animated && !mesh.dangly) {
+                        const auto& actual=rebuilt.meshes[index].vertices[row].tangentBasis;
+                        error+=difference(actual.bitangent,target.tangentBasis.bitangent)+
+                            difference(actual.tangent,target.tangentBasis.tangent)+
+                            difference(actual.normal,target.tangentBasis.normal);
+                        if(mesh.render) result.directions+=opposite(actual.bitangent,target.tangentBasis.bitangent) ||
+                            opposite(actual.tangent,target.tangentBasis.tangent) ||
+                            opposite(actual.normal,target.tangentBasis.normal);
+                    }
+                    result.total+=error;
+                    result.maxima[index]=std::max(result.maxima[index],error);
+                }
+        }
+        return result;
+    };
+    auto best=score(current,rows);
+    const auto limits=best.maxima;
+    const auto component=[](Vec3& p,std::size_t axis)->float& {
+        return axis==0u?p.x:axis==1u?p.y:p.z;
+    };
+    for(const auto& mesh:model.meshes) {
+        const auto found=plans.find(&mesh);
+        if(found==plans.end() || !mesh.render || !(mesh.mdxBitmap&0x80u) || mesh.animated || mesh.dangly ||
+           found->second.explicitNormals || mesh.asciiNormalPositionSource || model.nodes[mesh.nodeIndex].aabb) continue;
+        const auto index=static_cast<std::size_t>(&mesh-model.meshes.data());
+        const auto original=found->second.sourcePositions;
+        const auto originalRotations=found->second.cornerRotations;
+        std::map<std::array<float,3>,std::vector<std::size_t>> positions;
+        for(std::size_t source=0;source<original.size();++source) {
+            const auto p=original[source];
+            positions[{{p.x,p.y,p.z}}].push_back(source);
+        }
+        std::vector<std::vector<std::size_t>> incident(original.size());
+        for(std::size_t face=0;face<mesh.faces.size();++face) {
+            const auto& topology=found->second.topology.sourceFaces[face];
+            for(std::size_t corner=0;corner<3u;++corner) {
+                const auto source=topology[corner];
+                auto& faces=incident[source];
+                if(faces.empty() || faces.back()!=face) faces.push_back(face);
+            }
+        }
+        for(;;) {
+            const auto& plan=plans.at(&mesh);
+            std::vector<std::size_t> writers(current.meshes[index].vertices.size());
+            for(const auto face:plan.faceOrder)
+                for(const auto row:rows[index][face]) writers[row]=face;
+            std::vector<bool> selected(original.size()),contributing(mesh.faces.size());
+            for(std::size_t face=0;face<mesh.faces.size();++face)
+                for(std::size_t corner=0;corner<3u;++corner) {
+                    const auto row=rows[index][face][corner];
+                    const auto& actual=current.meshes[index].vertices[row];
+                    const auto& target=plan.vertices[mesh.faces[face].indices[corner]].tangentBasis;
+                    if(!opposite(actual.tangentBasis.bitangent,target.bitangent) &&
+                       !opposite(actual.tangentBasis.tangent,target.tangent) &&
+                       !opposite(actual.tangentBasis.normal,target.normal)) continue;
+                    const auto writer=writers[row];
+                    // Replay the tangent writer's exact position/mask gather;
+                    // unrelated incident faces cannot repair this direction.
+                    for(std::size_t other=0;other<mesh.faces.size();++other) {
+                        if(other!=writer && !(plan.smoothing.masks[writer]&plan.smoothing.masks[other])) continue;
+                        const auto& indices=plan.topology.sourceFaces[other];
+                        if(other==writer || std::any_of(indices.begin(),indices.end(),[&](std::uint32_t source) {
+                                return same(plan.sourcePositions[source],actual.position);
+                            })) {
+                            contributing[other]=true;
+                            for(const auto source:indices) selected[source]=true;
+                        }
+                    }
+                }
+            std::optional<MeshReconstruction> chosen;
+            Model chosenModel;
+            CornerRows chosenRows;
+            auto chosenScore=best;
+            std::tuple<std::size_t,std::size_t,std::size_t,double,double> chosenRank;
+            for(const auto& group:positions) {
+                if(std::none_of(group.second.begin(),group.second.end(),
+                    [&](std::size_t source){return selected[source];})) continue;
+                std::vector<std::size_t> faces;
+                for(const auto source:group.second)
+                    for(const auto face:incident[source]) if(contributing[face]) faces.push_back(face);
+                std::sort(faces.begin(),faces.end());
+                faces.erase(std::unique(faces.begin(),faces.end()),faces.end());
+                for(std::size_t axis=0;axis<3u;++axis) {
+                    auto initial=original[group.second.front()];
+                    const float value=component(initial,axis);
+                    // A fixed neighborhood of the retained value cannot
+                    // drift through repeated nextafter steps. Coincident
+                    // source positions move together, retaining degeneracy.
+                    const std::array<float,3> values{{value,
+                        std::nextafter(value,-std::numeric_limits<float>::infinity()),
+                        std::nextafter(value,std::numeric_limits<float>::infinity())}};
+                    for(const auto replacement:values)
+                        for(std::size_t choice=0;choice<=faces.size()*2u;++choice) {
+                            out.job().check();
+                            auto candidate=plans.at(&mesh);
+                            bool changed=false;
+                            for(const auto source:group.second) {
+                                auto& coordinate=component(candidate.sourcePositions[source],axis);
+                                changed=changed || coordinate!=replacement;
+                                coordinate=replacement;
+                            }
+                            if(choice) {
+                                if(!changed && axis!=0u) continue;
+                                auto& rotation=candidate.cornerRotations[faces[(choice-1u)/2u]];
+                                rotation=static_cast<std::uint8_t>((rotation+1u+(choice-1u)%2u)%3u);
+                                changed=true;
+                            }
+                            if(!changed) continue;
+                            std::map<const Mesh*,MeshReconstruction> changedPlans{{&mesh,candidate}};
+                            auto rebuilt=current;
+                            rebuilt.meshes[index]=frames.meshes[index];
+                            auto generated=rows;
+                            const auto changedRows=generateGeometry(rebuilt,model,changedPlans,false,out.job());
+                            generated[index]=changedRows[index];
+                            if(!preservesSkinChannels(model,generated)) continue;
+                            measureTangentBasis(rebuilt,model,generated,plans,out.job(),&changedPlans);
+                            processAsciiSkinSeams(rebuilt,out.job());
+                            const auto proposed=score(rebuilt,generated);
+                            if(!(proposed.total<best.total) || proposed.directions>=best.directions) continue;
+                            bool retained=true;
+                            for(std::size_t m=0;m<limits.size();++m)
+                                retained=retained && proposed.maxima[m]<=limits[m];
+                            if(!retained) continue;
+                            std::size_t coordinates{},rotations{};double displacement{};
+                            for(std::size_t source=0;source<original.size();++source) {
+                                auto before=original[source],after=candidate.sourcePositions[source];
+                                for(std::size_t c=0;c<3u;++c) {
+                                    const double delta=double(component(after,c))-component(before,c);
+                                    coordinates+=delta!=0.0;displacement+=delta*delta;
+                                }
+                            }
+                            for(std::size_t f=0;f<mesh.faces.size();++f)
+                                rotations+=candidate.cornerRotations[f]!=originalRotations[f];
+                            const auto rank=std::make_tuple(proposed.directions,coordinates,rotations,
+                                displacement,proposed.total);
+                            if(chosen && !(rank<chosenRank)) continue;
+                            chosenRank=rank;chosenScore=proposed;chosen=std::move(candidate);
+                            chosenModel=std::move(rebuilt);chosenRows=std::move(generated);
+                        }
+                }
+            }
+            if(!chosen) break;
+            plans.at(&mesh)=std::move(*chosen);current=std::move(chosenModel);
+            rows=std::move(chosenRows);best=std::move(chosenScore);
+        }
+    }
+    measureSeamNormals(current,model,rows,plans);
+}
+
+void reconstructNormalRoundingPass(Writer& out,const Model& model,const Model& frames,
+                                   std::map<const Mesh*,MeshReconstruction>& plans) {
+    if(!out.refineNormalRounding()) return;
+    auto current=frames;
+    auto rows=generateGeometry(current,model,plans,false,out.job());
+    measureTangentBasis(current,model,rows,plans,out.job());
+    processAsciiSkinSeams(current,out.job());
+    for(const auto& mesh:model.meshes) {
+        const auto found=plans.find(&mesh);
+        if(found==plans.end() || !mesh.render || mesh.animated || mesh.dangly ||
+           !found->second.hasNormals || found->second.explicitNormals || mesh.asciiNormalPositionSource ||
+           model.nodes[mesh.nodeIndex].aabb) continue;
+        const auto& plan=found->second;
+        auto refined=reconstructNormalRounding(mesh,plan.vertices,plan.topology.sourceVertices,
+            plan.topology.sourceFaces,plan.smoothing.masks,plan.cornerRotations,plan.faceOrder,
+            plan.sourcePositions,out.job());
+        if(refined.rotations==plan.cornerRotations && refined.faceOrder==plan.faceOrder &&
+           std::equal(refined.positions.begin(),refined.positions.end(),plan.sourcePositions.begin(),same)) continue;
+        auto trial=plans;
+        trial.at(&mesh).sourcePositions=std::move(refined.positions);
+        trial.at(&mesh).cornerRotations=std::move(refined.rotations);
+        trial.at(&mesh).faceOrder=std::move(refined.faceOrder);
+        auto rebuilt=frames;
+        const auto generated=generateGeometry(rebuilt,model,trial,false,out.job());
+        if(!preservesSkinChannels(model,generated)) continue;
+        measureTangentBasis(rebuilt,model,generated,trial,out.job());
+        processAsciiSkinSeams(rebuilt,out.job());
+        if(improvesReconstructedShading(model,plans,current,rows,rebuilt,generated,true)) {
+            plans=std::move(trial);current=std::move(rebuilt);rows=generated;
+        }
+    }
+    measureSeamNormals(current,model,rows,plans);
+}
+
+struct RoundedExpression {
+    std::string key;
+    double constant{};
+    bool literal{},negative{};
+};
+
+RoundedExpression expressionConstant(double value) {
+    const double magnitude=std::abs(value);
+    std::uint64_t word;
+    std::memcpy(&word,&magnitude,sizeof(word));
+    return {"c"+std::to_string(word),magnitude,true,value<0.0};
+}
+RoundedExpression expressionNegate(RoundedExpression value) {
+    if(!value.literal || value.constant!=0.0) value.negative=!value.negative;
+    return value;
+}
+RoundedExpression expressionAdd(RoundedExpression a,RoundedExpression b,bool narrowed) {
+    if(a.literal && a.constant==0.0) return b;
+    if(b.literal && b.constant==0.0) return a;
+    if(a.key==b.key && a.negative!=b.negative) return expressionConstant(0.0);
+    if(a.literal && b.literal) {
+        const double result=(a.negative?-a.constant:a.constant)+(b.negative?-b.constant:b.constant);
+        return expressionConstant(narrowed?double(static_cast<float>(result)):result);
+    }
+    if(b.key<a.key) std::swap(a,b);
+    const bool negative=a.negative;
+    if(negative) {a=expressionNegate(a);b=expressionNegate(b);}
+    return {std::string(narrowed?"f":"d")+"("+a.key+","+(b.negative?"-":"+")+b.key+")",0.0,false,negative};
+}
+RoundedExpression expressionProduct(RoundedExpression a,RoundedExpression b) {
+    if((a.literal && a.constant==0.0) || (b.literal && b.constant==0.0)) return expressionConstant(0.0);
+    if(a.literal && a.constant==1.0) return a.negative?expressionNegate(b):b;
+    if(b.literal && b.constant==1.0) return b.negative?expressionNegate(a):a;
+    if(a.literal && b.literal)
+        return expressionConstant((a.negative?-a.constant:a.constant)*(b.negative?-b.constant:b.constant));
+    const bool negative=a.negative!=b.negative;
+    if(b.key<a.key) std::swap(a,b);
+    return {"m("+a.key+","+b.key+")",0.0,false,negative};
+}
+RoundedExpression expressionNarrow(RoundedExpression value) {
+    if(value.literal) return expressionConstant(static_cast<float>(value.negative?-value.constant:value.constant));
+    value.key="n("+value.key+")";return value;
+}
+
+bool normalPrecisionMesh(const Mesh& mesh) {
+    if(!mesh.render || mesh.animated) return false;
+    std::map<std::array<std::uint32_t,3>,std::uint32_t> positions;
+    std::vector<std::uint32_t> sources;
+    for(const auto& vertex:mesh.vertices) {
+        const auto p=vertex.position;
+        const auto inserted=positions.emplace(std::array<std::uint32_t,3>{{bits(p.x),bits(p.y),bits(p.z)}},
+            static_cast<std::uint32_t>(positions.size()));
+        sources.push_back(inserted.first->second);
+    }
+    std::set<Triangle> winding;
+    for(const auto& face:mesh.faces) {
+        Triangle triangle{{sources[face.indices[0]],sources[face.indices[1]],sources[face.indices[2]]}};
+        if(degenerate(triangle)) continue;
+        auto reversed=triangle;std::swap(reversed[1],reversed[2]);
+        if(winding.find(oriented(reversed))!=winding.end()) return true;
+        winding.insert(oriented(triangle));
+    }
+    return false;
+}
+
+void reconstructNormalPositionPrecision(Writer& out,const Model& model,const Model& frames,
+                                       std::map<const Mesh*,MeshReconstruction>& plans) {
+    const auto eligible=[](const auto& entry) {
+        return normalPrecisionMesh(*entry.first) && entry.second.hasNormals && !entry.second.explicitNormals;
+    };
+    if(std::none_of(plans.begin(),plans.end(),eligible)) return;
+    auto current=frames;
+    auto rows=generateGeometry(current,model,plans,false,out.job());
+    measureTangentBasis(current,model,rows,plans,out.job());
+    processAsciiSkinSeams(current,out.job());
+    const auto component=[](Vec3 value,std::size_t axis) {
+        return axis==0u?value.x:axis==1u?value.y:value.z;
+    };
+    const auto difference=[](Vec3 a,Vec3 b) {
+        const double x=double(a.x)-b.x,y=double(a.y)-b.y,z=double(a.z)-b.z;
+        return (x*x+y*y)+z*z;
+    };
+    const auto angle=[](Vec3 a,Vec3 b) {
+        if(same(a,b)) return 0.0;
+        if(same(a,Vec3{}) || same(b,Vec3{})) return std::acos(-1.0);
+        const double x=double(a.y)*b.z-double(a.z)*b.y;
+        const double y=double(a.z)*b.x-double(a.x)*b.z;
+        const double z=double(a.x)*b.y-double(a.y)*b.x;
+        return std::atan2(std::sqrt((x*x+y*y)+z*z),
+            (double(a.x)*b.x+double(a.y)*b.y)+double(a.z)*b.z);
+    };
+    const auto normal=[](Vec3 value) {
+        const float length=std::sqrt((value.x*value.x+value.y*value.y)+value.z*value.z);
+        if(length!=0.0f) {
+            if(double(length)<1e-9) return Vec3{1.0f,0.0f,0.0f};
+            const float scale=1.0f/length;
+            return Vec3{value.x*scale,value.y*scale,value.z*scale};
+        }
+        return value;
+    };
+    struct Transform {Vec3 position;Quaternion orientation;};
+    std::vector<Transform> transforms(model.meshes.size());
+    for(std::size_t index=0;index<model.meshes.size();++index) {
+        auto& transform=transforms[index];
+        auto ancestor=std::optional<std::size_t>{model.meshes[index].nodeIndex};
+        while(ancestor) {
+            const auto& node=frames.nodes[*ancestor];
+            const auto rotated=ascii::engineModelRotateVector(node.orientation,transform.position);
+            transform.position={rotated.x+node.position.x,rotated.y+node.position.y,rotated.z+node.position.z};
+            transform.orientation=ascii::engineModelQuaternionProduct(node.orientation,transform.orientation);
+            ancestor=node.parent;
+        }
+    }
+    const auto world=[&](std::size_t index,Vec3 point) {
+        const auto rotated=ascii::engineModelRotateVector(transforms[index].orientation,point);
+        const auto p=transforms[index].position;
+        return Vec3{rotated.x+p.x,rotated.y+p.y,rotated.z+p.z};
+    };
+    for(std::size_t index=0;index<model.meshes.size();++index) {
+        const auto& mesh=model.meshes[index];
+        const auto found=plans.find(&mesh);
+        if(found==plans.end() || !eligible(*found)) continue;
+        auto& plan=found->second;
+        auto high=plan.preciseSourcePositions;
+        if(high.empty())
+            for(const auto p:plan.sourcePositions) high.push_back({p.x,p.y,p.z});
+        for(std::size_t source=0;source<high.size();++source)
+            for(std::size_t axis=0;axis<3u;++axis) {
+                const auto low=component(plan.sourcePositions[source],axis);
+                if(rawBits(static_cast<float>(high[source][axis]))!=rawBits(low)) high[source][axis]=low;
+            }
+        struct Group {
+            std::size_t source;
+            std::vector<std::size_t> faces,corners;
+            bool cancelled{},seamFree{true};
+        };
+        std::vector<Group> groups;
+        std::map<std::tuple<std::uint32_t,std::uint32_t,std::size_t>,std::size_t> groupIds;
+        std::vector<std::vector<std::size_t>> incident(high.size()),faceGroups(mesh.faces.size());
+        const auto rebuildGroups=[&] {
+            groups.clear();groupIds.clear();
+            incident.assign(high.size(),{});faceGroups.assign(mesh.faces.size(),{});
+            for(const auto face:plan.faceOrder) {
+                for(const auto source:plan.topology.sourceFaces[face])
+                    if(incident[source].empty() || incident[source].back()!=face) incident[source].push_back(face);
+                for(std::size_t corner=0;corner<3u;++corner) {
+                    const auto source=plan.topology.sourceFaces[face][corner],mask=plan.smoothing.masks[face];
+                    const auto key=std::make_tuple(source,mask,mask?0u:face);
+                    const auto inserted=groupIds.emplace(key,groups.size());
+                    if(inserted.second) groups.push_back({source,{},{},false,true});
+                    groups[inserted.first->second].corners.push_back(face*3u+corner);
+                }
+            }
+            for(auto& group:groups) {
+                const auto first=group.corners.front()/3u;
+                const auto mask=plan.smoothing.masks[first];
+                std::map<Triangle,std::size_t> winding;
+                for(const auto face:incident[group.source])
+                    if(face==first || (mask&plan.smoothing.masks[face])) {
+                        group.faces.push_back(face);
+                        ++winding[oriented(plan.topology.sourceFaces[face])];
+                        faceGroups[face].push_back(static_cast<std::size_t>(&group-groups.data()));
+                    }
+                group.cancelled=!winding.empty() && std::all_of(winding.begin(),winding.end(),[&](const auto& entry) {
+                    auto reversed=entry.first;std::swap(reversed[1],reversed[2]);
+                    const auto opposite=winding.find(oriented(reversed));
+                    return opposite!=winding.end() && opposite->second==entry.second;
+                });
+            }
+            if(std::none_of(groups.begin(),groups.end(),[](const Group& group){return group.cancelled;})) return false;
+            if(current.skinSeams.processed) {
+                for(auto& group:groups) {
+                    const auto point=world(index,plan.sourcePositions[group.source]);
+                    for(std::size_t other=0;other<current.meshes.size() && group.seamFree;++other) {
+                        const auto& candidate=current.meshes[other];
+                        if(other==index || !candidate.render || candidate.explicitNormals) continue;
+                        for(std::size_t row=0;row<=candidate.enginePrelightVertexCount;++row) {
+                            const float tail=candidate.skinned?1000000.0f:10000000.0f;
+                            const auto p=world(other,row==candidate.enginePrelightVertexCount?
+                                Vec3{tail,tail,tail}:candidate.vertices[row].position);
+                            constexpr float tolerance=0.0010000000474974513f;
+                            if(std::abs(p.x-point.x)<tolerance && std::abs(p.y-point.y)<tolerance &&
+                               std::abs(p.z-point.z)<tolerance) {group.seamFree=false;break;}
+                        }
+                    }
+                }
+            }
+            return true;
+        };
+        if(!rebuildGroups()) continue;
+        const auto products=[&](std::size_t face,std::size_t source,std::size_t axis,double value,
+                                std::size_t paired=std::numeric_limits<std::size_t>::max()) {
+            std::array<Vec3,3> low;
+            std::array<std::array<double,3>,3> precise;
+            for(std::size_t corner=0;corner<3u;++corner) {
+                const auto vertex=plan.topology.sourceFaces[face][plan.sourceCorner(face,corner)];
+                low[corner]=plan.sourcePositions[vertex];precise[corner]=high[vertex];
+                if(vertex==source) precise[corner][axis]=value;
+                if(vertex==paired) precise[corner][axis]=high[paired][axis]-(value-high[source][axis]);
+            }
+            return ascii::normalPositionFaceProducts(low,precise);
+        };
+        const auto crossFrom=[](const std::array<Vec3,2>& product) {
+            return Vec3{product[0].x-product[1].x,product[0].y-product[1].y,product[0].z-product[1].z};
+        };
+        const auto enumerateAxis=[&](std::size_t source,std::size_t axis,std::size_t paired,
+                                     const std::set<std::size_t>& affected,
+                                     const std::vector<Vec3>& localCrosses,const auto& consider) {
+            out.job().check();
+            const double initial=high[source][axis];
+            auto pathFaces=incident[source];
+            if(paired<high.size()) {
+                pathFaces.insert(pathFaces.end(),incident[paired].begin(),incident[paired].end());
+                std::sort(pathFaces.begin(),pathFaces.end());
+                pathFaces.erase(std::unique(pathFaces.begin(),pathFaces.end()),pathFaces.end());
+            }
+            std::vector<double> ends;
+            const float stored=component(plan.sourcePositions[source],axis);
+            for(const float direction:{-std::numeric_limits<float>::infinity(),
+                                        std::numeric_limits<float>::infinity()}) {
+                if(stored==0.0f && std::signbit(stored)!=std::signbit(direction)) continue;
+                const float neighbor=std::nextafter(stored,direction);
+                const double edge=std::isinf(neighbor)?double(stored)+
+                    (double(stored)-std::nextafter(stored,0.0f))*0.5:(double(stored)+neighbor)*0.5;
+                double end=std::nextafter(edge,double(stored));
+                if(paired<high.size()) {
+                    const auto retained=[&](double value) {
+                        return rawBits(static_cast<float>(high[paired][axis]-(value-initial)))==
+                            rawBits(component(plan.sourcePositions[paired],axis));
+                    };
+                    if(!retained(end)) {
+                        double inside=initial,outside=end;
+                        while(std::nextafter(inside,outside)!=outside) {
+                            const double middle=inside+(outside-inside)*0.5;
+                            if(retained(middle)) inside=middle;else outside=middle;
+                        }
+                        end=inside;
+                    }
+                }
+                ends.push_back(end);
+            }
+            // Keep the double expression tree and its rounded products intact.
+            const auto symbolicCross=[&](std::size_t face) {
+                std::array<std::array<RoundedExpression,3>,3> residual;
+                std::array<Vec3,3> low;
+                for(std::size_t corner=0;corner<3u;++corner) {
+                    const auto vertex=plan.topology.sourceFaces[face][plan.sourceCorner(face,corner)];
+                    low[corner]=plan.sourcePositions[vertex];
+                    for(std::size_t c=0;c<3u;++c) {
+                        auto authored=vertex==source && c==axis?RoundedExpression{"v",0.0,false,false}:
+                            expressionConstant(high[vertex][c]);
+                        if(vertex==paired && c==axis)
+                            authored=expressionAdd(expressionConstant(high[paired][axis]),
+                                expressionNegate(expressionAdd(RoundedExpression{"v",0.0,false,false},
+                                    expressionConstant(-initial),false)),false);
+                        residual[corner][c]=expressionAdd(authored,
+                            expressionConstant(-double(component(low[corner],c))),false);
+                    }
+                }
+                std::array<std::array<RoundedExpression,3>,2> edge;
+                for(std::size_t e=0;e<2u;++e)
+                    for(std::size_t c=0;c<3u;++c) {
+                        const float base=component(low[e+1u],c)-component(low[e],c);
+                        edge[e][c]=expressionAdd(expressionConstant(base),
+                            expressionAdd(residual[e+1u][c],expressionNegate(residual[e][c]),false),false);
+                    }
+                std::array<RoundedExpression,3> result;
+                for(std::size_t c=0;c<3u;++c) {
+                    const auto a=(c+1u)%3u,b=(c+2u)%3u;
+                    result[c]=expressionAdd(expressionNarrow(expressionProduct(edge[0][a],edge[1][b])),
+                        expressionNegate(expressionNarrow(expressionProduct(edge[0][b],edge[1][a]))),true);
+                }
+                return result;
+            };
+            bool invariant=true;
+            for(const auto end:ends)
+                for(const auto id:affected) {
+                    std::array<float,3> magnitude{};
+                    for(const auto face:groups[id].faces) {
+                        const auto a=products(face,source,axis,initial,paired),
+                            b=products(face,source,axis,end,paired);
+                        for(std::size_t c=0;c<3u;++c) {
+                            const float first=std::max(std::abs(component(a[0],c)),std::abs(component(b[0],c))),
+                                second=std::max(std::abs(component(a[1],c)),std::abs(component(b[1],c)));
+                            magnitude[c]+=first+second;
+                            invariant=invariant && std::isfinite(component(a[0],c)) &&
+                                std::isfinite(component(a[1],c)) && std::isfinite(component(b[0],c)) &&
+                                std::isfinite(component(b[1],c)) && std::isfinite(magnitude[c]);
+                        }
+                    }
+                }
+            for(const auto id:affected) {
+                std::array<RoundedExpression,3> sum{{expressionConstant(0.0),expressionConstant(0.0),expressionConstant(0.0)}};
+                for(const auto face:groups[id].faces) {
+                    const auto value=symbolicCross(face);
+                    for(std::size_t c=0;c<3u;++c) sum[c]=expressionAdd(sum[c],value[c],true);
+                }
+                invariant=invariant && std::all_of(sum.begin(),sum.end(),[](const auto& value) {
+                    return value.literal && std::isfinite(value.constant);
+                });
+            }
+            if(invariant) return;
+            std::set<std::vector<std::uint32_t>> visited;
+            const auto emit=[&](double value) {
+                auto proposed=localCrosses;std::vector<std::uint32_t> key;
+                for(const auto face:pathFaces) {
+                    const auto result=crossFrom(products(face,source,axis,value,paired));
+                    proposed[face]=result;
+                    key.push_back(rawBits(result.x));key.push_back(rawBits(result.y));key.push_back(rawBits(result.z));
+                }
+                if(visited.insert(std::move(key)).second) consider(value,proposed);
+            };
+            emit(initial);
+            for(const auto end:ends) {
+                emit(end);
+                std::vector<std::pair<double,double>> intervals{{initial,end}};
+                auto lowerCross=localCrosses,upperCross=localCrosses;
+                while(!intervals.empty()) {
+                    out.job().check();
+                    const auto interval=intervals.back();intervals.pop_back();
+                    // Same-axis paths leave only one varying factor in each product.
+                    bool constant=true;
+                    for(const auto face:pathFaces) {
+                        const auto a=products(face,source,axis,interval.first,paired),
+                            b=products(face,source,axis,interval.second,paired);
+                        std::array<float,3> lows{},highs{};
+                        for(std::size_t c=0;c<3u;++c) {
+                            const float a0=component(a[0],c),a1=component(a[1],c),
+                                b0=component(b[0],c),b1=component(b[1],c);
+                            const float lower=std::min(a0,b0)-std::max(a1,b1),
+                                upper=std::max(a0,b0)-std::min(a1,b1);
+                            lows[c]=lower;highs[c]=upper;
+                            constant=constant && rawBits(lower)==rawBits(upper);
+                        }
+                        lowerCross[face]={lows[0],lows[1],lows[2]};
+                        upperCross[face]={highs[0],highs[1],highs[2]};
+                    }
+                    if(!constant && paired>=high.size()) {
+                        constant=true;
+                        for(const auto id:affected) {
+                            Vec3 lower{},upper{};
+                            for(const auto face:groups[id].faces) {
+                                const auto a=lowerCross[face],b=upperCross[face];
+                                lower={lower.x+a.x,lower.y+a.y,a.z+lower.z};
+                                upper={upper.x+b.x,upper.y+b.y,b.z+upper.z};
+                            }
+                            constant=constant && rawBits(lower.x)==rawBits(upper.x) &&
+                                rawBits(lower.y)==rawBits(upper.y) && rawBits(lower.z)==rawBits(upper.z);
+                        }
+                    }
+                    if(constant || std::nextafter(interval.first,interval.second)==interval.second) {
+                        emit(interval.first);emit(interval.second);continue;
+                    }
+                    const double middle=interval.first+(interval.second-interval.first)*0.5;
+                    intervals.push_back({middle,interval.second});intervals.push_back({interval.first,middle});
+                }
+            }
+        };
+        for(;;) {
+            out.job().check();
+            std::vector<Vec3> crosses;
+            for(std::size_t face=0;face<mesh.faces.size();++face)
+                crosses.push_back(crossFrom(products(face,high.size(),0u,0.0)));
+            std::vector<bool> selected(high.size());
+            for(const auto& group:groups) {
+                if(!group.cancelled || !group.seamFree) continue;
+                bool differs=false;
+                for(const auto corner:group.corners) {
+                    const auto face=corner/3u,c=corner%3u;
+                    differs=differs || !same(current.meshes[index].normalAt(rows[index][face][c]),
+                        plan.vertices[mesh.faces[face].indices[c]].normal);
+                }
+                if(differs) for(const auto face:group.faces)
+                    for(const auto source:plan.topology.sourceFaces[face]) selected[source]=true;
+            }
+            struct Candidate {std::size_t source;std::array<double,3> position;double error;};
+            const auto collectCandidates=[&](const std::vector<bool>& allowed,
+                                             const std::vector<Vec3>& inputCrosses,
+                                             const std::vector<Vec3>* inputNormals) {
+                std::vector<Candidate> candidates;
+                for(std::size_t source=0;source<high.size();++source) {
+                    if(!allowed[source]) continue;
+                    std::set<std::size_t> affected;
+                    for(const auto face:incident[source])
+                        affected.insert(faceGroups[face].begin(),faceGroups[face].end());
+                    if(std::any_of(affected.begin(),affected.end(),[&](std::size_t group){return !groups[group].seamFree;})) continue;
+                    const auto original=high[source];
+                    auto localCrosses=inputCrosses;
+                    std::vector<Vec3> localNormals(groups.size());
+                    const auto updateNormals=[&] {
+                        for(const auto id:affected) {
+                            Vec3 sum{};
+                            for(const auto face:groups[id].faces) {
+                                const auto value=localCrosses[face];
+                                sum={sum.x+value.x,sum.y+value.y,value.z+sum.z};
+                            }
+                            localNormals[id]=normal(sum);
+                        }
+                    };
+                    updateNormals();
+                    // Converge one source's editable XYZ before choosing among
+                    // sources; an immediately better neighbor need not have the
+                    // best completed coordinate reconstruction.
+                    for(;;) {
+                        struct Move {std::size_t axis;double value,error;};
+                        std::vector<Move> moves;
+                        for(std::size_t axis=0;axis<3u;++axis) {
+                            enumerateAxis(source,axis,high.size(),affected,localCrosses,
+                                [&](double value,const std::vector<Vec3>& proposed) {
+                                double error{};bool improved=false;
+                                for(const auto id:affected) {
+                                    const auto& group=groups[id];Vec3 sum{};
+                                    for(const auto face:group.faces) {
+                                        const auto cross=proposed[face];
+                                        sum={sum.x+cross.x,sum.y+cross.y,cross.z+sum.z};
+                                    }
+                                    const auto after=normal(sum);
+                                    for(const auto corner:group.corners) {
+                                        const auto face=corner/3u,c=corner%3u;
+                                        const auto target=plan.vertices[mesh.faces[face].indices[c]].normal;
+                                        const auto before=localNormals[id];
+                                        const double previous=difference(before,target),next=difference(after,target);
+                                        if(next>previous || angle(after,target)>angle(before,target)) return;
+                                        error+=next-previous;improved=improved || next<previous;
+                                    }
+                                }
+                                if(improved) moves.push_back({axis,value,error});
+                            });
+                        }
+                        if(moves.empty()) break;
+                        const auto best=std::min_element(moves.begin(),moves.end(),[&](const Move& a,const Move& b) {
+                            return std::make_tuple(a.error,std::abs(a.value-high[source][a.axis]),a.axis,a.value)<
+                                std::make_tuple(b.error,std::abs(b.value-high[source][b.axis]),b.axis,b.value);
+                        });
+                        high[source][best->axis]=best->value;
+                        for(const auto face:incident[source])
+                            localCrosses[face]=crossFrom(products(face,high.size(),0u,0.0));
+                        updateNormals();
+                        double error{};
+                        for(const auto id:affected)
+                            for(const auto corner:groups[id].corners) {
+                                const auto face=corner/3u,c=corner%3u;
+                                const auto target=plan.vertices[mesh.faces[face].indices[c]].normal;
+                                const auto before=inputNormals?inputNormals->at(id):
+                                    current.meshes[index].normalAt(rows[index][face][c]);
+                                error+=difference(localNormals[id],target)-difference(before,target);
+                            }
+                        candidates.push_back({source,high[source],error});
+                    }
+                    high[source]=original;
+                }
+                return candidates;
+            };
+            const auto sortCandidates=[&](std::vector<Candidate>& candidates) {
+                std::size_t authoredComponents{};
+                for(std::size_t source=0;source<high.size();++source)
+                    for(std::size_t axis=0;axis<3u;++axis)
+                        authoredComponents+=high[source][axis]!=double(component(plan.sourcePositions[source],axis));
+                const auto componentCount=[&](const Candidate& candidate) {
+                    auto count=authoredComponents;
+                    for(std::size_t axis=0;axis<3u;++axis) {
+                        const double packed=component(plan.sourcePositions[candidate.source],axis);
+                        count-=high[candidate.source][axis]!=packed;
+                        count+=candidate.position[axis]!=packed;
+                    }
+                    return count;
+                };
+                std::sort(candidates.begin(),candidates.end(),[&](const Candidate& a,const Candidate& b) {
+                    const auto displacement=[&](const Candidate& value) {
+                        double sum{};
+                        for(std::size_t axis=0;axis<3u;++axis)
+                            sum+=std::abs(value.position[axis]-high[value.source][axis]);
+                        return sum;
+                    };
+                    return std::make_tuple(a.error,componentCount(a),displacement(a),a.source,a.position)<
+                        std::make_tuple(b.error,componentCount(b),displacement(b),b.source,b.position);
+                });
+            };
+            auto candidates=collectCandidates(selected,crosses,nullptr);
+            sortCandidates(candidates);
+            const auto accept=[&](MeshReconstruction candidate) {
+                auto trial=plans;
+                trial.at(&mesh)=std::move(candidate);
+                auto rebuilt=frames;
+                const auto generated=generateGeometry(rebuilt,model,trial,false,out.job());
+                if(!preservesSkinChannels(model,generated)) return false;
+                measureTangentBasis(rebuilt,model,generated,trial,out.job());
+                processAsciiSkinSeams(rebuilt,out.job());
+                if(!improvesReconstructedShading(model,plans,current,rows,rebuilt,generated,true)) return false;
+                plan=std::move(trial.at(&mesh));
+                if(!plan.preciseSourcePositions.empty()) high=plan.preciseSourcePositions;
+                current=std::move(rebuilt);rows=generated;return true;
+            };
+            bool accepted=false;
+            for(const auto& candidate:candidates) {
+                auto trial=plan;
+                trial.preciseSourcePositions=high;trial.preciseSourcePositions[candidate.source]=candidate.position;
+                if(accept(std::move(trial))) {accepted=true;break;}
+            }
+            if(accepted) continue;
+
+            // Reconsider missing smoothing links with the new face crosses.
+            // A connected set of missing links may need one shared bit before
+            // any of its individual links becomes an improvement.
+            std::vector<bool> eligibleCorners(mesh.faces.size()*3u);
+            for(const auto& group:groups) if(group.seamFree && selected[group.source])
+                for(const auto corner:group.corners) {
+                    const auto face=corner/3u,c=corner%3u;
+                    eligibleCorners[corner]=!same(current.meshes[index].normalAt(rows[index][face][c]),
+                        plan.vertices[mesh.faces[face].indices[c]].normal);
+                }
+            const auto masks=sharedSeamSmoothingCandidates(mesh,plan.vertices,plan.topology.sourceFaces,
+                plan.smoothing.masks,eligibleCorners,out.job(),false,true);
+            for(const auto& candidate:masks) {
+                auto trial=plan;trial.smoothing.masks=candidate;
+                if(accept(std::move(trial))) {accepted=true;break;}
+            }
+            if(accepted) {
+                if(!rebuildGroups()) break;
+                continue;
+            }
+
+            // Keep the published edge neighbors while refitting the ordered
+            // gathers against the actual authored-position precision.
+            if(!model.nodes[mesh.nodeIndex].aabb) {
+                auto order=reconstructNormalFaceOrder(mesh,plan.vertices,plan.topology.sourceVertices,
+                    plan.topology.sourceFaces,plan.smoothing.masks,plan.cornerRotations,plan.faceOrder,
+                    plan.sourcePositions,out.job(),&high);
+                if(order!=plan.faceOrder) {
+                    auto trial=plan;trial.faceOrder=std::move(order);
+                    accepted=accept(std::move(trial));
+                }
+                if(!accepted) {
+                    auto stars=reconstructNormalCornerStars(mesh,plan.vertices,plan.topology.sourceVertices,
+                        plan.topology.sourceFaces,plan.smoothing.masks,plan.cornerRotations,plan.faceOrder,
+                        plan.sourcePositions,out.job(),&high);
+                    if(stars.faceOrder!=plan.faceOrder || stars.rotations!=plan.cornerRotations) {
+                        auto trial=plan;trial.faceOrder=std::move(stars.faceOrder);
+                        trial.cornerRotations=std::move(stars.rotations);accepted=accept(std::move(trial));
+                    }
+                }
+            }
+            if(!accepted) {
+                struct Seed {
+                    std::size_t first,second,axis;
+                    double value,error;
+                    std::vector<bool> repairs;
+                    bool direct;
+                };
+                std::set<std::pair<std::size_t,std::size_t>> pairs;
+                for(const auto& group:groups) {
+                    if(!group.cancelled || !group.seamFree || !selected[group.source]) continue;
+                    for(const auto face:group.faces) {
+                        const auto& triangle=plan.topology.sourceFaces[face];
+                        for(std::size_t edge=0;edge<3u;++edge) {
+                            const auto a=triangle[edge],b=triangle[(edge+1u)%3u];
+                            if(a!=b) pairs.emplace(std::min(a,b),std::max(a,b));
+                        }
+                    }
+                }
+                std::vector<Seed> seeds;
+                for(const auto& pair:pairs) {
+                    std::set<std::size_t> affected;
+                    for(const auto source:{pair.first,pair.second})
+                        for(const auto face:incident[source])
+                            affected.insert(faceGroups[face].begin(),faceGroups[face].end());
+                    if(std::any_of(affected.begin(),affected.end(),[&](std::size_t id){return !groups[id].seamFree;})) continue;
+                    for(std::size_t axis=0;axis<3u;++axis)
+                        enumerateAxis(pair.first,axis,pair.second,affected,crosses,
+                            [&](double value,const std::vector<Vec3>& proposed) {
+                                bool improved=false,direct=true;double error{};
+                                auto repairs=selected;
+                                for(const auto id:affected) {
+                                    const auto& group=groups[id];Vec3 sum{};
+                                    for(const auto face:group.faces) {
+                                        const auto cross=proposed[face];
+                                        sum={sum.x+cross.x,sum.y+cross.y,cross.z+sum.z};
+                                    }
+                                    const auto after=normal(sum);bool worse=false;
+                                    for(const auto corner:group.corners) {
+                                        const auto face=corner/3u,c=corner%3u;
+                                        const auto target=plan.vertices[mesh.faces[face].indices[c]].normal;
+                                        const auto before=current.meshes[index].normalAt(rows[index][face][c]);
+                                        const double previous=difference(before,target),next=difference(after,target);
+                                        const bool angleWorse=angle(after,target)>angle(before,target);
+                                        error+=next-previous;worse=worse || next>previous || angleWorse;
+                                        improved=improved || (group.cancelled && next<previous && !angleWorse);
+                                    }
+                                    if(worse) {
+                                        direct=false;
+                                        // One repair source must influence every worsened group.
+                                        std::vector<bool> reaches(high.size());
+                                        for(const auto face:group.faces)
+                                            for(const auto source:plan.topology.sourceFaces[face]) reaches[source]=true;
+                                        for(std::size_t source=0;source<repairs.size();++source)
+                                            repairs[source]=repairs[source] && reaches[source];
+                                    }
+                                }
+                                if(improved && (direct || std::any_of(repairs.begin(),repairs.end(),[](bool v){return v;})))
+                                    seeds.push_back({pair.first,pair.second,axis,value,error,std::move(repairs),direct});
+                            });
+                }
+                std::sort(seeds.begin(),seeds.end(),[](const Seed& a,const Seed& b) {
+                    return std::tie(a.error,a.first,a.second,a.axis,a.value)<
+                        std::tie(b.error,b.first,b.second,b.axis,b.value);
+                });
+                for(const auto& seed:seeds) {
+                    const auto original=high;
+                    high[seed.second][seed.axis]-=seed.value-high[seed.first][seed.axis];
+                    high[seed.first][seed.axis]=seed.value;
+                    auto trial=plan;trial.preciseSourcePositions=high;
+                    if(seed.direct && accept(trial)) {accepted=true;break;}
+                    auto seedCrosses=crosses;
+                    for(const auto source:{seed.first,seed.second})
+                        for(const auto face:incident[source])
+                            seedCrosses[face]=crossFrom(products(face,high.size(),0u,0.0));
+                    std::vector<Vec3> seedNormals;
+                    for(const auto& group:groups) {
+                        Vec3 sum{};
+                        for(const auto face:group.faces) {
+                            const auto cross=seedCrosses[face];
+                            sum={sum.x+cross.x,sum.y+cross.y,cross.z+sum.z};
+                        }
+                        seedNormals.push_back(normal(sum));
+                    }
+                    auto repairs=collectCandidates(seed.repairs,seedCrosses,&seedNormals);
+                    sortCandidates(repairs);
+                    for(const auto& repair:repairs) {
+                        trial.preciseSourcePositions=high;
+                        trial.preciseSourcePositions[repair.source]=repair.position;
+                        if(accept(trial)) {accepted=true;break;}
+                    }
+                    if(accepted) break;
+                    high=original;
+                }
+            }
+            if(!accepted || !rebuildGroups()) break;
+        }
+    }
+    measureSeamNormals(current,model,rows,plans);
+}
+
+bool tangentPrecisionMesh(const Mesh& mesh) {
+    return mesh.render && (mesh.mdxBitmap&0x80u) && !mesh.animated && !mesh.dangly;
+}
+
+void reconstructTangentUvPrecision(Writer& out,const Model& model,const Model& frames,
+                                  std::map<const Mesh*,MeshReconstruction>& plans) {
+    if(std::none_of(model.meshes.begin(),model.meshes.end(),tangentPrecisionMesh)) return;
+    auto current=frames;
+    const auto rows=generateGeometry(current,model,plans,false,out.job());
+    measureTangentBasis(current,model,rows,plans,out.job());
+    const auto opposite=[](Vec3 a,Vec3 b) {
+        return !same(a,b) && (a.x*b.x+a.y*b.y)+a.z*b.z<=0.0f;
+    };
+    const auto difference=[](Vec3 a,Vec3 b) {
+        const double x=double(a.x)-b.x,y=double(a.y)-b.y,z=double(a.z)-b.z;
+        return (x*x+y*y)+z*z;
+    };
+    const auto angle=[](Vec3 a,Vec3 b) {
+        const double x=double(a.y)*b.z-double(a.z)*b.y;
+        const double y=double(a.z)*b.x-double(a.x)*b.z;
+        const double z=double(a.x)*b.y-double(a.y)*b.x;
+        return std::atan2(std::sqrt((x*x+y*y)+z*z),
+            (double(a.x)*b.x+double(a.y)*b.y)+double(a.z)*b.z);
+    };
+    for(std::size_t index=0;index<model.meshes.size();++index) {
+        const auto& mesh=model.meshes[index];
+        const auto found=plans.find(&mesh);
+        if(found==plans.end() || !tangentPrecisionMesh(mesh)) continue;
+        auto& plan=found->second;
+        auto& existing=current.meshes[index];
+        const auto rowSize=existing.mdxRowSize,weightOffset=existing.mdxWeightOffset,
+            boneOffset=existing.mdxBoneIndexOffset,tangentOffset=existing.mdxTangentOffset;
+        for(;;) {
+            const auto& retained=*existing.asciiTangentSource;
+            std::vector<unsigned> selected(existing.faces.size());
+            std::vector<std::optional<std::size_t>> writers(existing.vertices.size());
+            for(std::size_t face=0;face<existing.faces.size();++face)
+                for(const auto row:existing.faces[face].indices) writers[row]=face;
+            std::size_t oldOpposed{};
+            for(std::size_t face=0;face<mesh.faces.size();++face)
+                for(std::size_t corner=0;corner<3u;++corner) {
+                    const auto row=rows[index][face][corner];
+                    const auto& actual=existing.vertices[row];
+                    const auto& target=plan.vertices[mesh.faces[face].indices[corner]].tangentBasis;
+                    const bool b=opposite(actual.tangentBasis.bitangent,target.bitangent);
+                    const bool t=opposite(actual.tangentBasis.tangent,target.tangent);
+                    const bool n=opposite(actual.tangentBasis.normal,target.normal);
+                    oldOpposed+=b || t || n;
+                    if((!b && !t && !n) || !writers[row]) continue;
+                    const auto writer=*writers[row];
+                    for(std::size_t other=0;other<existing.faces.size();++other) {
+                        if(other!=writer && !(retained.faceSmoothing[writer]&retained.faceSmoothing[other])) continue;
+                        const auto& indices=existing.faces[other].indices;
+                        if(other==writer || std::any_of(indices.begin(),indices.end(),[&](std::int16_t source) {
+                                return same(retained.generatedPositions[source],actual.position);
+                            })) selected[other]|=(b || n?1u:0u)|(t || n?2u:0u);
+                    }
+                }
+            if(!oldOpposed) break;
+            auto source=std::make_shared<AsciiTangentSource>(*existing.asciiTangentSource);
+            if(source->faceTexcoords64.empty())
+                for(const auto& face:existing.faces) {
+                    std::array<std::array<double,2>,3> values;
+                    for(std::size_t corner=0;corner<3u;++corner) {
+                        const auto value=source->generatedTexcoords[face.indices[corner]];
+                        values[corner]={value.x,value.y};
+                    }
+                    source->faceTexcoords64.push_back(values);
+                }
+            struct Search {
+                std::size_t face,corner,component;
+                double cursor,end;
+                Vec3 value;
+            };
+            std::vector<Search> searches;
+            const auto derivative=[&](const Search& search,double value) {
+                const auto& face=existing.faces[search.face];
+                const auto a=source->generatedPositions[face.indices[0]],
+                    b=source->generatedPositions[face.indices[1]],c=source->generatedPositions[face.indices[2]];
+                const Vec3 p{b.x-a.x,b.y-a.y,b.z-a.z},q{c.x-a.x,c.y-a.y,c.z-a.z};
+                std::array<Vec2,3> uv;
+                for(std::size_t corner=0;corner<3u;++corner)
+                    uv[corner]=source->generatedTexcoords[face.indices[corner]];
+                auto precise=source->faceTexcoords64[search.face];
+                precise[search.corner][search.component]=value;
+                return ascii::tangentUvDerivative(p,q,uv,precise,search.component);
+            };
+            bool accepted=false;
+            const auto consider=[&](const Search& search,double value) {
+                out.job().check();
+                auto candidate=existing;
+                auto proposed=std::make_shared<AsciiTangentSource>(*source);
+                proposed->faceTexcoords64[search.face][search.corner][search.component]=value;
+                candidate.asciiTangentSource=proposed;
+                rebuildAsciiTangentBasis(candidate,out.job());
+                std::size_t opposed{};
+                bool retained=true,improved=false;
+                const auto compare=[&](Vec3 before,Vec3 after,Vec3 target) {
+                    if(same(before,after)) return;
+                    const double oldError=difference(before,target),newError=difference(after,target);
+                    retained=retained && newError<=oldError && angle(after,target)<=angle(before,target);
+                    improved=improved || newError<oldError;
+                };
+                for(std::size_t face=0;face<mesh.faces.size() && retained;++face)
+                    for(std::size_t corner=0;corner<3u;++corner) {
+                        const auto row=rows[index][face][corner];
+                        const auto& before=existing.vertices[row].tangentBasis;
+                        const auto& after=candidate.vertices[row].tangentBasis;
+                        const auto& target=plan.vertices[mesh.faces[face].indices[corner]].tangentBasis;
+                        compare(before.bitangent,after.bitangent,target.bitangent);
+                        compare(before.tangent,after.tangent,target.tangent);
+                        compare(before.normal,after.normal,target.normal);
+                        opposed+=opposite(after.bitangent,target.bitangent) ||
+                            opposite(after.tangent,target.tangent) || opposite(after.normal,target.normal);
+                    }
+                if(!retained || !improved || opposed>=oldOpposed) return false;
+                if(plan.preciseFaceTexcoords.empty()) {
+                    plan.preciseFaceTexcoords.resize(mesh.faces.size());
+                    for(std::size_t face=0;face<mesh.faces.size();++face)
+                        for(std::size_t corner=0;corner<3u;++corner) {
+                            const auto value=plan.vertices[mesh.faces[face].indices[corner]].texcoord0;
+                            plan.preciseFaceTexcoords[face][corner]={value.x,value.y};
+                        }
+                }
+                const auto original=plan.faceOrder[source->authoredFaceIndices[search.face]];
+                plan.preciseFaceTexcoords[original][plan.sourceCorner(original,search.corner)][search.component]=value;
+                candidate.mdxRowSize=rowSize;candidate.mdxWeightOffset=weightOffset;
+                candidate.mdxBoneIndexOffset=boneOffset;candidate.mdxTangentOffset=tangentOffset;
+                existing=std::move(candidate);
+                return true;
+            };
+            for(std::size_t face=0;face<existing.faces.size() && !accepted;++face) {
+                if(!selected[face]) continue;
+                for(std::size_t corner=1u;corner<3u && !accepted;++corner)
+                    for(std::size_t component=0;component<2u && !accepted;++component) {
+                        if(!(selected[face]&(1u<<component))) continue;
+                        const double value=source->faceTexcoords64[face][corner][component];
+                        const float rounded=static_cast<float>(value);
+                        for(const float direction:{-std::numeric_limits<float>::infinity(),
+                                                    std::numeric_limits<float>::infinity()}) {
+                            if(rounded==0.0f && std::signbit(rounded)!=std::signbit(direction)) continue;
+                            const float neighbor=std::nextafter(rounded,direction);
+                            const double edge=std::isinf(neighbor)?double(rounded)+
+                                (double(rounded)-std::nextafter(rounded,0.0f))*0.5:
+                                (double(rounded)+neighbor)*0.5;
+                            const double end=std::nextafter(edge,double(rounded));
+                            Search search{face,corner,component,value,end,{}};
+                            search.value=derivative(search,value);
+                            if(same(search.value,derivative(search,end))) continue;
+                            if(consider(search,end)) {accepted=true;break;}
+                            searches.push_back(search);
+                        }
+                    }
+            }
+            while(!accepted && !searches.empty()) {
+                std::vector<Search> next;
+                for(auto search:searches) {
+                    out.job().check();
+                    const auto endpoint=derivative(search,search.end);
+                    if(same(search.value,endpoint)) continue;
+                    const auto belowNormalization=[](Vec3 value) {
+                        return double(std::sqrt((value.x*value.x+value.y*value.y)+value.z*value.z))<1e-9;
+                    };
+                    if(belowNormalization(search.value)) {
+                        const auto initial=search.value;
+                        const auto bound=[&](Vec3 value) {
+                            return Vec3{std::max(std::abs(initial.x),std::abs(value.x)),
+                                std::max(std::abs(initial.y),std::abs(value.y)),
+                                std::max(std::abs(initial.z),std::abs(value.z))};
+                        };
+                        // Each raw component is monotone. Its endpoint bounds
+                        // prove this whole interval has the same normalized axis.
+                        if(belowNormalization(bound(endpoint))) continue;
+                        double low=search.cursor,high=search.end;
+                        while(std::nextafter(low,high)!=high) {
+                            const double middle=low+(high-low)*0.5;
+                            if(belowNormalization(bound(derivative(search,middle)))) low=middle;
+                            else high=middle;
+                        }
+                        search.cursor=low;search.value=derivative(search,low);
+                    }
+                    double low=search.cursor,high=search.end;
+                    while(std::nextafter(low,high)!=high) {
+                        const double middle=low+(high-low)*0.5;
+                        if(same(search.value,derivative(search,middle))) low=middle;
+                        else high=middle;
+                    }
+                    search.cursor=high;search.value=derivative(search,high);
+                    if(consider(search,high)) {accepted=true;break;}
+                    next.push_back(search);
+                }
+                searches=std::move(next);
+            }
+            if(!accepted) break;
+        }
+    }
+}
+
 } // namespace
 
 void reconstructSkinSeamSmoothing(Writer& out,const Model& model) {
-    if(std::none_of(model.meshes.begin(),model.meshes.end(),[](const Mesh& mesh){return mesh.skinned;})) return;
+    if(std::none_of(model.meshes.begin(),model.meshes.end(),[](const Mesh& mesh){return mesh.skinned;})) {
+        if(!out.refineTangentRounding() && !out.refineNormalRounding() &&
+           std::none_of(model.meshes.begin(),model.meshes.end(),tangentPrecisionMesh) &&
+           std::none_of(model.meshes.begin(),model.meshes.end(),normalPrecisionMesh)) return;
+        for(const auto& mesh:model.meshes) {
+            const auto& node=model.nodes[mesh.nodeIndex];
+            if(!node.lightsaber) out.meshReconstructions.emplace(&mesh,reconstructMesh(out,node,mesh));
+        }
+        auto frames=model;
+        reconstructExportedNodeFrames(frames,out.job());
+        reconstructTangentRounding(out,model,frames,out.meshReconstructions);
+        reconstructNormalRoundingPass(out,model,frames,out.meshReconstructions);
+        reconstructTangentUvPrecision(out,model,frames,out.meshReconstructions);
+        reconstructNormalPositionPrecision(out,model,frames,out.meshReconstructions);
+        return;
+    }
     using Plans=std::map<const Mesh*,MeshReconstruction>;
     const auto reconstruct=[&](bool refine) {
         Plans result;
@@ -655,11 +1957,14 @@ void reconstructSkinSeamSmoothing(Writer& out,const Model& model) {
     };
     auto& plans=out.meshReconstructions;
     plans=reconstruct(false);
-    if(std::none_of(plans.begin(),plans.end(),[](const auto& entry) {
-        return entry.second.hasNormals && !entry.second.explicitNormals && !entry.first->animated;
-    })) return;
     auto frames=model;
     reconstructExportedNodeFrames(frames,out.job());
+    if(std::none_of(plans.begin(),plans.end(),[](const auto& entry) {
+        return entry.second.hasNormals && !entry.second.explicitNormals && !entry.first->animated;
+    })) {
+        reconstructTangentUvPrecision(out,model,frames,plans);
+        return;
+    }
     enum class PrecursorFit { Smooth,SplitOpposing,Unscored,RefineExisting,RetainedVertices };
     const auto precursor=[&](const Plans& source,bool refine,PrecursorFit fit=PrecursorFit::Smooth) {
         // Saved normals can be outputs of ProcessSkinSeams. Reconstruct
@@ -672,7 +1977,7 @@ void reconstructSkinSeamSmoothing(Writer& out,const Model& model) {
             for(auto& entry:flatPlans) {
                 const auto& mesh=*entry.first;
                 auto& plan=entry.second;
-                if(mesh.animated || !plan.hasNormals || plan.explicitNormals) continue;
+                if(mesh.animated || !plan.hasNormals || plan.explicitNormals || mesh.asciiNormalPositionSource) continue;
                 plan.smoothing.masks.assign(mesh.faces.size(),0u);
                 hybrid.at(&mesh).smoothing.masks.assign(mesh.faces.size(),1u);
             }
@@ -682,7 +1987,7 @@ void reconstructSkinSeamSmoothing(Writer& out,const Model& model) {
             for(std::size_t index=0;index<model.meshes.size();++index) {
                 const auto& mesh=model.meshes[index];
                 const auto found=hybrid.find(&mesh);
-                if(found==hybrid.end() || mesh.animated || !found->second.hasNormals || found->second.explicitNormals) continue;
+                if(found==hybrid.end() || mesh.animated || !found->second.hasNormals || found->second.explicitNormals || mesh.asciiNormalPositionSource) continue;
                 for(std::size_t face=0;face<mesh.faces.size();++face)
                     for(std::size_t corner=0;corner<3u;++corner) {
                         out.job().check();
@@ -708,7 +2013,7 @@ void reconstructSkinSeamSmoothing(Writer& out,const Model& model) {
         for(std::size_t index=0;index<model.meshes.size();++index) {
             const auto& mesh=model.meshes[index];
             const auto found=candidate.find(&mesh);
-            if(found==candidate.end() || mesh.animated || !found->second.hasNormals || found->second.explicitNormals) continue;
+            if(found==candidate.end() || mesh.animated || !found->second.hasNormals || found->second.explicitNormals || mesh.asciiNormalPositionSource) continue;
             auto& plan=found->second;
             std::vector<Vec3> targets;
             std::vector<bool> ignored;
@@ -810,7 +2115,7 @@ void reconstructSkinSeamSmoothing(Writer& out,const Model& model) {
                     const auto& mesh=model.meshes[index];
                     const auto found=candidate.find(&mesh);
                     if(!(mesh.mdxBitmap&0x80u) || mesh.animated || mesh.dangly || found==candidate.end() ||
-                       found->second.explicitNormals) continue;
+                       found->second.explicitNormals || mesh.asciiNormalPositionSource) continue;
                     auto& plan=found->second;
                     const TangentSmoothingSource tangents{
                         current.meshes[index].asciiTangentSource->firstCornerNormals,currentRows[index],useGeneratedWriters};
@@ -907,7 +2212,7 @@ void reconstructSkinSeamSmoothing(Writer& out,const Model& model) {
                 const auto& mesh=model.meshes[index];
                 const auto found=plans.find(&mesh);
                 if(found==plans.end() || mesh.animated || !found->second.hasNormals ||
-                   found->second.explicitNormals) continue;
+                   found->second.explicitNormals || mesh.asciiNormalPositionSource) continue;
                 std::vector<bool> seamCorners;
                 for(const auto& face:seamRows[index])
                     for(const auto row:face)
@@ -935,7 +2240,7 @@ void reconstructSkinSeamSmoothing(Writer& out,const Model& model) {
             for(const auto& mesh:model.meshes) {
                 const auto found=plans.find(&mesh);
                 if(found==plans.end() || mesh.animated || !found->second.hasNormals ||
-                   found->second.explicitNormals) continue;
+                   found->second.explicitNormals || mesh.asciiNormalPositionSource) continue;
                 const auto& plan=found->second;
                 std::vector<std::vector<std::uint32_t>> candidates;
                 reconstructSmoothing(mesh,plan.vertices,plan.topology.sourceVertices,
@@ -951,6 +2256,26 @@ void reconstructSkinSeamSmoothing(Writer& out,const Model& model) {
             if(!refitted) break;
         }
     }
+    // Keep the additional cyclic candidates out of private smoothing-join
+    // trials; refine the accepted reconstruction once those reach a fixed point.
+    reconstructCyclicCornerPass(out,model,frames,plans,nullptr,false,true);
+    // Basis sums can cancel individual components and leave a different
+    // axis, without taking Normalize's +X branch or having singular UVs.
+    // Compare differing retained/rebuilt axes after smoothing joins and the cyclic search
+    // reach their fixed point, including the private shared-join proposals.
+    if(std::any_of(plans.begin(),plans.end(),[](const auto& entry) {
+        const auto& mesh=*entry.first;
+        return (mesh.mdxBitmap&0x80u) && !mesh.animated && !mesh.dangly &&
+            entry.second.hasNormals && !entry.second.explicitNormals;
+    })) reconstructCyclicCornerPass(out,model,frames,plans,nullptr,true,true);
+    // Face order changes ProcessVerts' rounded sums and the tangent writer.
+    // Apply the neighbor-preserving order last, judging every resulting
+    // normal and basis corner as well as the skin records.
+    reconstructFaceOrder(out,model,frames,plans);
+    reconstructTangentRounding(out,model,frames,plans);
+    reconstructNormalRoundingPass(out,model,frames,plans);
+    reconstructTangentUvPrecision(out,model,frames,plans);
+    reconstructNormalPositionPrecision(out,model,frames,plans);
 }
 
 ReconstructedMesh writeMesh(Writer& out,const Model& model,const Node& node,const Mesh& mesh) {
@@ -972,10 +2297,25 @@ ReconstructedMesh writeMesh(Writer& out,const Model& model,const Node& node,cons
         out.warning("Mesh "+node.name+": source edge connectivity cannot reproduce "+
             std::to_string(reconstruction.changedAdjacency)+" stored face-neighbour entries");
     const auto& smoothing=reconstructed.masks;
+    const auto precise=preciseUvPool(mesh,reconstruction);
     if(reconstructed.changedCornerNormals && !reconstruction.explicitNormals)
         out.warning("Mesh "+node.name+": reconstructed smoothing changes "+
             std::to_string(reconstructed.changedCornerNormals)+" corner normals; maximum component difference "+
             out.scalar(reconstructed.maxNormalComponentDifference));
+    if(!std::is_sorted(reconstruction.faceOrder.begin(),reconstruction.faceOrder.end()))
+        out.warning("Mesh "+node.name+": source face order changes during smoothing reconstruction");
+    std::size_t adjusted{};
+    float displacement{};
+    for(std::size_t source=0;source<result.sourceVertices.size();++source) {
+        const auto original=vertices[result.sourceVertices[source]].position;
+        const auto position=reconstruction.sourcePositions[source];
+        adjusted+=!same(original,position);
+        displacement=std::max({displacement,std::abs(original.x-position.x),
+            std::abs(original.y-position.y),std::abs(original.z-position.z)});
+    }
+    if(adjusted) out.warning("Mesh "+node.name+": rounding refinement adjusts "+
+        std::to_string(adjusted)+" source positions to neighboring float values; maximum coordinate change "+
+        out.scalar(displacement));
     if(!hasNormals && !vertices.empty())
         out.warning("Mesh "+node.name+": no compiled normal channel exists; source connectivity is retained and face normals are generated");
     if(mesh.cpuPositions) {
@@ -986,14 +2326,21 @@ ReconstructedMesh writeMesh(Writer& out,const Model& model,const Node& node,cons
             out.warning("Mesh "+node.name+": the independent MDL CPU position pool differs from the rendering positions; ASCII has one source vertex pool and exports the rendering positions");
     }
     diagnoseTopology(out,node,mesh);
+    if(!reconstruction.preciseSourcePositions.empty()) out.line("normalpositionprecision 64");
     out.line("verts "+std::to_string(result.sourceVertices.size()));
-    for(const auto index:result.sourceVertices) out.line(out.vector(vertices[index].position));
+    for(std::size_t source=0;source<reconstruction.sourcePositions.size();++source) {
+        if(reconstruction.preciseSourcePositions.empty()) out.line(out.vector(reconstruction.sourcePositions[source]));
+        else {
+            const auto& value=reconstruction.preciseSourcePositions[source];
+            out.line(out.scalarDouble(value[0])+" "+out.scalarDouble(value[1])+" "+out.scalarDouble(value[2]));
+        }
+    }
     if(reconstruction.explicitNormals) {
         out.explicitNormalNote();
         out.line("normals "+std::to_string(vertices.size()));
         for(const auto& vertex:vertices) out.line(out.vector(vertex.normal));
         out.line("normalindices "+std::to_string(mesh.faces.size()));
-        for(std::size_t i=0;i<mesh.faces.size();++i) {
+        for(const auto i:reconstruction.faceOrder) {
             const auto& face=mesh.faces[i];
             out.line(std::to_string(static_cast<std::uint32_t>(face.indices[reconstruction.sourceCorner(i,0u)]))+" "+
                 std::to_string(static_cast<std::uint32_t>(face.indices[reconstruction.sourceCorner(i,1u)]))+" "+
@@ -1015,15 +2362,21 @@ ReconstructedMesh writeMesh(Writer& out,const Model& model,const Node& node,cons
     }
     for(std::size_t channel=0;channel<4u;++channel) {
         if((mesh.mdxBitmap&(2u<<channel))==0u) continue;
-        const auto count=vertices.size();
+        const auto count=channel==0u && !precise.values.empty()?precise.values.size():vertices.size();
+        if(channel==0u && !precise.values.empty()) out.line("tangentuvprecision 64");
         out.line(std::string("tverts")+(channel?std::to_string(channel):std::string{})+" "+std::to_string(count));
         for(std::size_t i=0;i<count;++i) {
-            const auto value=uv(vertices[i],channel);
-            out.line(out.scalar(value.x)+" "+out.scalar(value.y)+" 0");
+            if(channel==0u && !precise.values.empty()) {
+                const auto& value=precise.values[i];
+                out.line(out.scalarDouble(value[0])+" "+out.scalarDouble(value[1])+" 0");
+            } else {
+                const auto value=uv(vertices[i],channel);
+                out.line(out.scalar(value.x)+" "+out.scalar(value.y)+" 0");
+            }
         }
         if(channel) {
             out.line("texindices"+std::to_string(channel)+" "+std::to_string(mesh.faces.size()));
-            for(std::size_t i=0;i<mesh.faces.size();++i) {
+            for(const auto i:reconstruction.faceOrder) {
                 const auto& face=mesh.faces[i];
                 out.line(std::to_string(static_cast<std::uint32_t>(face.indices[reconstruction.sourceCorner(i,0u)]))+" "+
                     std::to_string(static_cast<std::uint32_t>(face.indices[reconstruction.sourceCorner(i,1u)]))+" "+
@@ -1062,16 +2415,17 @@ ReconstructedMesh writeMesh(Writer& out,const Model& model,const Node& node,cons
         if(alpha) out.warning("Mesh "+node.name+": compiled vertex alpha has no colors-array component in the engine ASCII grammar");
     }
     out.line("faces "+std::to_string(mesh.faces.size()));
-    for(std::size_t i=0;i<mesh.faces.size();++i) {
+    for(const auto i:reconstruction.faceOrder) {
         const auto& sourceFace=result.sourceFaces[i];
         const auto& compiled=mesh.faces[i];
         const auto a=reconstruction.sourceCorner(i,0u),b=reconstruction.sourceCorner(i,1u),
                    c=reconstruction.sourceCorner(i,2u);
+        const auto texcoord=[&](std::size_t corner) {
+            return precise.values.empty()?static_cast<std::uint32_t>(compiled.indices[corner]):precise.indices[i][corner];
+        };
         out.line(std::to_string(sourceFace[a])+" "+std::to_string(sourceFace[b])+" "+std::to_string(sourceFace[c])+" "+
             std::to_string(static_cast<std::int32_t>(smoothing[i]))+" "+
-            std::to_string(static_cast<std::uint32_t>(compiled.indices[a]))+" "+
-            std::to_string(static_cast<std::uint32_t>(compiled.indices[b]))+" "+
-            std::to_string(static_cast<std::uint32_t>(compiled.indices[c]))+" "+
+            std::to_string(texcoord(a))+" "+std::to_string(texcoord(b))+" "+std::to_string(texcoord(c))+" "+
             std::to_string(static_cast<std::int32_t>(compiled.surfaceMaterial)));
     }
     if(mesh.dangly) {

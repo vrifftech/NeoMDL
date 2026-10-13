@@ -376,12 +376,21 @@ struct EngineFloatSkinChannels {
 };
 
 struct AsciiTangentSource {
+    std::vector<std::size_t> authoredFaceIndices;
     std::vector<std::uint32_t> faceSmoothing;
     std::vector<Vec3> firstCornerNormals;
+    std::vector<std::array<std::array<double,2>,3>> faceTexcoords64;
     // CalculateTangentSpaceBasis reads the full temporary NodeVertex list,
     // after the signed-short count has limited the published MDX pool.
     std::vector<Vec3> generatedPositions;
     std::vector<Vec2> generatedTexcoords;
+};
+
+struct AsciiNormalPositionSource {
+    std::vector<std::array<double,3>> positions;
+    std::vector<std::array<std::uint32_t,3>> faces;
+    std::vector<std::uint32_t> faceSmoothing;
+    std::vector<std::size_t> authoredFaceIndices;
 };
 
 // ParseNode/endnode allocations belong to the Model, not its current root.
@@ -426,6 +435,7 @@ struct Mesh {
     std::uint32_t mdxTangentOffset{0xffffffffu};
     std::size_t validTangentVertices{};
     std::shared_ptr<const AsciiTangentSource> asciiTangentSource;
+    std::shared_ptr<const AsciiNormalPositionSource> asciiNormalPositionSource;
     std::optional<std::size_t> asciiMdxAllocation;
     std::shared_ptr<const AsciiSkinSource> asciiSkinSource;
     // Final authored normals bypass smoothing and seam averaging.
@@ -488,7 +498,7 @@ struct Mesh {
     bool hasInverseBindPose{};
     std::optional<DanglyMeshData> dangly;
     std::array<std::int16_t, 17> skinBoneMap{};
-    std::size_t skinBoneMapSize{16u};
+    std::size_t skinBoneMapSize{17u};
     std::vector<SkinInfluence> skinInfluences;
     // MdlNodeSkin32 stores model-space inverse-bind transforms as separate
     // quaternion and translation arrays. Quaternions are converted from the

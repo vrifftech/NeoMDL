@@ -5663,6 +5663,13 @@ void ModelCanvas::drawMesh(const neomdl::model::Mesh& mesh,
     // no TriMesh alpha early-out; its shell still executes (0x10fdc1).
     const bool materialOnly=!mesh.skinned && !mesh.animated && surface.opacity<=0.001f &&
         (game==model::GameVersion::Kotor1 || std::isfinite(surface.opacity));
+    const auto* textureSource=resources ? resources : document_;
+    neoshared::material::TextureBinding ownerEnvironmentBinding;
+    if(ownerEffects&&!ownerEffects->environmentMap.empty()) {
+        ownerEnvironmentBinding.resref=ownerEffects->environmentMap;
+        ownerEnvironmentBinding.key=neoshared::material::textureResourceKey(ownerEnvironmentBinding.resref);
+        if(textureSource)ownerEnvironmentBinding.metadata=textureSource->textureMetadata(ownerEnvironmentBinding.key);
+    }
     neomdl::material::EnginePartTriMeshInputs inputs;
     inputs.engineHardware=options_.engineHardware;
     inputs.lightmapped=mesh.lightmapped;
@@ -5670,7 +5677,8 @@ void ModelCanvas::drawMesh(const neomdl::model::Mesh& mesh,
     // MdlNodeTriMesh::HasTangentBases checks the stored offset only. The
     // geometry path can still generate a safe basis for malformed rows.
     inputs.tangentBases=mesh.mdxTangentOffset!=0xffffffffu;
-    inputs.ownerEnvironmentMap=ownerEffects&&!ownerEffects->environmentMap.empty();
+    inputs.ownerEnvironmentMap=!ownerEnvironmentBinding.key.empty() &&
+        ownerEnvironmentBinding.metadata && ownerEnvironmentBinding.metadata->facts.hasPixels;
     parameters.material=neomdl::material::evaluateEnginePartTriMeshMaterial(
         material,surface,inputs,
         game==model::GameVersion::Kotor1 ? material::EngineMaterialGame::Kotor1
@@ -5695,7 +5703,6 @@ void ModelCanvas::drawMesh(const neomdl::model::Mesh& mesh,
     // Material::InitializeTextures registers texture slot zero independently of
     // whether the renderer later displays textures. Preserve that order so the
     // K2 static mesh buckets do not change when the viewer toggle is disabled.
-    const auto* textureSource=resources ? resources : document_;
     if(textureSource && !material.diffuse.key.empty()) {
         const auto* texture=textureSource->texture(material.diffuse.key);
         if(texture && texture->hasPixels())
@@ -5726,17 +5733,13 @@ void ModelCanvas::drawMesh(const neomdl::model::Mesh& mesh,
             parameters.environmentTexture=environment.id;
             parameters.environmentCube=environment.cube;
         }
-        if(ownerEffects&&!ownerEffects->environmentMap.empty()) {
-            neoshared::material::TextureBinding binding;
-            binding.resref=ownerEffects->environmentMap;
-            binding.key=neoshared::material::textureResourceKey(binding.resref);
-            if(textureSource)binding.metadata=textureSource->textureMetadata(binding.key);
-            const auto environment=textureFor(binding,0,resources);
+        if(inputs.ownerEnvironmentMap) {
+            const auto environment=textureFor(ownerEnvironmentBinding,0,resources);
             parameters.environmentTexture=environment.id;
             parameters.environmentCube=environment.cube;
             if(environment.id&&!environment.cube && !shaderErrorReported_) {
                 wxLogWarning("NeoMDL owner environment map %s is not a cubemap",
-                    wxString::FromUTF8(binding.key.c_str()));
+                    wxString::FromUTF8(ownerEnvironmentBinding.key.c_str()));
                 shaderErrorReported_=true;
             }
         }

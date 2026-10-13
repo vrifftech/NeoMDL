@@ -20,6 +20,10 @@ struct MeshReconstruction {
     bool hasNormals{};
     bool explicitNormals{};
     std::vector<std::uint8_t> cornerRotations;
+    std::vector<std::size_t> faceOrder;
+    std::vector<Vec3> sourcePositions;
+    std::vector<std::array<std::array<double,2>,3>> preciseFaceTexcoords;
+    std::vector<std::array<double,3>> preciseSourcePositions;
     std::size_t sourceCorner(std::size_t face,std::size_t corner) const {
         return (corner+cornerRotations[face])%3u;
     }
@@ -31,6 +35,7 @@ public:
     void line(const std::string& text = {});
     void warning(const std::string& text);
     std::string scalar(float value) const;
+    std::string scalarDouble(double value) const;
     std::string vector(Vec3 value) const;
     std::string quaternion(Quaternion value);
     std::string token(const std::string& value, const std::string& context) const;
@@ -40,6 +45,8 @@ public:
     bool explicitNormals(const Mesh& mesh) const noexcept {
         return options_.explicitNormals.value_or(mesh.explicitNormals);
     }
+    bool refineTangentRounding() const noexcept { return options_.refineTangentRounding; }
+    bool refineNormalRounding() const noexcept { return options_.refineNormalRounding; }
     void explicitNormalNote();
     AsciiExportResult finish();
     std::map<const Mesh*,MeshReconstruction> meshReconstructions;

@@ -324,7 +324,7 @@ bool ModelDocument::openResource(neoshared::ResourceDocument resource,
     const auto auxiliary=auxiliaryTextures();
     if(!auxiliary.empty()) { loadTexturesFromResolver(resolver,auxiliary); rebuildMaterials(); }
     // Compile against a fresh engine texture cache. InitializeTextures creates
-    // pending texture references and reads sidecar TXI before any image load;
+    // pending texture references and reads TXI before any image load;
     // HasBumpMap accepts a named pending bump without inspecting its pixels or
     // bump kind. The decoded materials above remain the runtime render view.
     std::unordered_map<std::string,bool> compilerBumpMaps;
@@ -334,14 +334,19 @@ bool ModelDocument::openResource(neoshared::ResourceDocument resource,
         const auto cacheKey=std::to_string(static_cast<int>(game))+":"+key;
         const auto found=compilerBumpMaps.find(cacheKey);
         if(found!=compilerBumpMaps.end())return found->second;
-        bool hasBump=false;
         job.check();
+        std::string source;
         if(const auto sidecar=resolver(key,kTxiResourceType)) {
-            const auto txi=neoshared::material::parseAsciiMaterialTxi(bytesToText(sidecar->bytes),
-                game==model::GameVersion::Kotor1);
-            hasBump=txi.engineTextureNames &&
-                !neoshared::material::textureResourceKey(txi.engineTextureNames->bumpMap).empty();
+            source=bytesToText(sidecar->bytes);
+        } else if(const auto processed=resolver(key,kTpcResourceType)) {
+            // GetResource resolves missing TXI through the processed texture
+            // (K1 0x377e6c, K2 0x133640), without decoding its pixels.
+            source=neoshared::texture::readTpcTxiBytes(processed->bytes);
         }
+        const auto txi=neoshared::material::parseAsciiMaterialTxi(source,
+            game==model::GameVersion::Kotor1);
+        const bool hasBump=txi.engineTextureNames &&
+            !neoshared::material::textureResourceKey(txi.engineTextureNames->bumpMap).empty();
         compilerBumpMaps.emplace(cacheKey,hasBump);
         return hasBump;
     };

@@ -12,12 +12,14 @@
 
 int main(int argc, char** argv) {
     const auto printUsage = [] {
-        std::cout << "Usage: neomdl-info [--game=k1|--game=k2] [--export-ascii output.mdl] [--explicit-normals|--smoothing-groups] [--export-packed output.mdl] <model.mdl> [model.mdx]\n"
+        std::cout << "Usage: neomdl-info [--game=k1|--game=k2] [--export-ascii output.mdl] [--explicit-normals|--smoothing-groups] [--refine-tangent-rounding] [--refine-normal-rounding] [--export-packed output.mdl] <model.mdl> [model.mdx]\n"
                      "ASCII models use the shared x86-layout builder and require an explicit target game.\n"
                      "ASCII export writes one model asset and its own animations to a separate file.\n"
                      "--explicit-normals preserves normals in a NeoMDL ASCII extension.\n"
                      "--smoothing-groups reconstructs smoothing groups instead of explicit mesh normals.\n"
                      "Without either option, export preserves the mesh's input mode; compiled meshes use smoothing groups.\n"
+                     "--refine-tangent-rounding allows smoothing export to move selected source coordinates by one float step to improve tangents.\n"
+                     "--refine-normal-rounding allows the same position adjustment to improve normals on overlapping opposite-wound triangles.\n"
                      "Packed export compiles ASCII input to an x86 MDL and same-name MDX pair.\n";
     };
     if (argc == 2 && (std::string_view(argv[1]) == "--help" || std::string_view(argv[1]) == "-h")) {
@@ -35,6 +37,8 @@ int main(int argc, char** argv) {
         else if(argument=="--game=k2")game=neomdl::model::GameVersion::Kotor2;
         else if(argument=="--explicit-normals")asciiOptions.explicitNormals=true;
         else if(argument=="--smoothing-groups")asciiOptions.explicitNormals=false;
+        else if(argument=="--refine-tangent-rounding")asciiOptions.refineTangentRounding=true;
+        else if(argument=="--refine-normal-rounding")asciiOptions.refineNormalRounding=true;
         else if(argument=="--export-ascii") {
             if(i+1>=argc) {printUsage();return 2;}
             asciiOutput=std::filesystem::u8path(argv[++i]);
@@ -67,7 +71,10 @@ int main(int argc, char** argv) {
             // NewCAurObject runs seams after Part::PostProcess (0x6ede8f).
             neomdl::model::processAsciiSkinSeams(document.model());
             model=document.sourceModel();
-        } else model=neomdl::model::readModelFile(paths[0], mdx, {}, game);
+        } else {
+            model=neomdl::model::readModelFile(paths[0], mdx, {}, game);
+            if(asciiOutput) neomdl::model::processAsciiSkinSeams(model);
+        }
         std::cout << neomdl::model::modelSummary(model) << '\n';
         for (const auto& warning : model.warnings) std::cout << "warning: " << warning << '\n';
         auto protectedPaths=packedOutput?document.openPaths():paths;

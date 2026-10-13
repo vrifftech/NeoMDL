@@ -40,6 +40,13 @@ std::string Writer::scalar(float value) const {
     return stream.str();
 }
 
+std::string Writer::scalarDouble(double value) const {
+    std::ostringstream stream;
+    stream.imbue(std::locale::classic());
+    stream<<std::setprecision(std::numeric_limits<double>::max_digits10)<<value;
+    return stream.str();
+}
+
 std::string Writer::vector(Vec3 value) const {
     return scalar(value.x)+" "+scalar(value.y)+" "+scalar(value.z);
 }

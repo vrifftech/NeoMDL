@@ -38,14 +38,7 @@ model::Vec3 position(const GffStruct& s,const char* n,model::Vec3 fallback={}) {
 model::Quaternion orientation(const GffStruct& s,const char* n,
                               model::Quaternion fallback={}) {
     const auto* p=typed<GffOrientationField>(s,n);if(!p)return fallback;
-    const model::Quaternion value{p->value[0],p->value[1],p->value[2],p->value[3]};
-    const auto length=double(value.x)*value.x+double(value.y)*value.y+
-        double(value.z)*value.z+double(value.w)*value.w;
-    require(std::isfinite(length)&&length>1.0e-20,"invalid "+std::string(n));
-    // The GFF registry retains the authored quaternion bytes. Consumers that
-    // require a rigid transform normalize a working copy without rewriting the
-    // loaded record or its provenance report.
-    return value;
+    return {p->value[0],p->value[1],p->value[2],p->value[3]};
 }
 std::optional<bool> optionalFlag(const GffStruct& s,const char* n) {
     const auto* p=typed<GffByteField>(s,n);if(!p)return {};

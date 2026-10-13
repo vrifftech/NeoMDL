@@ -1341,7 +1341,7 @@ private:
         }
         if (mesh.skinned) {
             const auto skinOffset = offset - (model_.game == GameVersion::Kotor1 ? 8u : 0u);
-            mesh.skinBoneMapSize = model_.game == GameVersion::Kotor1 ? 17u : 16u;
+            mesh.skinBoneMapSize = 17u;
             if (payload_->contains(skinOffset + kK2SkinWeightMdxOffset, 8u)) {
                 mesh.mdxWeightOffset = payload_->u32(
                     skinOffset + kK2SkinWeightMdxOffset, "skin weight MDX channel offset");

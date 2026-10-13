@@ -6,6 +6,7 @@
 #include <cmath>
 #include <cstdio>
 #include <cstring>
+#include <map>
 
 namespace neomdl::model::ascii {
 namespace {
@@ -45,22 +46,41 @@ void boolean(const Line& line,bool& value) {
 
 // K1 Parse<Vector> 0x5a400c; K2 0x722be0: a numeric count followed by any
 // additional character selects raw float32 data. No count selects endlist.
-void vectorList(const Line& header,Reader& reader,std::vector<Vec3>& values) {
+void vectorList(const Line& header,Reader& reader,std::vector<Vec3>& values,
+                std::vector<std::array<double,2>>* precise=nullptr,
+                std::vector<std::array<double,3>>* precisePositions=nullptr) {
+    const auto read=[&](const Line& row,std::size_t index) {
+        vector(row,values[index],0u);
+        if(precise) {
+            auto& uv=(*precise)[index];
+            std::sscanf(arguments(row,0u).c_str(),"%lf %lf",&uv[0],&uv[1]);
+        }
+        if(precisePositions) {
+            auto& position=(*precisePositions)[index];
+            std::sscanf(arguments(row,0u).c_str(),"%lf %lf %lf",&position[0],&position[1],&position[2]);
+        }
+    };
     int count{}; char marker{};
     const auto fields=std::sscanf(arguments(header).c_str(),"%d %c",&count,&marker);
     if(fields>0) {
         values.resize(static_cast<std::size_t>(count));
+        if(precise) precise->resize(values.size());
+        if(precisePositions) precisePositions->resize(values.size());
         if(fields==2) {
             const auto data=reader.takeBytes(values.size()*12u,header);
-            for(std::size_t i=0;i<values.size();++i) values[i]=vector(data.data()+i*12u);
+            for(std::size_t i=0;i<values.size();++i) {
+                values[i]=vector(data.data()+i*12u);
+                if(precise) (*precise)[i]={values[i].x,values[i].y};
+                if(precisePositions) (*precisePositions)[i]={values[i].x,values[i].y,values[i].z};
+            }
             reader.finishPackedArray(header);
         } else {
-            for(auto& value:values) {
+            for(std::size_t i=0;i<values.size();++i) {
                 Line row;
                 // Parse<Vector> returns at physical EOF, retaining copied
                 // old rows and the constructor-zeroed new vector rows.
                 if(!reader.next(row)) return;
-                vector(row,value,0u);
+                read(row,i);
             }
         }
         return;
@@ -68,8 +88,12 @@ void vectorList(const Line& header,Reader& reader,std::vector<Vec3>& values) {
     std::size_t i{}; Line row;
     while(reader.next(row)) {
         if(row.tokens.front().compare(0u,7u,"endlist")==0) return;
-        if(i==values.size()) values.push_back(i?values.back():Vec3{});
-        vector(row,values[i++],0u);
+        if(i==values.size()) {
+            values.push_back(i?values.back():Vec3{});
+            if(precise) precise->push_back(i?precise->back():std::array<double,2>{});
+            if(precisePositions) precisePositions->push_back(i?precisePositions->back():std::array<double,3>{});
+        }
+        read(row,i++);
     }
 }
 void face(const Line& row,RawFace& value) {
@@ -149,6 +173,16 @@ Vec3 faceCross(const RawFace& face,const std::vector<Vec3>& vertices) {
     return cross(subtract(b,a),subtract(c,b));
 }
 
+Vec3 preciseNormalCross(const RawFace& face,const RawNode& raw) {
+    std::array<Vec3,3> positions;
+    std::array<std::array<double,3>,3> precise;
+    for(std::size_t corner=0;corner<3u;++corner) {
+        positions[corner]=raw.vertices.at(face.vertices[corner]);
+        precise[corner]=raw.normalPositions64.at(face.vertices[corner]);
+    }
+    return normalPositionFaceCross(positions,precise);
+}
+
 // ProcessVerts K1 0x5c3950, K2 0x6e1a50. Smoothing uses source vertex
 // indices, not equal positions; contributions are unnormalized face crosses.
 // A previously processed corner with exactly the same smoothing mask reuses
@@ -192,7 +226,8 @@ std::vector<std::array<std::size_t,3>> processVertices(RawNode& raw,Mesh& mesh,
                     int shared=2;
                     while(shared>=0 && candidate.vertices[static_cast<std::size_t>(shared)]!=current.vertices[corner]) --shared;
                     if(shared<0 || (i!=j && !(current.smoothing&candidate.smoothing))) continue;
-                    const auto weighted=faceCross(candidate,raw.vertices);
+                    const auto weighted=raw.normalPositionPrecision==64u?
+                        preciseNormalCross(candidate,raw):faceCross(candidate,raw.vertices);
                     sum={sum.x+weighted.x,sum.y+weighted.y,weighted.z+sum.z};
                     if(j<i && current.smoothing==candidate.smoothing) {
                         indices[i][corner]=indices[j][static_cast<std::size_t>(shared)];
@@ -378,8 +413,10 @@ std::vector<GeneratedVertex> generateAnimVertices(RawNode& raw,Mesh& mesh,
     }
     std::vector<GeneratedAnimVertex> generated;
     mesh.faces.resize(raw.faces.size());
+    raw.tangentFaceSources.resize(raw.faces.size());
     for(std::size_t i=0;i<raw.faces.size();++i) {
         job.check();
+        raw.tangentFaceSources[i]=i;
         const auto& sourceFace=raw.faces[i];
         auto& face=mesh.faces[i];face.surfaceMaterial=sourceFace.material;
         for(std::size_t corner=0;corner<3u;++corner) {
@@ -438,10 +475,12 @@ std::vector<GeneratedVertex> generateVertices(RawNode& raw,Mesh& mesh,
     // the third authoring UV coordinate that is omitted from final MDX rows.
     std::vector<GeneratedVertex> vertices;
     mesh.faces.resize(raw.faces.size());
+    raw.tangentFaceSources.resize(raw.faces.size());
     const bool dangly=raw.node.flags==0x121u;
     const bool skin=raw.node.flags==0x61u;
     for(std::size_t i=0;i<raw.faces.size();++i) {
         job.check();
+        raw.tangentFaceSources[i]=i;
         auto& face=mesh.faces[i];face.surfaceMaterial=raw.faces[i].material;
         for(std::size_t corner=0;corner<3u;++corner) {
             GeneratedVertex vertex;
@@ -468,7 +507,10 @@ std::vector<GeneratedVertex> generateVertices(RawNode& raw,Mesh& mesh,
     if(raw.node.flags!=0x221u && !dangly && !skin)
         for(std::size_t i=mesh.faces.size();i--;) {
             const auto& v=mesh.faces[i].indices;
-            if(v[0]==v[1] || v[0]==v[2] || v[1]==v[2]) mesh.faces.erase(mesh.faces.begin()+static_cast<std::ptrdiff_t>(i));
+            if(v[0]==v[1] || v[0]==v[2] || v[1]==v[2]) {
+                mesh.faces.erase(mesh.faces.begin()+static_cast<std::ptrdiff_t>(i));
+                raw.tangentFaceSources.erase(raw.tangentFaceSources.begin()+static_cast<std::ptrdiff_t>(i));
+            }
         }
     return vertices;
 }
@@ -556,7 +598,8 @@ static bool parseMeshValue(const Line& line,Reader& reader,RawNode& raw,GameVers
     if(!raw.mesh) return false;
     auto& mesh=*raw.mesh;
     const auto key=lower(line.tokens.front());
-    if(key=="verts") vectorList(line,reader,raw.vertices);
+    if(key=="verts") vectorList(line,reader,raw.vertices,nullptr,&raw.normalPositions64);
+    else if(key=="normalpositionprecision") integer(line,raw.normalPositionPrecision);
     else if(key=="normals" && raw.node.flags!=0xa1u) {
         vectorList(line,reader,raw.normals);
         mesh.explicitNormals=true;
@@ -570,7 +613,8 @@ static bool parseMeshValue(const Line& line,Reader& reader,RawNode& raw,GameVers
             },[](const std::uint8_t* bytes) {
                 return std::array<std::uint32_t,3>{{word(bytes),word(bytes+4u),word(bytes+8u)}};
             });
-    else if(key=="tverts") vectorList(line,reader,raw.texcoords[0]);
+    else if(key=="tangentuvprecision") integer(line,raw.tangentUvPrecision);
+    else if(key=="tverts") vectorList(line,reader,raw.texcoords[0],&raw.tangentTexcoords64);
     else if(key=="tverts1") vectorList(line,reader,raw.texcoords[1]);
     else if(key=="tverts2") vectorList(line,reader,raw.texcoords[2]);
     else if(key=="tverts3") vectorList(line,reader,raw.texcoords[3]);
@@ -664,6 +708,8 @@ bool parseMeshField(const Line& initial,Reader& reader,RawNode& raw,GameVersion 
     if(!raw.mesh) return false;
     const auto offset=initial.bufferOffset;
     const auto extension=lower(initial.tokens.front());
+    if(extension=="tangentuvprecision" || extension=="normalpositionprecision")
+        return parseMeshValue(initial,reader,raw,game);
     if(raw.node.flags!=0xa1u && (extension=="normals" ||
             (extension=="normalindices" && raw.node.flags!=0x821u))) {
         parseMeshValue(initial,reader,raw,game);
@@ -724,6 +770,19 @@ void postProcessSkinNode(RawNode& raw,const neoshared::bif::JobControl& job) {
         raw.processedSkinNormals=processVertices(raw,*raw.mesh,job);
 }
 
+void retainNormalPositionSource(const RawNode& raw,Mesh& mesh) {
+    mesh.asciiNormalPositionSource.reset();
+    if(raw.normalPositionPrecision!=64u) return;
+    auto source=std::make_shared<AsciiNormalPositionSource>();
+    source->positions=raw.normalPositions64;
+    source->authoredFaceIndices=raw.tangentFaceSources;
+    for(const auto& face:raw.faces) {
+        source->faces.push_back(face.vertices);
+        source->faceSmoothing.push_back(face.smoothing);
+    }
+    mesh.asciiNormalPositionSource=std::move(source);
+}
+
 void retainTangentSource(const RawNode& raw,Mesh& mesh,
         const std::vector<std::array<std::size_t,3>>& normalIndices,
         const std::vector<GeneratedVertex>& generated,bool animated) {
@@ -731,9 +790,15 @@ void retainTangentSource(const RawNode& raw,Mesh& mesh,
     // immediately (0x457710). Do not rebuild it as a KOTOR nine-float basis.
     if(mesh.dangly || (animated && !raw.animTangents.empty())) return;
     auto source=std::make_shared<AsciiTangentSource>();
+    source->authoredFaceIndices=raw.tangentFaceSources;
     for(std::size_t i=0;i<mesh.faces.size();++i) {
         source->faceSmoothing.push_back(raw.faces[i].smoothing);
         source->firstCornerNormals.push_back(raw.normals.at(normalIndices[i][0]));
+        if(raw.tangentUvPrecision==64u) {
+            const auto& uv=raw.faces[source->authoredFaceIndices[i]].texcoords[0];
+            source->faceTexcoords64.push_back({raw.tangentTexcoords64.at(uv[0]),
+                raw.tangentTexcoords64.at(uv[1]),raw.tangentTexcoords64.at(uv[2])});
+        }
     }
     for(const auto& vertex:generated) {
         source->generatedPositions.push_back(vertex.position);
@@ -750,6 +815,7 @@ std::vector<std::array<std::int16_t,3>> generateAsciiMeshGeometry(
     corners.reserve(raw.faces.size());
     const auto generated=animated?generateAnimVertices(raw,mesh,normals,job):
         generateVertices(raw,mesh,normals,job,&corners);
+    retainNormalPositionSource(raw,mesh);
     retainTangentSource(raw,mesh,normals,generated,animated);
     if(animated)
         for(const auto& face:mesh.faces) corners.push_back(face.indices);
@@ -812,10 +878,12 @@ void buildMesh(Model& model,RawNode& raw,std::size_t nodeIndex,
         // Only InternalGenVertices replaces them with the welded list; the
         // no-face exit preserves every authored row (K2 0x6e63a4/0x6e6809).
         if(mesh.dangly) mesh.dangly->constraints=raw.constraints;
+        retainNormalPositionSource(raw,mesh);
         return;
     }
     const auto generated=animated?generateAnimVertices(raw,mesh,normalIndices,job):
         generateVertices(raw,mesh,normalIndices,job);
+    retainNormalPositionSource(raw,mesh);
     if(raw.node.flags==0x821u) {lightsaber(raw,mesh);return;}
     neighbors(raw,mesh);
     retainTangentSource(raw,mesh,normalIndices,generated,animated);
@@ -944,6 +1012,155 @@ void buildMesh(Model& model,RawNode& raw,std::size_t nodeIndex,
     }
 }
 
+Vec3 tangentBasisNormal(Vec3 bitangent,Vec3 tangent,Vec3 faceArea) {
+    if(faceArea.x==0.0f && faceArea.y==0.0f && faceArea.z==0.0f) {
+        return {
+            static_cast<float>(static_cast<double>(bitangent.y)*tangent.z-static_cast<double>(bitangent.z)*tangent.y),
+            static_cast<float>(static_cast<double>(bitangent.z)*tangent.x-static_cast<double>(bitangent.x)*tangent.z),
+            static_cast<float>(static_cast<double>(bitangent.x)*tangent.y-static_cast<double>(bitangent.y)*tangent.x)};
+    }
+    return cross(bitangent,tangent);
+}
+
+std::array<Vec3,2> normalPositionFaceProducts(const std::array<Vec3,3>& positions,
+        const std::array<std::array<double,3>,3>& precise) {
+    // Retain rounded edges and add only authored sub-float position residuals.
+    const auto edge=[&](std::size_t first,std::size_t second) {
+        const auto a=positions[first],b=positions[second];
+        const std::array<float,3> lowA{{a.x,a.y,a.z}},lowB{{b.x,b.y,b.z}};
+        std::array<double,3> result;
+        for(std::size_t axis=0;axis<3u;++axis) {
+            const float base=lowB[axis]-lowA[axis];
+            const double residual=(precise[second][axis]-lowB[axis])-(precise[first][axis]-lowA[axis]);
+            result[axis]=residual==0.0?static_cast<double>(base):static_cast<double>(base)+residual;
+        }
+        return result;
+    };
+    const auto p=edge(0u,1u),q=edge(1u,2u);
+    return {{
+        {static_cast<float>(p[1]*q[2]),static_cast<float>(p[2]*q[0]),static_cast<float>(p[0]*q[1])},
+        {static_cast<float>(p[2]*q[1]),static_cast<float>(p[0]*q[2]),static_cast<float>(p[1]*q[0])}}};
+}
+
+Vec3 normalPositionFaceCross(const std::array<Vec3,3>& positions,
+        const std::array<std::array<double,3>,3>& precise) {
+    const auto products=normalPositionFaceProducts(positions,precise);
+    return {products[0].x-products[1].x,products[0].y-products[1].y,products[0].z-products[1].z};
+}
+
+Vec3 tangentUvDerivative(Vec3 p,Vec3 q,const std::array<Vec2,3>& uv,
+        const std::array<std::array<double,2>,3>& precise,std::size_t component) {
+    const float a=component?uv[0].y:uv[0].x;
+    const float b=component?uv[1].y:uv[1].x;
+    const float c=component?uv[2].y:uv[2].x;
+    const float firstBase=b-a,secondBase=c-a;
+    // Retain the rounded coefficients and add only authored sub-float UV residuals.
+    const double firstResidual=(precise[1][component]-b)-(precise[0][component]-a);
+    const double secondResidual=(precise[2][component]-c)-(precise[0][component]-a);
+    const double first=firstResidual==0.0?static_cast<double>(firstBase):
+        static_cast<double>(firstBase)+firstResidual;
+    const double second=secondResidual==0.0?static_cast<double>(secondBase):
+        static_cast<double>(secondBase)+secondResidual;
+    return {
+        static_cast<float>(q.x*first)-static_cast<float>(p.x*second),
+        static_cast<float>(q.y*first)-static_cast<float>(p.y*second),
+        static_cast<float>(q.z*first)-static_cast<float>(p.z*second)};
+}
+
+void orientSingularTangentComponents(const std::vector<TangentFace>& faces,
+        std::vector<TangentBasis>& bases,const neoshared::bif::JobControl& job) {
+    std::vector<bool> singular(faces.size());
+    for(std::size_t i=0;i<faces.size();++i) {
+        job.check();
+        const auto& uv=faces[i].texcoords;
+        const float pu=uv[1].x-uv[0].x,qu=uv[2].x-uv[0].x;
+        const float pv=uv[1].y-uv[0].y,qv=uv[2].y-uv[0].y;
+        singular[i]=pu*qv-pv*qu==0.0f;
+    }
+    if(std::none_of(singular.begin(),singular.end(),[](bool value){return value;})) return;
+
+    using Endpoint=std::array<float,5>;
+    using Edge=std::array<Endpoint,2>;
+    std::map<Edge,std::vector<std::size_t>> edges;
+    for(std::size_t i=0;i<faces.size();++i) {
+        job.check();
+        std::array<Endpoint,3> endpoints;
+        for(std::size_t corner=0;corner<3;++corner) {
+            const auto p=faces[i].positions[corner];
+            const auto uv=faces[i].texcoords[corner];
+            endpoints[corner]={p.x,p.y,p.z,uv.x,uv.y};
+        }
+        for(std::size_t corner=0;corner<3;++corner) {
+            Edge edge{endpoints[corner],endpoints[(corner+1)%3]};
+            if(edge[1]<edge[0]) std::swap(edge[0],edge[1]);
+            edges[edge].push_back(i);
+        }
+    }
+    std::vector<std::size_t> parents(faces.size());
+    for(std::size_t i=0;i<faces.size();++i) parents[i]=i;
+    const auto root=[&](std::size_t i) {
+        while(parents[i]!=i) {parents[i]=parents[parents[i]];i=parents[i];}
+        return i;
+    };
+    for(const auto& entry:edges) {
+        job.check();
+        auto first=faces.size();
+        for(const auto face:entry.second) if(singular[face]) {
+            if(first==faces.size()) first=face;
+            else parents[root(face)]=root(first);
+        }
+    }
+    std::vector<std::vector<std::size_t>> components(faces.size()),boundaries(faces.size());
+    for(std::size_t i=0;i<faces.size();++i) if(singular[i]) components[root(i)].push_back(i);
+    for(const auto& entry:edges) {
+        job.check();
+        const auto& incident=entry.second;
+        const auto first=std::find_if(incident.begin(),incident.end(),[&](std::size_t face){return singular[face];});
+        if(first!=incident.end())
+            for(const auto face:incident) if(!singular[face]) boundaries[root(*first)].push_back(face);
+    }
+    const auto dot=[](Vec3 a,Vec3 b) {
+        return (static_cast<double>(a.x)*b.x+static_cast<double>(a.y)*b.y)+
+               static_cast<double>(a.z)*b.z;
+    };
+    const auto collinear=[](Vec3 a,Vec3 b) {
+        return static_cast<double>(a.y)*b.z-static_cast<double>(a.z)*b.y==0.0 &&
+               static_cast<double>(a.z)*b.x-static_cast<double>(a.x)*b.z==0.0 &&
+               static_cast<double>(a.x)*b.y-static_cast<double>(a.y)*b.x==0.0;
+    };
+    for(std::size_t component=0;component<components.size();++component) {
+        job.check();
+        const auto& members=components[component];
+        if(members.empty()) continue;
+        const auto reference=bases[members.front()].tangent;
+        if(same(reference,Vec3{})) continue;
+        bool eligible=true,opposed=false;
+        for(const auto face:members) {
+            const auto& basis=bases[face];
+            if(!same(basis.normal,Vec3{}) || !collinear(reference,basis.tangent)) {eligible=false;break;}
+            if(dot(reference,basis.tangent)<0.0) opposed=true;
+        }
+        if(!eligible || !opposed) continue;
+        auto& boundary=boundaries[component];
+        std::sort(boundary.begin(),boundary.end());
+        boundary.erase(std::unique(boundary.begin(),boundary.end()),boundary.end());
+        int direction=0;
+        for(const auto face:boundary) {
+            const auto projection=dot(reference,bases[face].tangent);
+            const int sign=projection>0.0?1:projection<0.0?-1:0;
+            if(sign==0) continue;
+            if(direction!=0 && direction!=sign) {eligible=false;break;}
+            direction=sign;
+        }
+        if(!eligible || direction==0) continue;
+        for(const auto face:members)
+            if(dot(reference,bases[face].tangent)*direction<0.0) {
+                auto& tangent=bases[face].tangent;
+                tangent={-tangent.x,-tangent.y,-tangent.z};
+            }
+    }
+}
+
 // CalculateTangentSpaceBasis K1 0x5c56b4/K2 0x6e3f40 is called only after
 // engine material initialization reports a bump map without a normal map.
 // The loader retains the full temporary vertex/face inputs until that
@@ -966,7 +1183,9 @@ void buildTangentBasis(Mesh& mesh,const neoshared::bif::JobControl& job) {
     const auto add=[](Vec3 a,Vec3 b){return Vec3{a.x+b.x,a.y+b.y,a.z+b.z};};
     const auto negate=[](Vec3 v){return Vec3{-v.x,-v.y,-v.z};};
     std::vector<TangentBasis> faceBasis;
+    std::vector<TangentFace> tangentFaces;
     faceBasis.reserve(mesh.faces.size());
+    tangentFaces.reserve(mesh.faces.size());
     for(std::size_t i=0;i<mesh.faces.size();++i) {
         job.check();
         const auto& face=mesh.faces[i];
@@ -979,14 +1198,25 @@ void buildTangentBasis(Mesh& mesh,const neoshared::bif::JobControl& job) {
         const float pu=buv.x-auv.x,qu=cuv.x-auv.x;
         const float pv=buv.y-auv.y,qv=cuv.y-auv.y;
         TangentBasis basis;
-        basis.bitangent=normalize({q.x*pu-p.x*qu,q.y*pu-p.y*qu,q.z*pu-p.z*qu});
-        basis.tangent=normalize({q.x*pv-p.x*qv,q.y*pv-p.y*qv,q.z*pv-p.z*qv});
-        basis.normal=cross(basis.bitangent,basis.tangent);
+        if(source.faceTexcoords64.empty()) {
+            basis.bitangent=normalize({q.x*pu-p.x*qu,q.y*pu-p.y*qu,q.z*pu-p.z*qu});
+            basis.tangent=normalize({q.x*pv-p.x*qv,q.y*pv-p.y*qv,q.z*pv-p.z*qv});
+        } else {
+            const std::array<Vec2,3> uv{{auv,buv,cuv}};
+            const auto& precise=source.faceTexcoords64.at(i);
+            basis.bitangent=normalize(tangentUvDerivative(p,q,uv,precise,0u));
+            basis.tangent=normalize(tangentUvDerivative(p,q,uv,precise,1u));
+        }
+        const auto area=cross(p,subtract(source.generatedPositions.at(c),source.generatedPositions.at(b)));
+        basis.normal=tangentBasisNormal(basis.bitangent,basis.tangent,area);
         const auto n=source.firstCornerNormals.at(i);
         const auto alignment=(basis.normal.x*n.x+basis.normal.y*n.y)+basis.normal.z*n.z;
         if(alignment<0.0f) {basis.tangent=negate(basis.tangent);basis.normal=negate(basis.normal);}
         faceBasis.push_back(basis);
+        tangentFaces.push_back({{source.generatedPositions.at(a),source.generatedPositions.at(b),
+                                 source.generatedPositions.at(c)},{auv,buv,cuv}});
     }
+    orientSingularTangentComponents(tangentFaces,faceBasis,job);
     for(std::size_t i=0;i<mesh.faces.size();++i) {
         job.check();
         for(const auto index:mesh.faces[i].indices) {

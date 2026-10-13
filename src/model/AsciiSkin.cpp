@@ -306,7 +306,7 @@ void buildSkin(Model& model,RawNode& raw,Mesh& mesh,
     cpu->triangleBoneIndices.resize(sources.size());
     mesh.skinInfluences.resize(sources.size());
     mesh.skinBoneMap.fill(-1);
-    mesh.skinBoneMapSize=model.game==GameVersion::Kotor1?17u:16u;
+    mesh.skinBoneMapSize=17u;
     for(std::size_t vertex=0;vertex<sources.size();++vertex) {
         job.check();
         const auto source=sources[vertex];

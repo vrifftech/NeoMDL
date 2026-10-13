@@ -120,11 +120,16 @@ jobs:
         if: runner.os == 'Windows'
         shell: pwsh
         env:
+          TOOL_ROOT: ${{ github.workspace }}/${{ steps.layout.outputs.tool }}
           SHARED_ROOT: ${{ github.workspace }}/${{ steps.layout.outputs.shared }}
         run: |
           & "$env:SHARED_ROOT/scripts/install-wxwidgets.ps1" `
             -VcpkgRoot $env:VCPKG_INSTALLATION_ROOT `
             -Triplet x64-windows-static
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          & "$env:VCPKG_INSTALLATION_ROOT/vcpkg.exe" install openal-soft:x64-windows-openal `
+            --overlay-triplets="$env:TOOL_ROOT/cmake/triplets"
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
       - name: Build and package Windows
         if: runner.os == 'Windows'
@@ -144,6 +149,13 @@ jobs:
             -ExtraCMakeArgs @('-DNEOMDL_BUILD_WX_MODULE=OFF')
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           if (-not (Test-Path "$stage/bin/NeoMDL.exe")) { throw 'NeoMDL.exe was not installed' }
+          $openal = Join-Path $env:VCPKG_INSTALLATION_ROOT 'installed/x64-windows-openal'
+          Copy-Item "$openal/bin/OpenAL32.dll" "$stage/bin/OpenAL32.dll"
+          Get-ChildItem "$openal/share/*/copyright" | ForEach-Object {
+            $license = Join-Path "$stage/share/NeoMDL/licenses" $_.Directory.Name
+            New-Item -ItemType Directory -Force -Path $license | Out-Null
+            Copy-Item -LiteralPath $_.FullName -Destination (Join-Path $license 'copyright')
+          }
           Compress-Archive -Path "$stage/*" `
             -DestinationPath "$env:RUNNER_TEMP/NeoMDL-$env:BUILD_PLATFORM.zip"
 

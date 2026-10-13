@@ -146,10 +146,15 @@ struct RawNode {
     std::optional<Mesh> mesh;
     std::string parentName;
     std::vector<Vec3> vertices;
+    std::vector<std::array<double,3>> normalPositions64;
+    std::uint32_t normalPositionPrecision{32u};
     std::vector<Vec3> normals;
     std::vector<std::array<std::uint32_t,3>> normalIndices;
     std::vector<std::array<std::size_t,3>> processedSkinNormals;
     std::array<std::vector<Vec3>,4> texcoords;
+    std::vector<std::array<double,2>> tangentTexcoords64;
+    std::vector<std::size_t> tangentFaceSources;
+    std::uint32_t tangentUvPrecision{32u};
     std::array<std::vector<Vec3>,3> textureIndices;
     std::vector<Vec3> colors;
     std::vector<RawFace> faces;
@@ -183,6 +188,19 @@ void applyAsciiLightmap(RawNode& raw, Reader& reader);
 void postProcessSkinNode(RawNode& raw,const neoshared::bif::JobControl& job);
 void buildMesh(Model& model, RawNode& raw, std::size_t nodeIndex,
                const neoshared::bif::JobControl& job);
+Vec3 tangentBasisNormal(Vec3 bitangent,Vec3 tangent,Vec3 faceArea);
+std::array<Vec3,2> normalPositionFaceProducts(const std::array<Vec3,3>& positions,
+    const std::array<std::array<double,3>,3>& precise);
+Vec3 normalPositionFaceCross(const std::array<Vec3,3>& positions,
+    const std::array<std::array<double,3>,3>& precise);
+Vec3 tangentUvDerivative(Vec3 p,Vec3 q,const std::array<Vec2,3>& uv,
+    const std::array<std::array<double,2>,3>& precise,std::size_t component);
+struct TangentFace {
+    std::array<Vec3,3> positions;
+    std::array<Vec2,3> texcoords;
+};
+void orientSingularTangentComponents(const std::vector<TangentFace>& faces,
+    std::vector<TangentBasis>& bases,const neoshared::bif::JobControl& job);
 // Reuse the mesh producers for exporter seam evaluation. Returns
 // authored face-corner rows before duplicate-index faces are removed.
 std::vector<std::array<std::int16_t,3>> generateAsciiMeshGeometry(

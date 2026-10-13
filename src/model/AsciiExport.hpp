@@ -7,6 +7,8 @@ namespace neomdl::model {
 struct AsciiExportOptions {
     // Unset retains each mesh's mode; compiled meshes default to smoothing.
     std::optional<bool> explicitNormals;
+    bool refineTangentRounding{};
+    bool refineNormalRounding{};
 };
 
 struct AsciiExportResult {

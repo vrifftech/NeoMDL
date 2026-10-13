@@ -3156,14 +3156,18 @@ private:
         wxArrayString normalModes;
         normalModes.Add("Keep current mesh modes");normalModes.Add("Smoothing groups");
         normalModes.Add("Explicit normals (NeoMDL extension)");
+        normalModes.Add("Smoothing groups (adjust position rounding)");
         wxSingleChoiceDialog normalChoice(this,
             "Smoothing groups calculate normals from geometry.\n"
-            "Explicit normals preserve current normals and may need recalculation after geometry edits.",
+            "Explicit normals preserve current normals and may need recalculation after geometry edits.\n"
+            "Adjust position rounding allows selected source coordinates to move by one float step to improve normals and tangents.",
             "ASCII mesh normals",normalModes);
         normalChoice.SetSelection(0);
         if(normalChoice.ShowModal()!=wxID_OK) return;
         model::AsciiExportOptions options;
         if(normalChoice.GetSelection()!=0)options.explicitNormals=normalChoice.GetSelection()==2;
+        options.refineTangentRounding=normalChoice.GetSelection()==3;
+        options.refineNormalRounding=normalChoice.GetSelection()==3;
         try {
             const auto output=neosettings::pathFromWx(file.GetPath());
             neoshared::checkResourceOutput(output,protectedInputs);
