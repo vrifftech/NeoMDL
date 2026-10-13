@@ -1372,34 +1372,36 @@ void reconstructNormalPositionPrecision(Writer& out,const Model& model,const Mod
                 }
                 return result;
             };
-            bool invariant=true;
-            for(const auto end:ends)
+            const auto invariant=[&] {
                 for(const auto id:affected) {
-                    std::array<float,3> magnitude{};
+                    std::array<RoundedExpression,3> sum{{expressionConstant(0.0),expressionConstant(0.0),expressionConstant(0.0)}};
                     for(const auto face:groups[id].faces) {
-                        const auto a=products(face,source,axis,initial,paired),
-                            b=products(face,source,axis,end,paired);
-                        for(std::size_t c=0;c<3u;++c) {
-                            const float first=std::max(std::abs(component(a[0],c)),std::abs(component(b[0],c))),
-                                second=std::max(std::abs(component(a[1],c)),std::abs(component(b[1],c)));
-                            magnitude[c]+=first+second;
-                            invariant=invariant && std::isfinite(component(a[0],c)) &&
-                                std::isfinite(component(a[1],c)) && std::isfinite(component(b[0],c)) &&
-                                std::isfinite(component(b[1],c)) && std::isfinite(magnitude[c]);
+                        const auto value=symbolicCross(face);
+                        for(std::size_t c=0;c<3u;++c) sum[c]=expressionAdd(sum[c],value[c],true);
+                    }
+                    if(!std::all_of(sum.begin(),sum.end(),[](const auto& value) {
+                        return value.literal && std::isfinite(value.constant);
+                    })) return false;
+                }
+                for(const auto end:ends)
+                    for(const auto id:affected) {
+                        std::array<float,3> magnitude{};
+                        for(const auto face:groups[id].faces) {
+                            const auto a=products(face,source,axis,initial,paired),
+                                b=products(face,source,axis,end,paired);
+                            for(std::size_t c=0;c<3u;++c) {
+                                const float first=std::max(std::abs(component(a[0],c)),std::abs(component(b[0],c))),
+                                    second=std::max(std::abs(component(a[1],c)),std::abs(component(b[1],c)));
+                                magnitude[c]+=first+second;
+                                if(!std::isfinite(component(a[0],c)) || !std::isfinite(component(a[1],c)) ||
+                                   !std::isfinite(component(b[0],c)) || !std::isfinite(component(b[1],c)) ||
+                                   !std::isfinite(magnitude[c])) return false;
+                            }
                         }
                     }
-                }
-            for(const auto id:affected) {
-                std::array<RoundedExpression,3> sum{{expressionConstant(0.0),expressionConstant(0.0),expressionConstant(0.0)}};
-                for(const auto face:groups[id].faces) {
-                    const auto value=symbolicCross(face);
-                    for(std::size_t c=0;c<3u;++c) sum[c]=expressionAdd(sum[c],value[c],true);
-                }
-                invariant=invariant && std::all_of(sum.begin(),sum.end(),[](const auto& value) {
-                    return value.literal && std::isfinite(value.constant);
-                });
-            }
-            if(invariant && !cyclicStates) return;
+                return true;
+            };
+            if(!cyclicStates && invariant()) return;
             struct StateHash {
                 std::size_t operator()(const std::vector<std::uint32_t>& words) const {
                     std::size_t hash{};
@@ -1413,6 +1415,7 @@ void reconstructNormalPositionPrecision(Writer& out,const Model& model,const Mod
                 std::vector<std::array<Vec3,2>> products;
             };
             const auto stride=cyclicStates?4u:1u;
+            const bool groupBounds=paired>=high.size() && !cyclicStates;
             const auto state=[&](double value) {
                 AxisState result{value,{}};
                 result.products.reserve(pathFaces.size()*stride);
@@ -1479,8 +1482,9 @@ void reconstructNormalPositionPrecision(Writer& out,const Model& model,const Mod
                         }
                         lowerCross[face]={lows[0],lows[1],lows[2]};
                         upperCross[face]={highs[0],highs[1],highs[2]};
+                        if(!constant && !groupBounds) break;
                     }
-                    if(!constant && paired>=high.size() && !cyclicStates) {
+                    if(!constant && groupBounds) {
                         constant=true;
                         for(const auto id:affected) {
                             Vec3 lower{},upper{};
@@ -1717,9 +1721,25 @@ void reconstructNormalPositionPrecision(Writer& out,const Model& model,const Mod
                 struct Seed {
                     std::size_t first,second,axis;
                     double value,error;
-                    std::vector<bool> repairs;
+                    std::vector<std::size_t> repairs;
                     bool direct;
                 };
+                std::vector<std::size_t> repairSources;
+                for(std::size_t source=0;source<selected.size();++source)
+                    if(selected[source]) repairSources.push_back(source);
+                std::vector<std::vector<std::size_t>> reaches(groups.size());
+                std::vector<std::array<double,2>> previousErrors(mesh.faces.size()*3u);
+                for(std::size_t id=0;id<groups.size();++id) {
+                    for(const auto face:groups[id].faces)
+                        for(const auto source:plan.topology.sourceFaces[face]) reaches[id].push_back(source);
+                    std::sort(reaches[id].begin(),reaches[id].end());
+                    for(const auto corner:groups[id].corners) {
+                        const auto face=corner/3u,c=corner%3u;
+                        const auto target=plan.vertices[mesh.faces[face].indices[c]].normal;
+                        const auto before=current.meshes[index].normalAt(rows[index][face][c]);
+                        previousErrors[corner]={{difference(before,target),angle(before,target)}};
+                    }
+                }
                 std::set<std::pair<std::size_t,std::size_t>> pairs;
                 for(const auto& group:groups) {
                     if(!group.cancelled || !group.seamFree || !selected[group.source]) continue;
@@ -1742,7 +1762,7 @@ void reconstructNormalPositionPrecision(Writer& out,const Model& model,const Mod
                         enumerateAxis(pair.first,axis,pair.second,affected,crosses,
                             [&](double value,const std::vector<Vec3>& proposed) {
                                 bool improved=false,direct=true;double error{};
-                                auto repairs=selected;
+                                auto repairs=repairSources;
                                 for(const auto id:affected) {
                                     const auto& group=groups[id];Vec3 sum{};
                                     for(const auto face:group.faces) {
@@ -1753,23 +1773,23 @@ void reconstructNormalPositionPrecision(Writer& out,const Model& model,const Mod
                                     for(const auto corner:group.corners) {
                                         const auto face=corner/3u,c=corner%3u;
                                         const auto target=plan.vertices[mesh.faces[face].indices[c]].normal;
-                                        const auto before=current.meshes[index].normalAt(rows[index][face][c]);
-                                        const double previous=difference(before,target),next=difference(after,target);
-                                        const bool angleWorse=angle(after,target)>angle(before,target);
-                                        error+=next-previous;worse=worse || next>previous || angleWorse;
-                                        improved=improved || (group.cancelled && next<previous && !angleWorse);
+                                        const auto& previous=previousErrors[corner];
+                                        const double next=difference(after,target);
+                                        const bool angleWorse=angle(after,target)>previous[1];
+                                        error+=next-previous[0];worse=worse || next>previous[0] || angleWorse;
+                                        improved=improved || (group.cancelled && next<previous[0] && !angleWorse);
                                     }
                                     if(worse) {
                                         direct=false;
                                         // One repair source must influence every worsened group.
-                                        std::vector<bool> reaches(high.size());
-                                        for(const auto face:group.faces)
-                                            for(const auto source:plan.topology.sourceFaces[face]) reaches[source]=true;
-                                        for(std::size_t source=0;source<repairs.size();++source)
-                                            repairs[source]=repairs[source] && reaches[source];
+                                        repairs.erase(std::remove_if(repairs.begin(),repairs.end(),
+                                            [&](std::size_t source) {
+                                                return !std::binary_search(reaches[id].begin(),reaches[id].end(),source);
+                                            }),repairs.end());
+                                        if(repairs.empty()) return;
                                     }
                                 }
-                                if(improved && (direct || std::any_of(repairs.begin(),repairs.end(),[](bool v){return v;})))
+                                if(improved && (direct || !repairs.empty()))
                                     seeds.push_back({pair.first,pair.second,axis,value,error,std::move(repairs),direct});
                             });
                 }
@@ -1798,7 +1818,9 @@ void reconstructNormalPositionPrecision(Writer& out,const Model& model,const Mod
                         }
                         seedNormals.push_back(normal(sum));
                     }
-                    auto repairs=collectCandidates(seed.repairs,seedCrosses,&seedNormals);
+                    std::vector<bool> allowed(high.size());
+                    for(const auto source:seed.repairs) allowed[source]=true;
+                    auto repairs=collectCandidates(allowed,seedCrosses,&seedNormals);
                     sortCandidates(repairs);
                     for(const auto& repair:repairs) {
                         trial.preciseSourcePositions=high;
