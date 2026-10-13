@@ -465,13 +465,14 @@ void reconstructSkinSeamSmoothing(Writer& out,const Model& model) {
     })) return;
     auto frames=model;
     reconstructExportedNodeFrames(frames,out.job());
-    const auto precursor=[&](const Plans& source,bool refine,bool splitOpposing=false) {
+    enum class PrecursorFit { Smooth,SplitOpposing,Unscored,RefineExisting };
+    const auto precursor=[&](const Plans& source,bool refine,PrecursorFit fit=PrecursorFit::Smooth) {
         // Saved normals can be outputs of ProcessSkinSeams. Reconstruct
         // geometric precursors only where that producer changes a corner.
         auto smooth=frames;
         auto rows=generateGeometry(smooth,model,source,true,out.job());
         processAsciiSkinSeams(smooth,out.job());
-        if(splitOpposing) {
+        if(fit==PrecursorFit::SplitOpposing) {
             auto flatPlans=source,hybrid=source;
             for(auto& entry:flatPlans) {
                 const auto& mesh=*entry.first;
@@ -515,6 +516,7 @@ void reconstructSkinSeamSmoothing(Writer& out,const Model& model) {
             if(found==candidate.end() || mesh.animated || !found->second.hasNormals || found->second.explicitNormals) continue;
             auto& plan=found->second;
             std::vector<Vec3> targets;
+            std::vector<bool> ignored;
             bool adjusted=false;
             for(std::size_t face=0;face<mesh.faces.size();++face)
                 for(std::size_t corner=0;corner<3u;++corner) {
@@ -523,12 +525,15 @@ void reconstructSkinSeamSmoothing(Writer& out,const Model& model) {
                     const auto after=smooth.meshes[index].normalAt(row);
                     const bool seam=!same(before,after);
                     targets.push_back(seam?before:plan.vertices[mesh.faces[face].indices[corner]].normal);
+                    ignored.push_back(seam);
                     adjusted|=seam;
                 }
             if(adjusted) {
                 const auto& topology=plan.topology;
+                const bool ignoreSeams=fit==PrecursorFit::Unscored || fit==PrecursorFit::RefineExisting;
                 plan.smoothing=reconstructSmoothing(mesh,plan.vertices,topology.sourceVertices,
-                    topology.sourceFaces,out.job(),&targets,refine);
+                    topology.sourceFaces,out.job(),&targets,refine,ignoreSeams?&ignored:nullptr,
+                    fit==PrecursorFit::RefineExisting?&plan.smoothing.masks:nullptr);
             }
         }
         return candidate;
@@ -540,7 +545,12 @@ void reconstructSkinSeamSmoothing(Writer& out,const Model& model) {
     alternatives.push_back(precursor(plans,false));
     alternatives.push_back(reconstruct(true));
     alternatives.push_back(precursor(alternatives.back(),true));
-    alternatives.push_back(precursor(alternatives[2],true,true));
+    alternatives.push_back(precursor(alternatives[2],true,PrecursorFit::SplitOpposing));
+    // Seam outputs do not uniquely determine their geometric inputs.
+    // Also fit the unaffected corners without imposing guessed inputs;
+    // the complete seam-output score below still judges every corner.
+    alternatives.push_back(precursor(alternatives[2],true,PrecursorFit::Unscored));
+    alternatives.push_back(precursor(alternatives[2],true,PrecursorFit::RefineExisting));
     auto baseline=frames;
     const auto baselineRows=generateGeometry(baseline,model,plans,false,out.job());
     processAsciiSkinSeams(baseline,out.job());

@@ -150,8 +150,11 @@ AxisAngle approximatePackedAxisAngle(GameVersion game,std::uint32_t word) {
     const auto x=word&0x7ffu,y=(word>>11u)&0x7ffu,z=word>>22u;
     // At a half-turn the opposite quaternion is the same rotation, but its
     // quantization cell can intersect the unit sphere when this one cannot.
-    if(target.w==0.0f && x<=2046u && y<=2046u && z<=1022u) {
-        const auto mirrored=(2046u-x)|((2046u-y)<<11u)|((1022u-z)<<22u);
+    if(target.w==0.0f) {
+        // Spare component codes decode through normalization but cannot be
+        // emitted. Their opposite lies at the writable endpoint.
+        const auto mirrored=(2046u-std::min(x,2046u))|
+            ((2046u-std::min(y,2046u))<<11u)|((1022u-std::min(z,1022u))<<22u);
         if(auto candidate=packedAxisAngle(game,mirrored)) {
             const auto previous=unpackEngineControllerQuaternion(packedQuaternion(original),game);
             if(rotationDistance(target,unpackEngineControllerQuaternion(mirrored,game))<

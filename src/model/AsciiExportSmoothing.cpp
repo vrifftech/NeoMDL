@@ -11,7 +11,7 @@ namespace {
 
 constexpr auto ownFace=std::numeric_limits<std::size_t>::max();
 struct Contribution { std::size_t face,relation; };
-struct Corner { Vec3 target; std::size_t source; std::vector<Contribution> contributions; };
+struct Corner { Vec3 target; std::size_t source; std::vector<Contribution> contributions; bool scored{true}; };
 struct Relation { std::size_t first,second; std::vector<std::size_t> corners; };
 
 Vec3 subtract(Vec3 a,Vec3 b) { return {a.x-b.x,a.y-b.y,a.z-b.z}; }
@@ -56,7 +56,7 @@ struct Smoothing {
         return normalizeSmoothing(sum);
     }
     double error(std::size_t corner,const std::vector<std::uint8_t>& joined) const {
-        return difference(normal(corner,joined),corners[corner].target);
+        return corners[corner].scored?difference(normal(corner,joined),corners[corner].target):0.0;
     }
     std::vector<double> errors(const std::vector<std::uint8_t>& joined) const {
         std::vector<double> result;result.reserve(corners.size());
@@ -93,7 +93,7 @@ struct Smoothing {
 
     std::vector<std::uint8_t> fitPairs(std::vector<std::uint8_t> joined) const {
         std::vector<std::pair<std::size_t,std::size_t>> pairs;
-        for(const auto& corner:corners)
+        for(const auto& corner:corners) if(corner.scored)
             for(std::size_t a=0;a<corner.contributions.size();++a) {
                 const auto first=corner.contributions[a].relation;
                 if(first==ownFace) continue;
@@ -221,7 +221,9 @@ ReconstructedSmoothing reconstructSmoothing(
     const std::vector<std::size_t>& sourceVertices,
     const std::vector<std::array<std::uint32_t,3>>& sourceFaces,
     const neoshared::bif::JobControl& job,
-    const std::vector<Vec3>* cornerTargets,bool refine) {
+    const std::vector<Vec3>* cornerTargets,bool refine,
+    const std::vector<bool>* ignoredCorners,
+    const std::vector<std::uint32_t>* seedMasks) {
     Smoothing work{{},{},{},{},job};
     work.faceRelations.resize(sourceFaces.size());
     std::vector<std::vector<std::size_t>> incident(sourceVertices.size());
@@ -256,7 +258,8 @@ ReconstructedSmoothing reconstructSmoothing(
             const auto index=work.corners.size();
             const auto target=cornerTargets?(*cornerTargets)[face*3u+corner]:
                 vertices[static_cast<std::size_t>(mesh.faces[face].indices[corner])].normal;
-            Corner value{target,sourceFaces[face][corner],{}};
+            Corner value{target,sourceFaces[face][corner],{},
+                !ignoredCorners || !(*ignoredCorners)[face*3u+corner]};
             for(const auto candidate:incident[sourceFaces[face][corner]]) {
                 const auto relation=candidate==face?ownFace:
                     relationIndices.at(std::minmax(face,candidate));
@@ -266,8 +269,9 @@ ReconstructedSmoothing reconstructSmoothing(
             work.corners.push_back(std::move(value));
         }
     ReconstructedSmoothing result;
-    result.masks.assign(sourceFaces.size(),0u);
-    std::vector<std::uint8_t> joined(work.relations.size());
+    if(seedMasks) result.masks=*seedMasks;
+    else result.masks.assign(sourceFaces.size(),0u);
+    auto joined=work.intersections(result.masks);
     double best=work.score(joined);
     const auto consider=[&](const std::vector<std::uint8_t>& relations) {
         auto masks=work.encode(relations);
@@ -277,37 +281,39 @@ ReconstructedSmoothing reconstructSmoothing(
             best=score;joined=std::move(candidate);result.masks=std::move(masks);
         }
     };
-    // Equal stored corner normals retain the old source-split contribution
-    // sets while shared source IDs preserve connectivity. Face masks act at
-    // every shared vertex, so conflicting equality evidence supplies both
-    // candidate relations; the actual constructor error selects between them.
-    const auto groups=work.normalGroups();
-    const auto considerGroup=[&](const std::vector<std::uint8_t>& group) {
-        consider(group);
-        const auto added=work.fit(group,false),removed=work.fit(group,true);
-        if(added!=group) {
-            consider(added);
-            consider(work.fit(added,true));
-        }
-        if(removed!=group) {
-            consider(removed);
-            consider(work.fit(removed,false));
-        }
-    };
-    considerGroup(groups.first);
-    if(groups.second!=groups.first) considerGroup(groups.second);
-    const auto added=work.fit(std::vector<std::uint8_t>(work.relations.size()),false);
-    consider(added);
-    consider(work.fit(added,true));
-    const auto removed=work.fit(std::vector<std::uint8_t>(work.relations.size(),1u),true);
-    consider(removed);
-    consider(work.fit(removed,false));
-    for(const auto mask:{0u,1u}) {
-        std::vector<std::uint8_t> candidate(work.relations.size(),mask);
-        const auto score=work.score(candidate);
-        if(score<best) {
-            best=score;joined=std::move(candidate);
-            result.masks.assign(sourceFaces.size(),mask);
+    if(!seedMasks) {
+        // Equal stored corner normals retain the old source-split contribution
+        // sets while shared source IDs preserve connectivity. Face masks act at
+        // every shared vertex, so conflicting equality evidence supplies both
+        // candidate relations; the actual constructor error selects between them.
+        const auto groups=work.normalGroups();
+        const auto considerGroup=[&](const std::vector<std::uint8_t>& group) {
+            consider(group);
+            const auto added=work.fit(group,false),removed=work.fit(group,true);
+            if(added!=group) {
+                consider(added);
+                consider(work.fit(added,true));
+            }
+            if(removed!=group) {
+                consider(removed);
+                consider(work.fit(removed,false));
+            }
+        };
+        considerGroup(groups.first);
+        if(groups.second!=groups.first) considerGroup(groups.second);
+        const auto added=work.fit(std::vector<std::uint8_t>(work.relations.size()),false);
+        consider(added);
+        consider(work.fit(added,true));
+        const auto removed=work.fit(std::vector<std::uint8_t>(work.relations.size(),1u),true);
+        consider(removed);
+        consider(work.fit(removed,false));
+        for(const auto mask:{0u,1u}) {
+            std::vector<std::uint8_t> candidate(work.relations.size(),mask);
+            const auto score=work.score(candidate);
+            if(score<best) {
+                best=score;joined=std::move(candidate);
+                result.masks.assign(sourceFaces.size(),mask);
+            }
         }
     }
     // Two intersecting relations can improve together even when either
