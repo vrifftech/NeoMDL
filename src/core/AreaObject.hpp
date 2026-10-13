@@ -38,7 +38,7 @@ struct AreaRuntimeServices {
     // field, so its first model supplies the game before any owner is built.
     std::optional<model::GameVersion> game{};
     model::AsciiResourceResolver asciiResources{};
-    std::shared_ptr<SceneAnimation> animation;
+    std::shared_ptr<SceneAnimation> animation{};
 };
 struct AreaFrameSettings {
 

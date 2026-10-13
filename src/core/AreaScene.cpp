@@ -466,8 +466,8 @@ void AreaScene::loadModuleArea(const std::string& area,const std::string& scope,
     ResourceLoadScope work(job);job.update(0,0,"Preparing module area "+area);
     require(ownedLightIds_.empty(),"load a module into a fresh host or clear registered state first");
     RandomTransaction transaction(services.random);
-    const auto selectedGame=services.game?services.game:
-        worldState_&&worldState_->captured?worldState_->game:std::nullopt;
+    const auto& selectedGame=services.game || !worldState_ || !worldState_->captured
+        ? services.game : worldState_->game;
     require(!selectedGame||options.game==*selectedGame,"module game differs from the prepared scene");
     auto plan=readAreaLoad(area,scope,resolver,options);
     services.game=plan.game;

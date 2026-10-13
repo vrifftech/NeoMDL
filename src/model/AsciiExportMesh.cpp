@@ -486,11 +486,11 @@ CornerRows generateGeometry(Model& rebuilt,const Model& source,
         }
         if(animation) {
             raw.samplePeriod=animation->samplePeriod;
-            for(std::size_t frame=0;frame<animation->positionSampleCount;++frame)
+            for(std::int32_t frame=0;frame<animation->positionSampleCount;++frame)
                 for(const auto vertex:plan.topology.sourceVertices)
                     raw.animatedVertices.push_back(animation->positionSamples.at(
                         vertex*animation->positionSampleCount+frame));
-            for(std::size_t frame=0;frame<animation->texcoordSampleCount;++frame)
+            for(std::int32_t frame=0;frame<animation->texcoordSampleCount;++frame)
                 for(std::size_t vertex=0;vertex<plan.vertices.size();++vertex) {
                     const auto value=animation->texcoordSamples.at(vertex*animation->texcoordSampleCount+frame);
                     raw.animatedTexcoords.push_back({value.x,value.y,0.0f});

@@ -525,7 +525,7 @@ GpuTexture TextureCache::get(const neoshared::texture::TextureData& texture,
         orderFor(texture);
         material::ProcedureImage initial;
         const auto& first=texture.layers.front();
-        if(!sourceCompressed||processed&&!blockCompressed)initial=material::procedureSourceImage(texture,definition,cube);
+        if(!sourceCompressed || (processed && !blockCompressed))initial=material::procedureSourceImage(texture,definition,cube);
         else {
             initial.width=first.width;initial.height=first.height;
             const auto count=std::uint64_t(first.width)*first.height;

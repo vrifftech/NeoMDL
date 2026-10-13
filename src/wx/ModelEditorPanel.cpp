@@ -2138,8 +2138,12 @@ private:
         root->Add(dialog.CreateButtonSizer(wxOK|wxCANCEL),0,wxALIGN_RIGHT|wxALL,10);dialog.SetSizerAndFit(root);
         if(dialog.ShowModal()!=wxID_OK)return;
         try {
-            const auto read=[](wxTextCtrl* field) {double x=0;if(!field->GetValue().ToDouble(&x)||!std::isfinite(x)||!std::isfinite(float(x)))
-                throw std::runtime_error("Shadow inputs must be finite numbers");return float(x);};
+            const auto read=[](wxTextCtrl* field) {
+                double x=0;
+                if(!field->GetValue().ToDouble(&x)||!std::isfinite(x)||!std::isfinite(float(x)))
+                    throw std::runtime_error("Shadow inputs must be finite numbers");
+                return float(x);
+            };
             inputs.mode=automatic->GetValue()?SceneShadowInputMode::SceneFocus:SceneShadowInputMode::Explicit;
             inputs.containerOwner=owner->GetSelection()==0?std::nullopt:
                 std::optional<LightOwnerId>{casters.at(std::size_t(owner->GetSelection()-1)).id};
@@ -2455,7 +2459,8 @@ private:
         }
         if(objects.empty()){wxMessageBox("This layout has no animated room or track Gobs.","Area animation",wxOK|wxICON_INFORMATION,this);return;}
         const int selected=wxGetSingleChoiceIndex("Select an independent area owner", "Area animation",names,this);
-        if(selected<0)return;const auto* object=objects.at(static_cast<std::size_t>(selected));
+        if(selected<0)return;
+        const auto* object=objects.at(static_cast<std::size_t>(selected));
         wxArrayString actions;actions.Add("Pause primary run");actions.Add("Resume primary run");actions.Add("Reset this owner");
         const auto& doc=*object->document();
         for(std::size_t i=0;i<doc.animations().size();++i)actions.Add(wxui::toWx(doc.animation(i).name));
@@ -2502,7 +2507,8 @@ private:
             names.Add(wxui::toWx(object->label()));tracks.push_back(object->instanceIndex());
         }
         const int selected=wxGetSingleChoiceIndex("Select the track Gob", "Track follower animation",names,this);
-        if(selected<0)return;const auto track=tracks[std::size_t(selected)];
+        if(selected<0)return;
+        const auto track=tracks[std::size_t(selected)];
         TrackAnimationState state;
         if(const auto* captured=page->areaScene().trackAnimation(track))state=*captured;
         wxDialog dialog(this,wxID_ANY,"Track follower animation",wxDefaultPosition,wxDefaultSize,wxDEFAULT_DIALOG_STYLE|wxRESIZE_BORDER);
@@ -2608,7 +2614,8 @@ private:
         box->Add(action,0,wxEXPAND|wxALL,10);
         std::string stateText;
         if(const auto state=page->sceneAudioRandomState())for(auto value:*state) {
-            if(!stateText.empty())stateText+=' ';stateText+=std::to_string(value);
+            if(!stateText.empty())stateText+=' ';
+            stateText+=std::to_string(value);
         }
         box->Add(new wxStaticText(&dialog,wxID_ANY,
             "CExoRand state: four captured unsigned words, after engine construction.\n"
@@ -2863,7 +2870,7 @@ private:
             }
             const int entry=wxGetSingleChoiceIndex("Choose the explicit starting entry", "Dialogue Playback",entries,this);
             if(entry<0)return;
-            struct Actor {std::optional<std::size_t> instance;bool bound;float height{0.5f};bool appearance565{};bool creature{true};bool captured{},canPlay{},injured{};std::uint16_t appearance{};DialogueParticipantInputs participant;};
+            struct Actor {std::optional<std::size_t> instance;bool bound;float height{0.5f};bool appearance565{};bool creature{true};bool captured{},canPlay{},injured{};std::uint16_t appearance{};DialogueParticipantInputs participant{};};
             std::vector<Actor> actors{{{},false}};wxArrayString actorNames;actorNames.Add("Unbound actor");
             if(page->document().hasModelOwner()) {actors.push_back({{},true});actorNames.Add("Main model (creature actor)");}
             for(const auto& object:page->areaScene().objects())if(object->kind()==AreaObjectKind::Creature||
@@ -3836,7 +3843,8 @@ private:
         for(const auto& trap:traps)names.Add(wxui::toWx(std::string(trap.target.kind==TrapObjectKind::Door?"DoorList[":"Placeable List[")+std::to_string(trap.target.sourceIndex)+"]"));
         if(names.empty()){wxMessageBox("The area contains no door or placeable trap records.","Trap Runtime",wxOK,this);return;}
         const int choice=wxGetSingleChoiceIndex("Choose an loaded object trap.","Object trap state",names,this);
-        if(choice<0)return;const auto& trap=traps[static_cast<std::size_t>(choice)];
+        if(choice<0)return;
+        const auto& trap=traps[static_cast<std::size_t>(choice)];
         const auto text=editTrapCapture("Captured object trap state","Capture the current server identity, trap flag and lock inputs. PCLevelAtSpawn may have been assigned from G_PC_LEVEL by the engine heartbeat; no player level is inferred.",
             neojson::stringify(neojson::Value::object({{"objectId",trapcapture::number(trap.objectId)},
                 {"flagged",trapcapture::number(trap.flagged)},
@@ -3844,7 +3852,8 @@ private:
                 {"openLockDifficulty",trapcapture::number(trap.openLockDifficulty)},
                 {"openLockDifficultyModifier",trapcapture::number(trap.openLockDifficultyModifier)},
                 {"pcLevelAtSpawn",trapcapture::number(trap.pcLevelAtSpawn)}})));
-        if(!text)return;const auto capture=neojson::parse(*text);
+        if(!text)return;
+        const auto capture=neojson::parse(*text);
         const auto id=trapcapture::integer<std::uint64_t>(capture.at("objectId"));
         const auto flag=trapcapture::integer<std::uint8_t>(capture.at("flagged"));
         AreaObjectTrapRecord lock=trap;
@@ -4465,7 +4474,8 @@ private:
         try {
             if(action==1) {
                 wxFileDialog file(this,"Read engine Dirty tuples",wxEmptyString,wxEmptyString,"K2 area (*.are)|*.are;*.ARE",wxFD_OPEN|wxFD_FILE_MUST_EXIST);
-                if(file.ShowModal()!=wxID_OK)return;page->loadDirtyArea(neosettings::pathFromWx(file.GetPath()));
+                if(file.ShowModal()!=wxID_OK)return;
+                page->loadDirtyArea(neosettings::pathFromWx(file.GetPath()));
             }else if(action==2)page->useLoadedDirtyArea();
             wxMessageBox(wxui::toWx(describeDirtyArea(page->dirtyAreaState())+
                 "Engine automatic Dirty routing is absent. Only the explicit Desktop diagnostic samples 3D."),"Dirty area inputs",wxOK|wxICON_INFORMATION,this);
@@ -4475,7 +4485,8 @@ private:
         auto* page=activePage();if(!page)return;
         wxArrayString actions;actions.Add("Disable diagnostic");actions.Add("Select a rigid owner mesh for the legacy Desktop caller");
         const int action=wxGetSingleChoiceIndex("Neither engine GetRenderPath selects NoiseMapped. This is an explicit dormant-caller diagnostic, not gameplay activation.","Legacy Dirty caller",actions,this);
-        if(action<0)return;if(action==0){page->disableDirtyMaterial();return;}
+        if(action<0)return;
+        if(action==0){page->disableDirtyMaterial();return;}
         struct Target{LightOwnerId owner;std::size_t mesh;};std::vector<Target> targets;wxArrayString names;
         for(const auto& owner:page->motionBlurScene().owners())for(std::size_t i=0;i<owner.asset->meshes.size();++i) {
             const auto& mesh=owner.asset->meshes[i];if(mesh.skinned||mesh.animated||mesh.indices.empty())continue;
