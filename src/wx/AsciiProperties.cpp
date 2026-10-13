@@ -241,8 +241,10 @@ void AsciiEditor::editNode(const model::Model& asset, std::size_t nodeIndex) {
     model::Quaternion rotation;
     model::constructedNodeFrame(node, position, rotation, asset.game);
     auto* move = scalar("Position (X Y Z)", "position", vectorText({position.x, position.y, position.z}));
-    auto* rotate = scalar("Rotation (quaternion X Y Z W)", "nodeorientation",
-                           vectorText({rotation.x, rotation.y, rotation.z, rotation.w}));
+    const auto orientation = source.field(block, "orientation");
+    auto* rotate = advanced_ ? scalar("Rotation (quaternion X Y Z W)", "nodeorientation",
+        vectorText({rotation.x, rotation.y, rotation.z, rotation.w})) :
+        scalar("Rotation (axis X Y Z, angle in radians)", "orientation", orientation.empty() ? "1 0 0 0" : orientation);
     const auto scaleValue = source.field(block, "scale");
     auto* scale = scalar("Uniform scale", "scale", scaleValue.empty() ? "1" : scaleValue);
     const bool rawControllers = !source.field(block, "controllerdata").empty();
@@ -279,7 +281,7 @@ void AsciiEditor::editNode(const model::Model& asset, std::size_t nodeIndex) {
         flag("Rotate texture", "rotatetexture", mesh.rotateTexture);
         flag("Beaming", "beaming", mesh.beaming);
         flag("Background geometry", "m_bisbackgroundgeometry", mesh.backgroundGeometry);
-        if (!node.lightsaber && !mesh.animated) {
+        if (advanced_ && !node.lightsaber && !mesh.animated) {
             tangent = flag("Has tangent basis", "hastangentbasis", (mesh.mdxBitmap & 0x80u) != 0);
             auto* rebuild = new wxCheckBox(&dialog, wxID_ANY, "Regenerate tangent basis on Apply");
             grid->Add(rebuild, 0, wxALIGN_CENTER_VERTICAL); grid->AddSpacer(1);
@@ -295,6 +297,9 @@ void AsciiEditor::editNode(const model::Model& asset, std::size_t nodeIndex) {
         }
     }
     layout->Add(grid, 1, wxEXPAND | wxALL, FromDIP(12));
+    if (!advanced_ && node.mesh && !node.lightsaber && !asset.meshes[*node.mesh].animated)
+        layout->Add(new wxStaticText(&dialog, wxID_ANY,
+            "Tangent controls are available in Advanced ASCII."), 0, wxALL, FromDIP(12));
     if (!move->IsEnabled() || !rotate->IsEnabled() || !scale->IsEnabled())
         layout->Add(new wxStaticText(&dialog, wxID_ANY,
             "Keyed or raw transform controllers are edited in the ASCII pane."), 0, wxALL, FromDIP(12));
@@ -305,7 +310,7 @@ void AsciiEditor::editNode(const model::Model& asset, std::size_t nodeIndex) {
     dialog.SetSize(dialog.GetMinSize());
     dialog.SetAffirmativeId(wxID_OK);
     if (dialog.ShowModal() != wxID_OK || edits.empty()) return;
-    if (edits.count("position")) edits["nodeposition"] = edits.at("position");
+    if (advanced_ && edits.count("position")) edits["nodeposition"] = edits.at("position");
     if (edits.count("nodeorientation")) {
         edits["orientation"] = std::nullopt;
         edits["orientationpackedkey"] = std::nullopt;

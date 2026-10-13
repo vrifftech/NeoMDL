@@ -781,11 +781,14 @@ bool parseMeshField(const Line& initial,Reader& reader,RawNode& raw,GameVersion 
     if(!raw.mesh) return false;
     const auto offset=initial.bufferOffset;
     const auto extension=lower(initial.tokens.front());
-    if(extension=="tangentuvprecision" || extension=="normalpositionprecision" ||
-       extension=="hastangentbasis" || extension=="tangentbasis" || extension=="tangentindices" ||
-       extension=="colorsrgba" || extension=="colorindices" || extension=="cpuverts" ||
-       extension=="cpuindices" || extension=="faceplanes" || extension=="spherecenter" || extension=="sphereradius")
+    if(extension=="tangentuvprecision" || extension=="normalpositionprecision")
         return parseMeshValue(initial,reader,raw,game);
+    if(extension=="hastangentbasis" || extension=="tangentbasis" || extension=="tangentindices" ||
+       extension=="colorsrgba" || extension=="colorindices" || extension=="cpuverts" ||
+       extension=="cpuindices" || extension=="faceplanes" || extension=="spherecenter" || extension=="sphereradius") {
+        raw.advancedAscii=true;
+        return parseMeshValue(initial,reader,raw,game);
+    }
     if(raw.node.flags!=0xa1u && (extension=="normals" ||
             (extension=="normalindices" && raw.node.flags!=0x821u))) {
         parseMeshValue(initial,reader,raw,game);

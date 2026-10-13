@@ -164,8 +164,13 @@ enum PreviewFeature : unsigned {
 
 class AsciiExportControls final : public wxFileDialogCustomizeHook {
 public:
-    explicit AsciiExportControls(int mode) : normalMode(mode) {}
+    AsciiExportControls(int mode, bool advancedFormat) : normalMode(mode), advanced(advancedFormat) {}
     void AddCustomControls(wxFileDialogCustomize& customizer) override {
+        customizer.AddStaticText("ASCII format");
+        const wxString formats[] = {"Standard ASCII", "Advanced ASCII"};
+        format_ = customizer.AddChoice(2, formats);
+        format_->SetSelection(advanced ? 1 : 0);
+        customizer.AddStaticText("Advanced retains stored geometry, skin and controller data.");
         customizer.AddStaticText("ASCII mesh normals");
         const wxString modes[] = {"Automatic", "Smoothing groups",
             "Explicit normals (NeoMDL extension)", "Smoothing groups (adjust position rounding)"};
@@ -178,11 +183,14 @@ public:
     }
     void TransferDataFromCustomControls() override {
         normalMode = normals_->GetSelection();
+        advanced = format_->GetSelection() == 1;
         includeAnimations = !geometryOnly_->GetValue();
     }
     int normalMode{};
     bool includeAnimations{true};
+    bool advanced{};
 private:
+    wxFileDialogChoice* format_{};
     wxFileDialogChoice* normals_{};
     wxFileDialogCheckBox* geometryOnly_{};
 };
@@ -3558,7 +3566,8 @@ private:
         auto stem=document.path().stem();
         if(stem.empty()) stem=std::filesystem::u8path(document.model().name);
         const auto filename=neoshared::pathToUtf8(stem)+"-ascii.mdl";
-        AsciiExportControls controls(asciiNormalMode_);
+        const auto* editor = page->asciiEditor();
+        AsciiExportControls controls(asciiNormalMode_, editor->advanced());
         wxFileDialog file(this,"Export ASCII MDL",neosettings::pathToWx(document.path().parent_path()),
             wxui::toWx(filename),"ASCII models (*.mdl)|*.mdl|All files (*.*)|*.*",
             wxFD_SAVE|wxFD_OVERWRITE_PROMPT);
@@ -3566,6 +3575,7 @@ private:
         if(file.ShowModal()!=wxID_OK) return;
         asciiNormalMode_=controls.normalMode;
         model::AsciiExportOptions options;
+        options.advanced=controls.advanced;
         if(asciiNormalMode_!=0)options.explicitNormals=asciiNormalMode_==2;
         options.refineTangentRounding=asciiNormalMode_==3;
         options.refineNormalRounding=asciiNormalMode_==3;
@@ -3575,13 +3585,16 @@ private:
             neoshared::checkResourceOutput(output,protectedInputs);
             model::AsciiExportResult exported;
             std::vector<std::uint8_t> bytes;
-            const auto* editor = page->asciiEditor();
             const auto text = editor->text();
+            const bool original = !editor->edited();
             if(!runJob("Exporting ASCII model",[&](const neoshared::bif::JobControl& job) {
                 // runJob keeps documents alive and suspends scene updates.
                 job.check();
-                const auto edited = editor->source()->rebuildAscii(text, job, std::nullopt, options.includeAnimations);
-                exported=model::exportAsciiModel(edited->sourceModel(),job,options);
+                if(original) exported=model::exportAsciiModel(editor->source()->sourceModel(),job,options);
+                else {
+                    const auto edited = editor->source()->rebuildAscii(text, job, std::nullopt, options.includeAnimations);
+                    exported=model::exportAsciiModel(edited->sourceModel(),job,options);
+                }
                 bytes.assign(exported.text.begin(),exported.text.end());
                 job.check();
             })) return;

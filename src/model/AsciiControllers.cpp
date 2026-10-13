@@ -209,9 +209,11 @@ void parseBaseTransformFields(const Line& line,Reader& reader,RawNode& raw) {
     const auto keyword=lower(line.tokens.front());
     const auto* arguments=fieldArguments(line);
     if(keyword=="nodeorientation") {
+        raw.advancedAscii=true;
         auto& q=raw.node.orientation;
         std::sscanf(arguments,"%f %f %f %f",&q.x,&q.y,&q.z,&q.w);
     } else if(keyword=="position" || keyword=="nodeposition") {
+        raw.advancedAscii|=keyword=="nodeposition";
         std::sscanf(arguments,"%f %f %f",&raw.node.position.x,
                     &raw.node.position.y,&raw.node.position.z);
     } else if(keyword=="orientation") {
@@ -272,6 +274,7 @@ bool parseControllerExtension(const Line& line,Reader& reader,RawNode& raw) {
         }
         appendController(raw.node,{"orientation",kControllerOrientation,kNodeBase,offset},keys,flags);
     } else return false;
+    raw.advancedAscii=true;
     return true;
 }
 

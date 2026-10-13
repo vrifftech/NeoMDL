@@ -196,6 +196,7 @@ bool parseRetainedSkin(const Line& line,Reader& reader,RawNode& raw) {
     const auto field=lower(line.tokens.front());
     if(field!="skinbonemap" && field!="skinpalette" && field!="skinbindrotations" &&
        field!="skinbindtranslations" && field!="skinweights") return false;
+    raw.advancedAscii=true;
     if(!raw.skinData) raw.skinData.emplace();
     auto& skin=*raw.skinData;
     if(field=="skinbonemap") readArray(line,reader,skin.boneToPalette,4u,

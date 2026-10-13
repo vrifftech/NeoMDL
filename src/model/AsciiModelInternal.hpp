@@ -143,6 +143,7 @@ struct RawFace {
 };
 
 struct RawNode {
+    bool advancedAscii{};
     Node node;
     std::optional<Mesh> mesh;
     std::string parentName;

@@ -6,6 +6,7 @@
 #include "NeoWxUi.hpp"
 
 #include <wx/button.h>
+#include <wx/choice.h>
 #include <wx/filedlg.h>
 #include <wx/srchctrl.h>
 #include <wx/sizer.h>
@@ -20,11 +21,18 @@ AsciiEditor::AsciiEditor(wxWindow* parent, std::shared_ptr<const ModelDocument> 
     : wxPanel(parent), source_(std::move(source)), apply_(std::move(apply)), changed_(std::move(changed)) {
     auto* layout = new wxBoxSizer(wxVERTICAL);
     auto* toolbar = new wxBoxSizer(wxHORIZONTAL);
+    format_ = new wxChoice(this, wxID_ANY);
+    format_->Append("Standard ASCII");
+    format_->Append("Advanced ASCII");
+    advanced_ = source_->sourceModel().advancedAscii;
+    format_->SetSelection(advanced_ ? 1 : 0);
+    format_->SetToolTip("Standard uses the original authoring fields. Advanced preserves stored binary values. Switching converts the current model text and can be undone.");
     search_ = new wxSearchCtrl(this, wxID_ANY, wxEmptyString, wxDefaultPosition, wxDefaultSize, wxTE_PROCESS_ENTER);
     search_->SetDescriptiveText("Find in ASCII (Ctrl+F)");
     update_ = new wxButton(this, wxID_ANY, "Update Preview");
     update_->SetToolTip("Update now (Ctrl+Enter). Edits update automatically after a short typing pause.");
     update_->Enable(false);
+    layout->Add(format_, 0, wxEXPAND | wxLEFT | wxRIGHT | wxTOP, FromDIP(5));
     toolbar->Add(search_, 1, wxALIGN_CENTER_VERTICAL | wxRIGHT, FromDIP(5));
     toolbar->Add(update_, 0);
     layout->Add(toolbar, 0, wxEXPAND | wxALL, FromDIP(5));
@@ -56,11 +64,15 @@ AsciiEditor::AsciiEditor(wxWindow* parent, std::shared_ptr<const ModelDocument> 
     search_->Bind(wxEVT_TEXT_ENTER, [this](wxCommandEvent&) { findNext(); });
     search_->Bind(wxEVT_SEARCHCTRL_SEARCH_BTN, [this](wxCommandEvent&) { findNext(); });
     update_->Bind(wxEVT_BUTTON, [this](wxCommandEvent&) { updatePreview(); });
+    format_->Bind(wxEVT_CHOICE, [this](wxCommandEvent&) {
+        generateAscii(format_->GetSelection() == 1);
+        changed_();
+    });
     Bind(wxEVT_CHAR_HOOK, [this](wxKeyEvent& event) {
         if (event.ControlDown() && event.GetKeyCode() == 'F') {
             search_->SetFocus();
             search_->SelectAll();
-        } else if (event.ControlDown() && event.GetKeyCode() == WXK_RETURN && ready_) {
+        } else if (event.ControlDown() && event.GetKeyCode() == WXK_RETURN && ready()) {
             updatePreview();
         } else event.Skip();
     });
@@ -72,16 +84,7 @@ AsciiEditor::AsciiEditor(wxWindow* parent, std::shared_ptr<const ModelDocument> 
         installText(*source_->originalAscii());
         savePath_ = source_->path();
         status_->ChangeValue("Preview current. Edits update after a 0.5-second typing pause.");
-    } else {
-        generating_ = true;
-        workStarted_ = std::chrono::steady_clock::now();
-        worker_ = std::async(std::launch::async, [this] {
-            neoshared::bif::JobControl job;
-            job.cancelled = [this] { return cancelled_.load(); };
-            const ResourceLoadScope scope(job);
-            return Result{model::exportAsciiModel(source_->sourceModel(), job).text, {}};
-        });
-    }
+    } else generateAscii(false);
 }
 
 AsciiEditor::~AsciiEditor() { cancelAndWait(); }
@@ -117,6 +120,16 @@ void AsciiEditor::updatePreview() {
     poll();
 }
 
+void AsciiEditor::generateAscii(bool advanced) {
+    cancelled_.store(true);
+    pending_ = false;
+    requestedFormat_ = advanced;
+    format_->Enable(false);
+    editor_->SetReadOnly(true);
+    update_->Enable(false);
+    poll();
+}
+
 void AsciiEditor::poll() {
     // Modal dialogs retain the document they opened against until they close.
     if (!previewEnabled_ || !IsEnabled()) return;
@@ -127,20 +140,32 @@ void AsciiEditor::poll() {
                     std::chrono::steady_clock::now() - workStarted_).count();
                 if (seconds != displayedSeconds_) {
                     displayedSeconds_ = static_cast<long>(seconds);
-                    status_->ChangeValue(wxString::Format(
-                        "Generating ASCII — %ld s. You can keep using the viewport.", displayedSeconds_));
+                    status_->ChangeValue(wxString(generationAdvanced_ ? "Generating Advanced ASCII" : "Generating Standard ASCII") +
+                        wxString::Format(" — %ld s. You can keep using the viewport.", displayedSeconds_));
                 }
             }
             return;
         }
+        const bool generated = generating_;
+        generating_ = false;
         try {
             auto result = worker_.get();
-            if (generating_) {
-                installText(result.text);
-                status_->ChangeValue("ASCII ready. The viewport shows the original binary until you edit or Update Preview.");
+            if (generated) {
+                advanced_ = generationAdvanced_;
+                format_->SetSelection(advanced_ ? 1 : 0);
+                format_->Enable(true);
+                editor_->SetReadOnly(false);
+                update_->Enable(true);
+                if (ready_) replaceText(result.text);
+                else {
+                    installText(result.text);
+                    status_->ChangeValue("ASCII ready. The viewport shows the original binary until you edit or Update Preview.");
+                }
                 changed_();
             } else if (workerRevision_ == revision_ && !cancelled_.load()) {
                 previewRevision_ = workerRevision_;
+                advanced_ = result.document->sourceModel().advancedAscii;
+                format_->SetSelection(advanced_ ? 1 : 0);
                 apply_(std::move(result.document));
                 status_->ChangeValue("Preview current. Edits update after a 0.5-second typing pause.");
                 changed_();
@@ -148,13 +173,37 @@ void AsciiEditor::poll() {
         } catch (const neoshared::bif::JobCancelled&) {
             // A newer edit replaces this work; its typing deadline remains queued.
         } catch (const std::exception& error) {
-            if (generating_ || workerRevision_ == revision_) {
-                status_->ChangeValue(wxui::toWx(std::string(generating_ ? "ASCII generation failed: " :
+            if (generated) {
+                format_->SetSelection(advanced_ ? 1 : 0);
+                format_->Enable(true);
+                editor_->SetReadOnly(!ready_);
+                update_->Enable(ready_);
+            }
+            if (generated || workerRevision_ == revision_) {
+                status_->ChangeValue(wxui::toWx(std::string(generated ? "ASCII generation failed: " :
                     "Preview out of date — ASCII error: ") + error.what()));
                 changed_();
             }
         }
-        generating_ = false;
+    }
+    if (requestedFormat_) {
+        generationAdvanced_ = *requestedFormat_;
+        requestedFormat_.reset();
+        generating_ = true;
+        cancelled_.store(false);
+        workStarted_ = std::chrono::steady_clock::now();
+        displayedSeconds_ = -1;
+        model::AsciiExportOptions options;
+        options.advanced = generationAdvanced_;
+        worker_ = std::async(std::launch::async, [this, options, original = !edited(), buffer = edited() ? text() : std::string{}] {
+            neoshared::bif::JobControl job;
+            job.cancelled = [this] { return cancelled_.load(); };
+            const ResourceLoadScope scope(job);
+            if (original) return Result{model::exportAsciiModel(source_->sourceModel(), job, options).text, {}};
+            const auto document = source_->rebuildAscii(buffer, job);
+            return Result{model::exportAsciiModel(document->sourceModel(), job, options).text, {}};
+        });
+        return;
     }
     if (pending_ && std::chrono::steady_clock::now() >= updateAt_) {
         pending_ = false;
@@ -187,7 +236,8 @@ void AsciiEditor::replaceText(const std::string& text) {
     editor_->SetTargetEnd(editor_->GetTextLength());
     editor_->ReplaceTargetRaw(text.data(), static_cast<int>(text.size()));
     editor_->EndUndoAction();
-    updatePreview();
+    pending_ = true;
+    updateAt_ = std::chrono::steady_clock::now();
 }
 
 void AsciiEditor::setAppearance(bool dark) {

@@ -5,6 +5,8 @@
 namespace neomdl::model {
 
 struct AsciiExportOptions {
+    // Standard uses the pre-41 language; Advanced retains compiled data explicitly.
+    bool advanced{};
     // Unset retains each mesh's mode; compiled meshes default to smoothing.
     std::optional<bool> explicitNormals;
     bool refineTangentRounding{};

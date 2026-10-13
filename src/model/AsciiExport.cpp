@@ -51,6 +51,22 @@ std::string Writer::vector(Vec3 value) const {
     return scalar(value.x)+" "+scalar(value.y)+" "+scalar(value.z);
 }
 
+std::string Writer::quaternion(Quaternion value) {
+    // Authoring inverse of Quaternion(Vector,angle). A engine rotation key
+    // stores a quaternion, while the text grammar consumes an axis and radians.
+    const double axisLength=std::sqrt(double(value.x)*value.x+double(value.y)*value.y+double(value.z)*value.z);
+    if(!std::isfinite(axisLength)||!std::isfinite(value.w))
+        throw ModelError("ASCII export cannot express a non-finite rotation as an axis and angle");
+    warning("Rotations are generated as axis-angle values; engine floating-point conversion and quaternion key compression can change their stored words.");
+    if(axisLength==0.0) {
+        if(value.w==0.0f)throw ModelError("ASCII export cannot express a zero quaternion as a rotation");
+        return value.w<0.0f?"1 0 0 "+scalar(static_cast<float>(2.0*std::acos(-1.0))):"1 0 0 0";
+    }
+    return vector({static_cast<float>(value.x/axisLength),static_cast<float>(value.y/axisLength),
+                   static_cast<float>(value.z/axisLength)})+" "+
+        scalar(static_cast<float>(2.0*std::atan2(axisLength,double(value.w))));
+}
+
 std::string Writer::token(const std::string& value,const std::string& context) const {
     // Engine %s fields have no quote/escape syntax. Inventing one would
     // silently change names or split an exported field into multiple tokens.
@@ -108,6 +124,77 @@ std::string nodeType(std::uint16_t flags) {
     case kNodeBase|kNodeMesh|kNodeAabb:return "aabb";
     case kNodeBase|kNodeMesh|kNodeLightsaber:return "lightsaber";
     default:throw ModelError("ASCII export has no engine node type for flags "+std::to_string(flags));
+    }
+}
+
+const Controller* directController(const Node& node,std::uint32_t type) {
+    const Controller* result=nullptr;
+    for(const auto& controller:node.controllers)
+        if(controller.type==type && controller.sourceOffset==-1 && controller.rowCount==1u &&
+           (controller.rawFlags&0x10u)==0u && controller.timeIndex<node.controllerDataWords.size() &&
+           node.controllerDataWords[controller.timeIndex]==0u) {
+            if(type==kControllerPosition && controller.rawFlags!=3u)continue;
+            if(type==kControllerOrientation && controller.rawFlags!=2u && controller.rawFlags!=4u)continue;
+            result=&controller;
+        }
+    return result;
+}
+
+float controllerFloat(const Node& node,std::size_t index) {
+    const auto word=node.controllerDataWords.at(index);
+    float value;
+    std::memcpy(&value,&word,sizeof(value));
+    return value;
+}
+
+void standardHeaderTransforms(Writer& writer,const Node& node) {
+    // Keyed fields do not populate the static node header. Emit its nondefault
+    // frame when no single-value field already supplies it. The engine syntax
+    // couples these fields to time-zero controllers, so disclose that change.
+    const auto differs=[](float header,float controller) {
+        return header!=controller || (header==0.0f && std::signbit(header)!=std::signbit(controller));
+    };
+    // A scalar direct position is a defined partial header write. Replay the
+    // original sequence component by component: a later scalar replaces X
+    // while retaining Y/Z from an earlier vector or the +0 constructor.
+    // Adding a full position field unnecessarily introduces another engine
+    // controller and changes both the record list and its data pool.
+    std::array<float,3> position{};
+    std::array<bool,3> positionWritten{};
+    for(const auto& controller:node.controllers) {
+        if(controller.type!=kControllerPosition || controller.sourceOffset!=-1 ||
+           controller.rowCount!=1u || (controller.rawFlags!=1u && controller.rawFlags!=3u) ||
+           controller.timeIndex>=node.controllerDataWords.size() ||
+           node.controllerDataWords[controller.timeIndex]!=0u) continue;
+        const auto width=controller.rawFlags==3u?3u:1u;
+        for(std::size_t lane=0;lane<width;++lane) {
+            position[lane]=controllerFloat(node,static_cast<std::size_t>(controller.dataIndex)+lane);
+            positionWritten[lane]=true;
+        }
+    }
+    const std::array<float,3> storedPosition{node.position.x,node.position.y,node.position.z};
+    bool added=false,positionConflict=false,positionNeedsHeader=false;
+    for(std::size_t lane=0;lane<3u;++lane) {
+        if(!differs(storedPosition[lane],position[lane])) continue;
+        if(positionWritten[lane])positionConflict=true;
+        else positionNeedsHeader=true;
+    }
+    if(positionNeedsHeader) {
+        writer.line("position "+writer.vector(node.position));added=true;
+    }
+    if(!directController(node,kControllerOrientation) &&
+       (node.orientation.x!=0.0f||node.orientation.y!=0.0f||node.orientation.z!=0.0f||node.orientation.w!=1.0f)) {
+        writer.line("orientation "+writer.quaternion(node.orientation));added=true;
+    }
+    if(added)writer.warning("Node '"+node.name+"': static header transforms require time-zero fields in engine ASCII.");
+    if(positionConflict)
+        writer.warning("Node '"+node.name+"': its stored position header differs from the last direct controller for that component; engine ASCII derives each written component from its last direct field.");
+    if(const auto* rotation=directController(node,kControllerOrientation)) {
+        const auto at=rotation->dataIndex;
+        const auto q=rotation->rawFlags==2u?unpackEngineControllerQuaternion(node.controllerDataWords.at(at),writer.game()):
+            Quaternion{controllerFloat(node,at),controllerFloat(node,at+1u),controllerFloat(node,at+2u),controllerFloat(node,at+3u)};
+        if(node.orientation.x!=q.x||node.orientation.y!=q.y||node.orientation.z!=q.z||node.orientation.w!=q.w)
+            writer.warning("Node '"+node.name+"': its stored orientation header differs from the last direct controller; engine ASCII derives the header from that controller.");
     }
 }
 
@@ -177,8 +264,9 @@ void writeTree(Writer& writer,const Model& model,const std::vector<Node>& nodes,
             writer.line("parent "+writer.token(parent.name,"parent name"));
         } else writer.line("parent NULL");
         firstNames.emplace(folded(name),index);emitted[index]=true;
+        if(!animation && !writer.advanced())standardHeaderTransforms(writer,node);
         writeControllers(writer,node,flags);
-        if(!animation)headerTransforms(writer,node);
+        if(!animation && writer.advanced())headerTransforms(writer,node);
         if(!animation) {
             writeNodeFields(writer,model,node);
             if(node.mesh) {
@@ -209,6 +297,27 @@ void writeTree(Writer& writer,const Model& model,const std::vector<Node>& nodes,
 } // namespace
 
 
+void reconstructExportedNodeFrames(Model& model,const neoshared::bif::JobControl& job) {
+    for(auto& node:model.nodes) {
+        Writer writer(model.game,job);
+        standardHeaderTransforms(writer,node);
+        writeControllers(writer,node,node.flags);
+        const auto text=writer.finish().text;
+        const std::vector<std::uint8_t> bytes(text.begin(),text.end());
+        ascii::Reader reader(bytes,model.game,node.name,job);
+        ascii::RawNode raw;
+        raw.node.flags=node.flags;
+        raw.node.name=node.name;
+        raw.modelClassification=model.classification;
+        ascii::initializeNode(raw,model.game);
+        ascii::Line line;
+        while(reader.next(line))
+            ascii::parseControllerField(line,reader,raw,model.game);
+        node.position=raw.node.position;
+        node.orientation=raw.node.orientation;
+    }
+}
+
 } // namespace neomdl::model::ascii_export
 
 namespace neomdl::model {
@@ -235,7 +344,7 @@ AsciiExportResult exportAsciiModel(const Model& model,const neoshared::bif::JobC
     job.update(0u,animationCount+1u,"Exporting ASCII model: "+name);
     if(model.collapsedRoomParts||!model.sceneNodeAdmission.empty())
         throw ModelError("ASCII export requires the source model asset, not a collapsed scene partition");
-    writer.line("# NeoMDL generated ASCII model");
+    writer.line(options.advanced?"# NeoMDL Advanced ASCII model":"# NeoMDL Standard ASCII model");
     writer.line(std::string("# Target game: ")+(model.game==GameVersion::Kotor1?"K1":"K2"));
     writer.line("# Compiled ordering and source information lost during construction cannot be recovered.");
     for(const auto& warning:model.warnings)writer.warning("Decoder: "+warning);
@@ -266,7 +375,7 @@ AsciiExportResult exportAsciiModel(const Model& model,const neoshared::bif::JobC
         writer.line("setsupermodel "+modelTarget+" "+writer.token(model.engineSupermodelName,"supermodel"));
     }
     classifications(writer,model);
-    if(model.compressQuaternions)
+    if(options.advanced && model.compressQuaternions)
         writer.line("compressquaternions "+std::to_string(*model.compressQuaternions));
     writer.line("ignorefog "+std::to_string(model.fog?0:1));
     writer.line("setanimationscale "+writer.scalar(model.animationScale));

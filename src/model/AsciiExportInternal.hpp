@@ -37,10 +37,12 @@ public:
     std::string scalar(float value) const;
     std::string scalarDouble(double value) const;
     std::string vector(Vec3 value) const;
+    std::string quaternion(Quaternion value);
     std::string token(const std::string& value, const std::string& context) const;
     void indent(unsigned spaces) noexcept { indent_ = spaces; }
     GameVersion game() const noexcept { return game_; }
     const neoshared::bif::JobControl& job() const noexcept { return job_; }
+    bool advanced() const noexcept { return options_.advanced; }
     bool explicitNormals(const Mesh& mesh) const noexcept {
         return options_.explicitNormals.value_or(mesh.explicitNormals);
     }
@@ -58,6 +60,7 @@ private:
 };
 
 void reconstructSkinSeamSmoothing(Writer&, const Model&);
+void reconstructExportedNodeFrames(Model&, const neoshared::bif::JobControl&);
 
 void writeControllers(Writer&, const Node&, std::uint16_t fieldFlags);
 void writeNodeFields(Writer&, const Model&, const Node&);

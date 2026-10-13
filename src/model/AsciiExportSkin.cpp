@@ -9,8 +9,82 @@
 #include <limits>
 
 namespace neomdl::model::ascii_export {
-void writeSkin(Writer& writer,const Model&,const Mesh& mesh,
+namespace {
+
+std::vector<std::size_t> depthFirstNodes(const Model& model,std::size_t node) {
+    while(model.nodes.at(node).parent) node=*model.nodes[node].parent;
+    std::vector<std::size_t> order;
+    const auto visit=[&](const auto& self,std::size_t index) -> void {
+        order.push_back(index);
+        for(const auto child:model.nodes[index].children) self(self,child);
+    };
+    visit(visit,node);
+    return order;
+}
+
+} // namespace
+
+void writeStandardSkin(Writer& writer,const Model& model,const Mesh& mesh,
                const ReconstructedMesh& generated) {
+    if(!mesh.engineCpuSkin && !mesh.builtFloatSkinChannels)
+        throw ModelError("ASCII skin export requires the engine float weight/index channels for node "+
+                         model.nodes.at(mesh.nodeIndex).name);
+    const auto channels=decodeEngineFloatSkinChannels(mesh);
+    const auto nodes=depthFirstNodes(model,mesh.nodeIndex);
+    const auto boneName=[&](float engineIndex) {
+        // A named ASCII influence rebuilds an integral compact-palette slot.
+        // Fractional/invalid shader indices have no equivalent bone-name
+        // record; do not replace them with repaired inspection influences.
+        if(!std::isfinite(engineIndex) || engineIndex<0.0f ||
+           engineIndex>=static_cast<float>(mesh.skinBoneMapSize) ||
+           std::trunc(engineIndex)!=engineIndex)
+            throw ModelError("ASCII skin export cannot name the engine palette index "+
+                             writer.scalar(engineIndex)+" in node "+model.nodes.at(mesh.nodeIndex).name);
+        const auto mapped=mesh.skinBoneMap.at(static_cast<std::size_t>(engineIndex));
+        if(mapped<0 || static_cast<std::size_t>(mapped)>=model.nodes.size())
+            throw ModelError("ASCII skin export has a engine palette entry without a model bone in node "+
+                             model.nodes.at(mesh.nodeIndex).name);
+        const auto bone=static_cast<std::size_t>(mapped);
+        if(bone==nodes.front()) return std::string{"ROOT"};
+        const auto& name=model.nodes[bone].name;
+        // FindPartIndexDFS treats ROOT specially and otherwise selects the
+        // first case-insensitive name in sibling-ordered depth-first order.
+        const auto first=std::find_if(nodes.begin(),nodes.end(),[&](std::size_t index) {
+            return ascii::equal(model.nodes[index].name,name);
+        });
+        if(ascii::equal(name,"ROOT") || first==nodes.end() || *first!=bone)
+            throw ModelError("ASCII skin export cannot uniquely address bone "+name+
+                             " through engine FindPartIndexDFS");
+        return writer.token(name,"skin bone name");
+    };
+
+    writer.line("weights "+std::to_string(generated.sourceVertices.size()));
+    for(const auto source:generated.sourceVertices) {
+        writer.job().check();
+        const auto& influence=channels.at(source);
+        std::string row;
+        for(std::size_t channel=0;channel<4u;++channel) {
+            if(channel) row+=' ';
+            // Engine omitted/zero influences use ROOT with zero weight.
+            // Preserve authored weights, including their sign and total;
+            // there is no sorting or normalization in the ASCII producer.
+            row+=influence.weights[channel]==0.0f
+                ? "ROOT" : boneName(influence.indices[channel]);
+            row+=' ';row+=writer.scalar(influence.weights[channel]);
+        }
+        writer.line(row);
+    }
+    // Supplying tbone_ref_inv would make PartSkin::PostProcess skip the
+    // complete first-instance builder, including its generated draw pool.
+    // Functional authoring output therefore lets the engine producer derive
+    // both bind arrays from the model's initial node/controller transforms.
+    writer.warning("Skin "+model.nodes.at(mesh.nodeIndex).name+
+                   ": engine ASCII load regenerates inverse bind transforms from the initial node transforms; compiled inverse bind arrays are not emitted.");
+}
+
+void writeSkin(Writer& writer,const Model& model,const Mesh& mesh,
+               const ReconstructedMesh& generated) {
+    if(!writer.advanced()) {writeStandardSkin(writer,model,mesh,generated);return;}
     const auto& skin=*mesh.asciiSkinSource;
     writer.line("skinbonemap "+std::to_string(skin.boneToPalette.size()));
     for(const auto value:skin.boneToPalette) writer.line(writer.scalar(value));
@@ -136,7 +210,8 @@ void writeLightsaber(Writer& writer,const Node& node,bool explicitNormals) {
     }
     writer.warning("Lightsaber "+node.name+
         ": source faces and selector colors are reconstructed from the blade pieces."+
-        (explicitNormals?std::string{}:std::string(" Normals are regenerated from those faces.")));
+        (explicitNormals?std::string{}:std::string(" Normals are regenerated from those faces."))+
+        (writer.advanced()?std::string{}:std::string(" Standard ASCII also regenerates the mesh sphere.")));
 }
 
 } // namespace neomdl::model::ascii_export

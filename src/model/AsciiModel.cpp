@@ -368,6 +368,7 @@ void parseNode(const Line& header, Reader& reader, Model& model,
     // MdlNodeEmitter::InternalPostProcess changes the owning model header
     // immediately when this node closes, before later header fields parse.
     if(!animation && raw.node.emitter && model.engineRadius<40.0f) model.engineRadius=40.0f;
+    model.advancedAscii|=raw.advancedAscii;
     if(raw.mesh)
         for(const auto& setting:model.textureTangents)
             if(equal(setting.first,raw.mesh->texture0)) raw.mesh->asciiTangents=setting.second;
@@ -729,8 +730,10 @@ std::shared_ptr<Model> decodeAsciiModelInContext(const std::vector<std::uint8_t>
         } else if(command=="classification") {
             classification((*current),arguments);
         } else if(command=="texturetangents") {
+            current->advancedAscii=true;
             current->textureTangents.emplace_back(line.tokens[1],parseInt(line.tokens[2])!=0);
         } else if(command=="compressquaternions") {
+            current->advancedAscii=true;
             current->compressQuaternions=parseInt(line.tokens[1])!=0;
         } else if(command=="secondaryclassification") {
             if(equal(arguments,"sensitive")) (*current).classification|=0x0200u;

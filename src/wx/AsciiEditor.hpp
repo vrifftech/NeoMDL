@@ -11,6 +11,7 @@
 #include <future>
 
 class wxButton;
+class wxChoice;
 class wxSearchCtrl;
 class wxStyledTextCtrl;
 class wxTextCtrl;
@@ -24,8 +25,10 @@ public:
                 std::function<void()> changed);
     ~AsciiEditor() override;
 
-    bool ready() const noexcept { return ready_; }
-    bool previewCurrent() const noexcept { return ready_ && previewRevision_ == revision_; }
+    bool ready() const noexcept { return ready_ && !generating_ && !requestedFormat_; }
+    bool previewCurrent() const noexcept { return ready() && previewRevision_ == revision_; }
+    bool advanced() const noexcept { return advanced_; }
+    bool edited() const noexcept { return revision_ != 0; }
     bool modified() const;
     std::string text() const;
     const std::shared_ptr<const ModelDocument>& source() const { return source_; }
@@ -48,12 +51,14 @@ private:
     void installText(const std::string& text);
     void findNext();
     void replaceText(const std::string& text);
+    void generateAscii(bool advanced);
 
     std::shared_ptr<const ModelDocument> source_;
     std::function<void(std::unique_ptr<ModelDocument>)> apply_;
     std::function<void()> changed_;
     wxStyledTextCtrl* editor_{};
     wxSearchCtrl* search_{};
+    wxChoice* format_{};
     wxTextCtrl* status_{};
     wxButton* update_{};
     wxTimer timer_;
@@ -64,6 +69,8 @@ private:
     std::chrono::steady_clock::time_point workStarted_{};
     long displayedSeconds_{-1};
     bool generating_{}, ready_{}, pending_{}, previewEnabled_{true};
+    bool advanced_{}, generationAdvanced_{};
+    std::optional<bool> requestedFormat_;
     std::filesystem::path savePath_;
 };
 

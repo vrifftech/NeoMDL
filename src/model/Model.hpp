@@ -634,6 +634,7 @@ struct AsciiLoadSession;
 struct Model {
     GameVersion game{GameVersion::Kotor1};
     bool asciiBuilt{};
+    bool advancedAscii{};
     bool asciiMaterialsFinalized{};
     std::uint32_t engineNodeCount{};
     // Initial packed header count used by the ASCII load registry's engine
