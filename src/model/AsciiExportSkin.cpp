@@ -135,9 +135,8 @@ void writeLightsaber(Writer& writer,const Node& node,bool explicitNormals) {
         writer.line(a+" "+b+" "+c+" 0 "+a+" "+b+" "+c+" 0");
     }
     writer.warning("Lightsaber "+node.name+
-        ": source faces and selector colors are reconstructed from the blade pieces; ASCII load regenerates "+
-        (explicitNormals?std::string("the mesh sphere, which may differ from its stored value."):
-            std::string("normals and the mesh sphere, which may differ from their stored values.")));
+        ": source faces and selector colors are reconstructed from the blade pieces."+
+        (explicitNormals?std::string{}:std::string(" Normals are regenerated from those faces.")));
 }
 
 } // namespace neomdl::model::ascii_export
