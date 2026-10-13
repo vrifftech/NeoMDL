@@ -1605,17 +1605,20 @@ void reconstructNormalPositionPrecision(Writer& out,const Model& model,const Mod
             auto candidates=collectCandidates(selected,crosses,nullptr);
             sortCandidates(candidates);
             const auto accept=[&](MeshReconstruction candidate) {
-                auto trial=plans;
-                trial.at(&mesh)=std::move(candidate);
-                auto rebuilt=frames;
-                const auto generated=generateGeometry(rebuilt,model,trial,false,out.job());
+                std::map<const Mesh*,MeshReconstruction> changed;
+                changed.emplace(&mesh,std::move(candidate));
+                auto rebuilt=current;
+                rebuilt.meshes[index]=frames.meshes[index];
+                auto generated=rows;
+                auto changedRows=generateGeometry(rebuilt,model,changed,false,out.job());
+                generated[index]=std::move(changedRows[index]);
                 if(!preservesSkinChannels(model,generated)) return false;
-                measureTangentBasis(rebuilt,model,generated,trial,out.job());
+                measureTangentBasis(rebuilt,model,generated,plans,out.job(),&changed);
                 processAsciiSkinSeams(rebuilt,out.job());
                 if(!improvesReconstructedShading(model,plans,current,rows,rebuilt,generated,true)) return false;
-                plan=std::move(trial.at(&mesh));
+                plan=std::move(changed.at(&mesh));
                 if(!plan.preciseSourcePositions.empty()) high=plan.preciseSourcePositions;
-                current=std::move(rebuilt);rows=generated;return true;
+                current=std::move(rebuilt);rows=std::move(generated);return true;
             };
             bool accepted=false;
             for(const auto& candidate:candidates) {
@@ -1925,8 +1928,9 @@ void reconstructNormalPositionPrecision(Writer& out,const Model& model,const Mod
                                 }
                             }
                             std::sort(trials.begin(),trials.end(),[](const auto& a,const auto& b) {
-                                return std::make_tuple(a.domain.size(),a.worsened,a.error,a.targetError,a.positions,a.domain)<
-                                    std::make_tuple(b.domain.size(),b.worsened,b.error,b.targetError,b.positions,b.domain);
+                                const auto aSize=a.domain.size(),bSize=b.domain.size();
+                                return std::tie(aSize,a.worsened,a.error,a.targetError,a.positions,a.domain)<
+                                    std::tie(bSize,b.worsened,b.error,b.targetError,b.positions,b.domain);
                             });
                             trials.erase(std::unique(trials.begin(),trials.end(),[](const auto& a,const auto& b) {
                                 return a.positions==b.positions && a.domain==b.domain;

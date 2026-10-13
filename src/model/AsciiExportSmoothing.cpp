@@ -725,13 +725,16 @@ ReconstructedNormalStars reconstructNormalCornerStars(
     };
     const bool compareAngles=precisePositions || baselineCornerNormals;
     struct Error {double squared,angle;};
-    const auto errors=[&](std::size_t index) {
+    const auto groupNormal=[&](std::size_t index) {
         Vec3 sum{};
         for(const auto face:groups[index].faces) {
             const auto weighted=crosses[face];
             sum={sum.x+weighted.x,sum.y+weighted.y,weighted.z+sum.z};
         }
-        const auto normal=normalizeSmoothing(sum);
+        return normalizeSmoothing(sum);
+    };
+    const auto errors=[&](std::size_t index) {
+        const auto normal=groupNormal(index);
         std::vector<Error> result;
         for(const auto corner:groups[index].corners) {
             const auto target=vertices[static_cast<std::size_t>(
@@ -832,13 +835,18 @@ ReconstructedNormalStars reconstructNormalCornerStars(
                     candidate[face]=rotation;crosses[face]=alternatives[face][rotation];
                     double next=score;bool accepted=true;
                     for(const auto group:completed[depth]) {
-                        const auto values=errors(group);
-                        for(std::size_t i=0;i<values.size();++i) {
-                            if(values[i].squared>baseline[group][i].squared ||
-                               (compareAngles && values[i].angle>baseline[group][i].angle)) {
+                        const auto normal=groupNormal(group);
+                        const auto& corners=groups[group].corners;
+                        for(std::size_t i=0;i<corners.size();++i) {
+                            const auto corner=corners[i];
+                            const auto target=vertices[static_cast<std::size_t>(
+                                mesh.faces[corner/3u].indices[corner%3u])].normal;
+                            const auto squared=difference(normal,target);
+                            if(squared>baseline[group][i].squared ||
+                               (compareAngles && angle(normal,target)>baseline[group][i].angle)) {
                                 accepted=false;break;
                             }
-                            next+=values[i].squared;
+                            next+=squared;
                         }
                         if(!accepted) break;
                     }

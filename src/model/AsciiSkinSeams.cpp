@@ -94,6 +94,20 @@ void processAsciiSkinSeams(const Model& model,const neoshared::bif::JobControl& 
     if(result.skinMeshes==0u) { model.skinSeams=result;return; }
     result.processed=true;
 
+    // Positions stay fixed while the ordered seam pass updates normal pools.
+    std::vector<std::vector<Vec3>> positions(meshes.size());
+    for(std::size_t index=0;index<meshes.size();++index) {
+        const auto& entry=meshes[index];
+        const auto& mesh=model.meshes[entry.mesh];
+        const auto count=static_cast<std::int16_t>(mesh.enginePrelightVertexCount);
+        for(std::int32_t vertex=0;vertex<=count;++vertex) {
+            const auto local=static_cast<std::size_t>(vertex)==mesh.enginePrelightVertexCount
+                ? entry.sentinel : mesh.vertices[vertex].position;
+            positions[index].push_back(add(entry.position,
+                ascii::engineModelRotateVector(entry.orientation,local)));
+        }
+    }
+
     struct NormalReference { std::size_t mesh,vertex; };
     const auto normal=[&](const NormalReference& ref) -> Vec3& {
         const auto& mesh=model.meshes[meshes[ref.mesh].mesh];
@@ -108,8 +122,7 @@ void processAsciiSkinSeams(const Model& model,const neoshared::bif::JobControl& 
         const auto ownerCount=static_cast<std::int16_t>(current.enginePrelightVertexCount);
         for(std::int32_t vertex=0;vertex<ownerCount;++vertex) {
             job.check();
-            const auto point=add(meshes[owner].position,
-                ascii::engineModelRotateVector(meshes[owner].orientation,current.vertices[vertex].position));
+            const auto point=positions[owner][vertex];
             auto sum=ascii::engineModelRotateVector(meshes[owner].orientation,current.normalAt(vertex));
             std::vector<NormalReference> matches{{owner,static_cast<std::size_t>(vertex)}};
             // K1 0x5c224c / K2 0x6e00dc visit every OTHER mesh, including
@@ -128,10 +141,7 @@ void processAsciiSkinSeams(const Model& model,const neoshared::bif::JobControl& 
                        static_cast<std::size_t>(sourceVertex)==source.enginePrelightVertexCount)
                         throw ModelError("ASCII skin seam processing reaches an animmesh without a published MDX pool");
                     ++result.candidateComparisons;
-                    const auto local=static_cast<std::size_t>(sourceVertex)==source.enginePrelightVertexCount
-                        ? meshes[candidate].sentinel : source.vertices[sourceVertex].position;
-                    const auto candidatePoint=add(meshes[candidate].position,
-                        ascii::engineModelRotateVector(meshes[candidate].orientation,local));
+                    const auto candidatePoint=positions[candidate][sourceVertex];
                     // The comparison is strict; unordered values also fail.
                     if(!(std::abs(candidatePoint.x-point.x)<tolerance) ||
                        !(std::abs(candidatePoint.y-point.y)<tolerance) ||
