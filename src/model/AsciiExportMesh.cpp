@@ -1215,15 +1215,7 @@ void reconstructNormalPositionPrecision(Writer& out,const Model& model,const Mod
         return std::atan2(std::sqrt((x*x+y*y)+z*z),
             (double(a.x)*b.x+double(a.y)*b.y)+double(a.z)*b.z);
     };
-    const auto normal=[](Vec3 value) {
-        const float length=std::sqrt((value.x*value.x+value.y*value.y)+value.z*value.z);
-        if(length!=0.0f) {
-            if(double(length)<1e-9) return Vec3{1.0f,0.0f,0.0f};
-            const float scale=1.0f/length;
-            return Vec3{value.x*scale,value.y*scale,value.z*scale};
-        }
-        return value;
-    };
+    const auto normal=ascii::normalizeVertexNormal;
     struct Transform {Vec3 position;Quaternion orientation;};
     std::vector<Transform> transforms(model.meshes.size());
     for(std::size_t index=0;index<model.meshes.size();++index) {
@@ -1536,12 +1528,7 @@ void reconstructNormalPositionPrecision(Writer& out,const Model& model,const Mod
                 }
             }
         };
-        std::vector<std::vector<std::array<double,3>>> coupledOrigins;
-        for(;;) {
-            out.job().check();
-            std::vector<Vec3> crosses;
-            for(std::size_t face=0;face<mesh.faces.size();++face)
-                crosses.push_back(crossFrom(products(face,high.size(),0u,0.0)));
+        const auto unresolvedSources=[&] {
             std::vector<bool> selected(high.size());
             for(const auto& group:groups) {
                 if(!group.cancelled || !group.seamFree) continue;
@@ -1554,6 +1541,16 @@ void reconstructNormalPositionPrecision(Writer& out,const Model& model,const Mod
                 if(differs) for(const auto face:group.faces)
                     for(const auto source:plan.topology.sourceFaces[face]) selected[source]=true;
             }
+            return selected;
+        };
+        std::vector<std::vector<std::array<double,3>>> coupledOrigins;
+        for(auto selected=unresolvedSources();
+            std::any_of(selected.begin(),selected.end(),[](bool value){return value;});
+            selected=unresolvedSources()) {
+            out.job().check();
+            std::vector<Vec3> crosses;
+            for(std::size_t face=0;face<mesh.faces.size();++face)
+                crosses.push_back(crossFrom(products(face,high.size(),0u,0.0)));
             struct Candidate {std::size_t source;std::array<double,3> position;double error;};
             const auto collectCandidates=[&](const std::vector<bool>& allowed,
                                              const std::vector<Vec3>& inputCrosses,

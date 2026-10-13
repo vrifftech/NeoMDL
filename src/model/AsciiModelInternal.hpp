@@ -3,6 +3,7 @@
 #include <model/AsciiModel.hpp>
 
 #include <array>
+#include <cmath>
 #include <cstdio>
 #include <string_view>
 #include <utility>
@@ -196,12 +197,26 @@ struct NormalFaceCross {
         return {sum.x+x,sum.y+y,static_cast<float>(z+sum.z)};
     }
 };
-inline NormalFaceCross normalFaceCross(Vec3 a,Vec3 b) {
-    // XY are stored before accumulation; Z retains its product precision
-    // through the addition to the float normal accumulator.
-    return {static_cast<float>(double(a.y)*b.z-double(a.z)*b.y),
-        static_cast<float>(double(a.z)*b.x-double(a.x)*b.z),
-        double(a.x)*b.y-double(a.y)*b.x};
+inline NormalFaceCross normalFaceCross(Vec3 a,Vec3 b,Vec3 c) {
+    // The first edge's XY are stored; its Z and the second edge stay precise.
+    // Cross XY are stored before accumulation; Z stays precise through the sum.
+    const float px=b.x-a.x,py=b.y-a.y;
+    const double pz=double(b.z)-a.z;
+    const double x=double(c.x)-b.x,y=double(c.y)-b.y,z=double(c.z)-b.z;
+    return {static_cast<float>(py*z-pz*y),
+        static_cast<float>(pz*x-px*z),px*y-py*x};
+}
+inline Vec3 normalizeVertexNormal(Vec3 value) {
+    // ProcessVerts preserves exact zero. Keep normalization intermediates
+    // at expression precision until the normalized components are stored.
+    const double length=std::sqrt((double(value.x)*value.x+double(value.y)*value.y)+double(value.z)*value.z);
+    if(length!=0.0) {
+        if(length<1e-9) return {1.0f,0.0f,0.0f};
+        const double scale=1.0/length;
+        return {static_cast<float>(value.x*scale),static_cast<float>(value.y*scale),
+            static_cast<float>(value.z*scale)};
+    }
+    return value;
 }
 std::array<Vec3,2> normalPositionFaceProducts(const std::array<Vec3,3>& positions,
     const std::array<std::array<double,3>,3>& precise);

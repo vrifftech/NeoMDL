@@ -1,4 +1,5 @@
 #include <model/AsciiExportTopology.hpp>
+#include <model/AsciiModelInternal.hpp>
 
 #include <algorithm>
 #include <cstring>
@@ -163,14 +164,13 @@ std::vector<ReconstructedTopology> reconstructTopologies(
     appendCandidate();
 
     std::vector<std::vector<std::size_t>> members(mesh.faces.size()*3u);
-    std::vector<Vec3> crosses;
+    std::vector<ascii::NormalFaceCross> crosses;
     for(std::size_t face=0;face<mesh.faces.size();++face) {
         for(std::size_t corner=0;corner<3u;++corner) members[groups.find(face*3u+corner)].push_back(face*3u+corner);
         const auto x=compiledVertices[compiled(face,0u)].position;
         const auto y=compiledVertices[compiled(face,1u)].position;
         const auto z=compiledVertices[compiled(face,2u)].position;
-        const Vec3 p{y.x-x.x,y.y-x.y,y.z-x.z},q{z.x-y.x,z.y-y.y,z.z-y.z};
-        crosses.push_back({p.y*q.z-p.z*q.y,p.z*q.x-p.x*q.z,p.x*q.y-p.y*q.x});
+        crosses.push_back(ascii::normalFaceCross(x,y,z));
     }
     const auto normalJoinImprovement=[&](std::size_t a,std::size_t b) {
         a=groups.find(a);b=groups.find(b);
@@ -188,12 +188,8 @@ std::vector<ReconstructedTopology> reconstructTopologies(
         std::set_union(faces[0].begin(),faces[0].end(),faces[1].begin(),faces[1].end(),std::back_inserter(faces[2]));
         const auto error=[&](const std::vector<std::size_t>& faces) {
             Vec3 value{};
-            for(const auto face:faces) {const auto v=crosses[face];value={value.x+v.x,value.y+v.y,v.z+value.z};}
-            const float length=std::sqrt((value.x*value.x+value.y*value.y)+value.z*value.z);
-            if(length!=0.0f) {
-                if(double(length)<1e-9) value={1.0f,0.0f,0.0f};
-                else {const float scale=1.0f/length;value={value.x*scale,value.y*scale,value.z*scale};}
-            }
+            for(const auto face:faces) value=crosses[face].accumulate(value);
+            value=ascii::normalizeVertexNormal(value);
             const double x=double(value.x)-target.x,y=double(value.y)-target.y,z=double(value.z)-target.z;
             return (x*x+y*y)+z*z;
         };

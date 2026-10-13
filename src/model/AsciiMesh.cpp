@@ -235,7 +235,7 @@ std::vector<std::array<std::size_t,3>> processVertices(RawNode& raw,Mesh& mesh,
             const auto a=raw.vertices.at(candidate.vertices[0]),
                 b=raw.vertices.at(candidate.vertices[1]),c=raw.vertices.at(candidate.vertices[2]);
             crosses.push_back(raw.normalPositionPrecision==64u?
-                preciseNormalCross(candidate,raw):normalFaceCross(subtract(b,a),subtract(c,b)));
+                preciseNormalCross(candidate,raw):normalFaceCross(a,b,c));
             // The engine chooses the last matching corner of a repeated vertex.
             for(std::size_t corner=0;corner<3u;++corner) {
                 auto& faces=incident.at(candidate.vertices[corner]);
@@ -259,16 +259,10 @@ std::vector<std::array<std::size_t,3>> processVertices(RawNode& raw,Mesh& mesh,
                         reused=true;break;
                     }
                 }
-                // ProcessVerts leaves zero accumulated normals zero; the separate
-                // face-plane NormalOf helper has the +X zero-length behavior.
-                const auto length=magnitude(sum);
-                if(length!=0.0f) {
-                    // ProcessVerts skips Normalize only for exact zero; its
-                    // nonzero path uses Vector::Normalize's engine 1e-9 limit.
-                    if(static_cast<double>(length)<1e-9) sum={1.0f,0.0f,0.0f};
-                    else {const auto scale=1.0f/length;sum={sum.x*scale,sum.y*scale,sum.z*scale};}
+                if(!reused) {
+                    indices[i][corner]=raw.normals.size();
+                    raw.normals.push_back(normalizeVertexNormal(sum));
                 }
-                if(!reused) {indices[i][corner]=raw.normals.size();raw.normals.push_back(sum);}
             }
         }
     }

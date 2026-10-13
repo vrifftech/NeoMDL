@@ -29,17 +29,6 @@ Vec3 subtract(Vec3 a,Vec3 b) { return {a.x-b.x,a.y-b.y,a.z-b.z}; }
 Vec3 cross(Vec3 a,Vec3 b) {
     return {a.y*b.z-a.z*b.y,a.z*b.x-a.x*b.z,a.x*b.y-a.y*b.x};
 }
-Vec3 normalizeSmoothing(Vec3 value) {
-    // ProcessVerts: K1 0x5c3950, K2 0x6e1a50. Exact zero stays zero;
-    // nonzero vectors take Vector::Normalize's separate 1e-9 branch.
-    const float length=std::sqrt((value.x*value.x+value.y*value.y)+value.z*value.z);
-    if(length!=0.0f) {
-        if(static_cast<double>(length)<1e-9) return {1.0f,0.0f,0.0f};
-        const float scale=1.0f/length;
-        value={value.x*scale,value.y*scale,value.z*scale};
-    }
-    return value;
-}
 double difference(Vec3 a,Vec3 b) {
     const double x=static_cast<double>(a.x)-b.x;
     const double y=static_cast<double>(a.y)-b.y;
@@ -72,7 +61,7 @@ struct Smoothing {
                 const auto weighted=crosses[entry.face];
                 sum=weighted.accumulate(sum);
             }
-        return normalizeSmoothing(sum);
+        return ascii::normalizeVertexNormal(sum);
     }
     double error(std::size_t corner,const std::vector<std::uint8_t>& joined) const {
         if(!faceBases.empty()) {
@@ -345,7 +334,7 @@ struct Smoothing {
                                    [&](std::size_t other){return other/3u==entry.face;})) take=true;
                             if(take) {const auto v=crosses[entry.face];sum=v.accumulate(sum);}
                         }
-                        total+=difference(normalizeSmoothing(sum),corners[corner].target);
+                        total+=difference(ascii::normalizeVertexNormal(sum),corners[corner].target);
                     }
                     return total;
                 };
@@ -636,7 +625,7 @@ std::vector<std::size_t> reconstructNormalFaceOrder(
                 (*precisePositions)[indices[(rotation+2u)%3u]]}};
             const auto value=ascii::normalPositionFaceCross({{a,b,c}},precise);
             crosses.push_back({value.x,value.y,value.z});
-        } else crosses.push_back(ascii::normalFaceCross(subtract(b,a),subtract(c,b)));
+        } else crosses.push_back(ascii::normalFaceCross(a,b,c));
     }
     std::vector<std::size_t> anchors;
     for(const auto& entry:coincident) {
@@ -684,7 +673,7 @@ std::vector<std::size_t> reconstructNormalFaceOrder(
                     const auto weighted=crosses[other];
                     sum=weighted.accumulate(sum);
                 }
-                normal=normalizeSmoothing(sum);
+                normal=ascii::normalizeVertexNormal(sum);
                 if(mask) shared.emplace(mask,normal);
             }
             const auto target=vertices[static_cast<std::size_t>(mesh.faces[face].indices[corner%3u])].normal;
@@ -789,7 +778,7 @@ ReconstructedNormalStars reconstructNormalCornerStars(
                     (*precisePositions)[indices[(corner+2u)%3u]]}};
                 const auto value=ascii::normalPositionFaceCross({{a,b,c}},precise);
                 alternatives[face][corner]={value.x,value.y,value.z};
-            } else alternatives[face][corner]=ascii::normalFaceCross(subtract(b,a),subtract(c,b));
+            } else alternatives[face][corner]=ascii::normalFaceCross(a,b,c);
         }
         coincident[canonical(triangle)].push_back(face);
     }
@@ -849,7 +838,7 @@ ReconstructedNormalStars reconstructNormalCornerStars(
             const auto weighted=crosses[face];
             sum=weighted.accumulate(sum);
         }
-        return normalizeSmoothing(sum);
+        return ascii::normalizeVertexNormal(sum);
     };
     const auto errors=[&](std::size_t index) {
         const auto normal=groupNormal(index);
@@ -1119,7 +1108,7 @@ ReconstructedNormalRounding reconstructNormalRounding(
         for(std::size_t corner=0;corner<3u;++corner) {
             const auto a=positions[indices[corner]],b=positions[indices[(corner+1u)%3u]],
                 c=positions[indices[(corner+2u)%3u]];
-            crosses[face][corner]=ascii::normalFaceCross(subtract(b,a),subtract(c,b));
+            crosses[face][corner]=ascii::normalFaceCross(a,b,c);
         }
     };
     const auto normal=[&](std::size_t group,const Crosses& crosses,const std::vector<std::uint8_t>& starts) {
@@ -1128,7 +1117,7 @@ ReconstructedNormalRounding reconstructNormalRounding(
             const auto weighted=crosses[face][starts[face]];
             sum=weighted.accumulate(sum);
         }
-        return normalizeSmoothing(sum);
+        return ascii::normalizeVertexNormal(sum);
     };
     const auto angle=[](Vec3 a,Vec3 b) {
         const double x=double(a.y)*b.z-double(a.z)*b.y;
@@ -1295,7 +1284,7 @@ ReconstructedSmoothing reconstructSmoothing(
         const auto a=vertices[sourceVertices[indices[rotation%3u]]].position;
         const auto b=vertices[sourceVertices[indices[(1u+rotation)%3u]]].position;
         const auto c=vertices[sourceVertices[indices[(2u+rotation)%3u]]].position;
-        work.crosses.push_back(ascii::normalFaceCross(subtract(b,a),subtract(c,b)));
+        work.crosses.push_back(ascii::normalFaceCross(a,b,c));
         for(const auto source:indices) {
             auto& faces=incident[source];
             if(faces.empty() || faces.back()!=face) faces.push_back(face);
