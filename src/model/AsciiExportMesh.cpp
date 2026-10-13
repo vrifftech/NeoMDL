@@ -248,31 +248,6 @@ MeshReconstruction reconstructMesh(Writer& out,const Node& node,const Mesh& mesh
     const bool hasNormals=!mesh.enginePrelightInput || (mesh.mdxBitmap&0x20u)!=0u;
     const bool explicitNormals=!animation && hasNormals && out.explicitNormals(mesh);
     const bool hasColors=mesh.hasVertexColors || (mesh.enginePrelightInput && (mesh.mdxBitmap&0x40u)!=0u);
-    if(mesh.skinned) {
-        // Engine NodeVertex equality deliberately excludes skin influences.
-        // Splitting a source vertex on weights alone cannot preserve two
-        // otherwise identical generated vertices. Do not invent UV.z tags.
-        std::map<std::vector<std::uint32_t>,std::size_t> generated;
-        for(std::size_t i=0;i<vertices.size();++i) {
-            out.job().check();
-            const auto& vertex=vertices[i];
-            std::vector<std::uint32_t> key;
-            for(const auto value:{vertex.position.x,vertex.position.y,vertex.position.z,
-                                  vertex.normal.x,vertex.normal.y,vertex.normal.z}) key.push_back(bits(value));
-            for(std::size_t channel=0;channel<4u;++channel) {
-                const auto value=uv(vertex,channel);
-                key.push_back(bits(value.x));key.push_back(bits(value.y));
-            }
-            const auto inserted=generated.emplace(std::move(key),i);
-            if(!inserted.second) {
-                const auto& previous=skin.at(inserted.first->second);
-                const auto& current=skin.at(i);
-                if(previous.weights!=current.weights || previous.indices!=current.indices)
-                    throw ModelError("Cannot export skin mesh "+node.name+
-                        ": identical generated vertex attributes carry different weight/index channels, which engine ASCII vertex merging cannot preserve");
-            }
-        }
-    }
     std::vector<std::vector<std::uint32_t>> sourceAttributes(vertices.size());
     for(std::size_t index=0;index<vertices.size();++index) {
         out.job().check();
@@ -358,7 +333,7 @@ MeshReconstruction reconstructMesh(Writer& out,const Node& node,const Mesh& mesh
     for(std::size_t i=0;i<topologies.size();++i) {
         const auto& topology=topologies[i];
         ReconstructedSmoothing candidate;
-        if(!animation && hasNormals)
+        if(!animation && hasNormals && !explicitNormals)
             candidate=reconstructSmoothing(mesh,vertices,topology.sourceVertices,topology.sourceFaces,out.job(),nullptr,refine);
         else candidate.masks.assign(mesh.faces.size(),animation?1u:0u);
         const auto candidateSphereError=sphereError(mesh,vertices,topology);
@@ -442,13 +417,18 @@ CornerRows generateGeometry(Model& rebuilt,const Model& source,
         }
         const auto* animation=raw.node.animmesh?&*raw.node.animmesh:nullptr;
         const bool colors=mesh.hasVertexColors || (mesh.enginePrelightInput && (mesh.mdxBitmap&0x40u));
+        const auto skin=mesh.skinned?decodeEngineFloatSkinChannels(mesh):std::vector<EngineFloatSkinChannels>{};
+        if(mesh.skinned) raw.skinData.emplace();
+        if(mesh.cpuPositions) raw.cpuPositions=*mesh.cpuPositions;
+        if(mesh.mdxBitmap&0x80u)
+            for(const auto& vertex:plan.vertices) raw.tangentBases.push_back(vertex.tangentBasis);
         for(std::size_t source=0;source<plan.topology.sourceVertices.size();++source) {
             const auto vertex=plan.topology.sourceVertices[source];
             const auto& value=plan.vertices[vertex];
             raw.vertices.push_back(plan.sourcePositions[source]);
             if(animation && plan.hasNormals) raw.normals.push_back(value.normal);
-            if(colors) raw.colors.push_back({float(value.color[0])/255.0f,
-                float(value.color[1])/255.0f,float(value.color[2])/255.0f});
+            if(colors) raw.packedColors.push_back(value.color);
+            if(mesh.skinned) raw.skinChannels.push_back(skin.at(vertex));
             if(mesh.dangly) raw.constraints.push_back(mesh.dangly->constraints.at(vertex));
             if(animation && !animation->staticTangents.empty())
                 raw.animTangents.push_back(animation->staticTangents.at(vertex));
@@ -479,6 +459,8 @@ CornerRows generateGeometry(Model& rebuilt,const Model& source,
                     channel[corner]=static_cast<std::uint32_t>(
                         mesh.faces[face].indices[plan.sourceCorner(face,corner)]);
             if(plan.explicitNormals) raw.normalIndices.push_back(value.texcoords[0]);
+            if(mesh.cpuPositions) raw.cpuIndices.push_back(value.texcoords[0]);
+            if(mesh.mdxBitmap&0x80u) raw.tangentIndices.push_back(value.texcoords[0]);
             if(!precise.values.empty())
                 for(std::size_t corner=0;corner<3u;++corner)
                     value.texcoords[0][corner]=precise.indices[face][plan.sourceCorner(face,corner)];
@@ -2240,6 +2222,8 @@ void reconstructTangentUvPrecision(Writer& out,const Model& model,const Model& f
 } // namespace
 
 void reconstructSkinSeamSmoothing(Writer& out,const Model& model) {
+    if(std::all_of(model.meshes.begin(),model.meshes.end(),
+        [&](const Mesh& mesh) {return out.explicitNormals(mesh);})) return;
     if(std::none_of(model.meshes.begin(),model.meshes.end(),[](const Mesh& mesh){return mesh.skinned;})) {
         if(!out.refineTangentRounding() && !out.refineNormalRounding() &&
            std::none_of(model.meshes.begin(),model.meshes.end(),tangentPrecisionMesh) &&
@@ -2250,7 +2234,6 @@ void reconstructSkinSeamSmoothing(Writer& out,const Model& model) {
         }
         auto frames=model;
         frames.animations.clear();
-        reconstructExportedNodeFrames(frames,out.job());
         reconstructTangentRounding(out,model,frames,out.meshReconstructions);
         reconstructNormalRoundingPass(out,model,frames,out.meshReconstructions);
         reconstructTangentUvPrecision(out,model,frames,out.meshReconstructions);
@@ -2270,11 +2253,9 @@ void reconstructSkinSeamSmoothing(Writer& out,const Model& model) {
     plans=reconstruct(false);
     auto frames=model;
     frames.animations.clear();
-    reconstructExportedNodeFrames(frames,out.job());
     if(std::none_of(plans.begin(),plans.end(),[](const auto& entry) {
         return entry.second.hasNormals && !entry.second.explicitNormals && !entry.first->animated;
     })) {
-        reconstructTangentUvPrecision(out,model,frames,plans);
         return;
     }
     enum class PrecursorFit { Smooth,SplitOpposing,Unscored,RefineExisting,RetainedVertices };
@@ -2657,6 +2638,10 @@ void reconstructSkinSeamSmoothing(Writer& out,const Model& model) {
 
 ReconstructedMesh writeMesh(Writer& out,const Model& model,const Node& node,const Mesh& mesh) {
     materialFields(out,model,node,mesh);
+    if(mesh.engineBounds) {
+        out.line("spherecenter "+out.vector(mesh.engineBounds->sphereCenter));
+        out.line("sphereradius "+out.scalar(mesh.engineBounds->sphereRadius));
+    }
     if(node.lightsaber) {
         writeLightsaber(out,node,out.explicitNormals(mesh));
         return {};
@@ -2695,13 +2680,6 @@ ReconstructedMesh writeMesh(Writer& out,const Model& model,const Node& node,cons
         out.scalar(displacement));
     if(!hasNormals && !vertices.empty())
         out.warning("Mesh "+node.name+": no compiled normal channel exists; source connectivity is retained and face normals are generated");
-    if(mesh.cpuPositions) {
-        bool different=mesh.cpuPositions->size()!=vertices.size();
-        for(std::size_t i=0;i<vertices.size() && !different;++i)
-            different=!same(mesh.cpuPositions->at(i),vertices[i].position);
-        if(different)
-            out.warning("Mesh "+node.name+": the independent MDL CPU position pool differs from the rendering positions; ASCII has one source vertex pool and exports the rendering positions");
-    }
     diagnoseTopology(out,node,mesh);
     if(!reconstruction.preciseSourcePositions.empty()) out.line("normalpositionprecision 64");
     out.line("verts "+std::to_string(result.sourceVertices.size()));
@@ -2779,17 +2757,43 @@ ReconstructedMesh writeMesh(Writer& out,const Model& model,const Node& node,cons
     }
     if(!textureName(mesh,1u).empty() && (mesh.mdxBitmap&4u))
         out.warning("Mesh "+node.name+": secondary UVs contain any compiled lightmap transform; original .lmt data is unavailable and an active .lmt sidecar would be applied again during ASCII load");
-    if(hasColors) {
-        out.line("colors "+std::to_string(result.sourceVertices.size()));
-        bool alpha=false;
-        for(const auto index:result.sourceVertices) {
-            const auto& color=vertices[index].color;
-            out.line(out.vector({float(color[0])/255.0f,float(color[1])/255.0f,float(color[2])/255.0f}));
-            alpha|=color[3]!=255u;
+    const auto cornerIndices=[&](const std::string& field) {
+        out.line(field+" "+std::to_string(mesh.faces.size()));
+        for(const auto i:reconstruction.faceOrder) {
+            const auto& face=mesh.faces[i];
+            out.line(std::to_string(face.indices[reconstruction.sourceCorner(i,0u)])+" "+
+                std::to_string(face.indices[reconstruction.sourceCorner(i,1u)])+" "+
+                std::to_string(face.indices[reconstruction.sourceCorner(i,2u)]));
         }
-        if(!animation)
-            out.warning("Mesh "+node.name+": compiled RGB colors are exported for editing, but the engine ordinary/skin/dangly ASCII builders do not emit a compiled vertex-color channel");
-        if(alpha) out.warning("Mesh "+node.name+": compiled vertex alpha has no colors-array component in the engine ASCII grammar");
+    };
+    if(hasColors) {
+        out.line("colorsrgba "+std::to_string(vertices.size()));
+        for(const auto& vertex:vertices) {
+            const auto& c=vertex.color;
+            out.line(std::to_string(c[0])+" "+std::to_string(c[1])+" "+
+                std::to_string(c[2])+" "+std::to_string(c[3]));
+        }
+        cornerIndices("colorindices");
+    }
+    out.line("hastangentbasis "+std::to_string((mesh.mdxBitmap&0x80u)!=0u));
+    if(mesh.mdxBitmap&0x80u) {
+        out.line("tangentbasis "+std::to_string(vertices.size()));
+        for(const auto& vertex:vertices) {
+            const auto& basis=vertex.tangentBasis;
+            out.line(out.vector(basis.bitangent)+" "+out.vector(basis.tangent)+" "+out.vector(basis.normal));
+        }
+        cornerIndices("tangentindices");
+    }
+    if(mesh.cpuPositions && (adjusted || !std::equal(mesh.cpuPositions->begin(),mesh.cpuPositions->end(),vertices.begin(),
+        [](Vec3 position,const Vertex& vertex) {return same(position,vertex.position);}))) {
+        out.line("cpuverts "+std::to_string(mesh.cpuPositions->size()));
+        for(const auto value:*mesh.cpuPositions) out.line(out.vector(value));
+        cornerIndices("cpuindices");
+    }
+    out.line("faceplanes "+std::to_string(mesh.faces.size()));
+    for(const auto i:reconstruction.faceOrder) {
+        const auto& face=mesh.faces[i];
+        out.line(out.vector(face.normal)+" "+out.scalar(face.planeDistance));
     }
     out.line("faces "+std::to_string(mesh.faces.size()));
     for(const auto i:reconstruction.faceOrder) {

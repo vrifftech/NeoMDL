@@ -15,6 +15,7 @@
 #include <string>
 #include <stdexcept>
 #include <vector>
+#include <utility>
 
 namespace neomdl::model {
 
@@ -98,6 +99,8 @@ struct TangentBasis {
     Vec3 normal{};
     bool valid{};
 };
+
+bool usableTangentBasis(const TangentBasis& basis) noexcept;
 
 struct MeshUvAnimation {
     std::uint32_t enabledRaw{};
@@ -435,6 +438,8 @@ struct Mesh {
     std::uint32_t mdxTangentOffset{0xffffffffu};
     std::size_t validTangentVertices{};
     std::shared_ptr<const AsciiTangentSource> asciiTangentSource;
+    // Unset follows the material; an authored value controls the first basis.
+    std::optional<bool> asciiTangents;
     std::shared_ptr<const AsciiNormalPositionSource> asciiNormalPositionSource;
     std::optional<std::size_t> asciiMdxAllocation;
     std::shared_ptr<const AsciiSkinSource> asciiSkinSource;
@@ -659,6 +664,8 @@ struct Model {
     std::shared_ptr<AsciiLoadSession> asciiLoadSession;
     std::uint64_t asciiRegistrationId{};
     std::uint16_t classification{};
+    std::optional<bool> compressQuaternions;
+    std::vector<std::pair<std::string,bool>> textureTangents;
     std::uint8_t subclassification{};
     bool fog{};
     float animationScale{1.0f};

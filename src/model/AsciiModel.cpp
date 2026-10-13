@@ -307,12 +307,14 @@ void parseNode(const Line& header, Reader& reader, Model& model,
     raw.node.name=name.data();
     raw.animation=animation;
     raw.modelClassification=model.classification;
+    raw.compressQuaternions=model.compressQuaternions;
     initializeNode(raw,model.game);
     if(raw.mesh) raw.textureIndices=textureIndices;
     Line line;
     while(reader.next(line)) {
         const auto& field=line.tokens.front();
         if(prefix(field,"endnode")) break;
+        if(parseControllerExtension(line,reader,raw)) continue;
 
 
 
@@ -366,6 +368,9 @@ void parseNode(const Line& header, Reader& reader, Model& model,
     // MdlNodeEmitter::InternalPostProcess changes the owning model header
     // immediately when this node closes, before later header fields parse.
     if(!animation && raw.node.emitter && model.engineRadius<40.0f) model.engineRadius=40.0f;
+    if(raw.mesh)
+        for(const auto& setting:model.textureTangents)
+            if(equal(setting.first,raw.mesh->texture0)) raw.mesh->asciiTangents=setting.second;
     if(!animation && raw.mesh && raw.mesh->skinned)
         postProcessSkinNode(raw,reader.job());
     else if(raw.mesh && (!animation || (raw.node.flags&kNodeAnimation))) {
@@ -723,6 +728,10 @@ std::shared_ptr<Model> decodeAsciiModelInContext(const std::vector<std::uint8_t>
             context.attachSuperclass(current.get(),superclass.get());
         } else if(command=="classification") {
             classification((*current),arguments);
+        } else if(command=="texturetangents") {
+            current->textureTangents.emplace_back(line.tokens[1],parseInt(line.tokens[2])!=0);
+        } else if(command=="compressquaternions") {
+            current->compressQuaternions=parseInt(line.tokens[1])!=0;
         } else if(command=="secondaryclassification") {
             if(equal(arguments,"sensitive")) (*current).classification|=0x0200u;
         } else if(command=="ignorefog") {
@@ -774,6 +783,9 @@ void finalizeAsciiInstance(Model& model,std::vector<ascii::RawNode>& modelNodes,
     };
     for(std::size_t index=0;index<model.nodes.size();++index)
         if(!model.nodes[index].parent) postProcess(postProcess,index);
+    for(auto& mesh:model.meshes)
+        if(mesh.asciiTangents.value_or(false) && mesh.asciiTangentSource && !(mesh.mdxBitmap&0x80u))
+            rebuildAsciiTangentBasis(mesh,job);
     initializeAsciiSkinSeamPools(model);
     initializeProceduralUvPools(model);
     const auto pose=bindPose(model,job);

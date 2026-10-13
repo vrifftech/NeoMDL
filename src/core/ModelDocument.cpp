@@ -360,7 +360,9 @@ bool ModelDocument::openResource(neoshared::ResourceDocument resource,
 
 
 
-            if(allocation.materialTangents && compilerHasBumpMap(allocation.primaryTexture,model.game)) {
+            if(allocation.materialTangents && !(allocation.source->mdxBitmap&0x80u) &&
+               (allocation.source->asciiTangents?*allocation.source->asciiTangents:
+                    compilerHasBumpMap(allocation.primaryTexture,model.game))) {
                 // Cached reference assets copy the Model while retaining its
                 // source snapshots. Finalize this copy's deferred producer
                 // once, without changing another copy's completed stride.
@@ -372,7 +374,8 @@ bool ModelDocument::openResource(neoshared::ResourceDocument resource,
         }
         for(std::size_t i=0;i<model.meshes.size();++i) {
             auto& mesh=model.meshes[i];
-            if(mesh.asciiTangentSource&&compilerHasBumpMap(mesh.texture0,model.game))
+            if(mesh.asciiTangentSource && !(mesh.mdxBitmap&0x80u) &&
+               (mesh.asciiTangents?*mesh.asciiTangents:compilerHasBumpMap(mesh.texture0,model.game)))
                 model::rebuildAsciiTangentBasis(mesh,job);
             if(mesh.asciiMdxAllocation) {
                 auto& allocation=model.asciiMdxAllocations[*mesh.asciiMdxAllocation];

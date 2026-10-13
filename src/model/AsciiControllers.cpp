@@ -208,7 +208,10 @@ void appendController(Node& node,const ControllerField& field,const std::vector<
 void parseBaseTransformFields(const Line& line,Reader& reader,RawNode& raw) {
     const auto keyword=lower(line.tokens.front());
     const auto* arguments=fieldArguments(line);
-    if(keyword=="position") {
+    if(keyword=="nodeorientation") {
+        auto& q=raw.node.orientation;
+        std::sscanf(arguments,"%f %f %f %f",&q.x,&q.y,&q.z,&q.w);
+    } else if(keyword=="position" || keyword=="nodeposition") {
         std::sscanf(arguments,"%f %f %f",&raw.node.position.x,
                     &raw.node.position.y,&raw.node.position.z);
     } else if(keyword=="orientation") {
@@ -220,6 +223,56 @@ void parseBaseTransformFields(const Line& line,Reader& reader,RawNode& raw) {
             raw.node.orientation=engineAxisAngle({x,y,z},angle);
         }
     }
+}
+
+bool parseControllerExtension(const Line& line,Reader& reader,RawNode& raw) {
+    const auto field=lower(line.tokens.front());
+    if(field=="controllerdata") {
+        raw.controllerDataBase=raw.node.controllerDataWords.size();
+        std::vector<std::uint32_t> words;
+        readArray(line,reader,words,4u,
+            [](const Line& row,const Reader&,std::uint32_t& value) {value=parseUInt(row.tokens[0]);},
+            [](const std::uint8_t* p) {return std::uint32_t(p[0])|(std::uint32_t(p[1])<<8u)|
+                (std::uint32_t(p[2])<<16u)|(std::uint32_t(p[3])<<24u);});
+        raw.node.controllerDataWords.insert(raw.node.controllerDataWords.end(),words.begin(),words.end());
+    } else if(field=="controllerrecord") {
+        Controller c;
+        c.type=parseUInt(line.tokens[1]);c.sourceOffset=static_cast<std::int16_t>(parseInt(line.tokens[2]));
+        c.rowCount=static_cast<std::uint16_t>(parseUInt(line.tokens[3]));
+        c.timeIndex=static_cast<std::uint16_t>(raw.controllerDataBase+parseUInt(line.tokens[4]));
+        c.dataIndex=static_cast<std::uint16_t>(raw.controllerDataBase+parseUInt(line.tokens[5]));
+        c.rawFlags=static_cast<std::uint8_t>(parseUInt(line.tokens[6]));
+        c.valueKind=valueKind(c.rawFlags);
+        c.interpolation=(c.rawFlags&0xf0u)==0x10u?ControllerInterpolation::Bezier:
+            (c.rawFlags&0xf0u)==0u?ControllerInterpolation::Linear:ControllerInterpolation::Unknown;
+        raw.node.controllers.push_back(c);
+    } else if(field=="orientationpackedkey" || field=="orientationquatkey") {
+        const bool packed=field=="orientationpackedkey";
+        const auto offset=static_cast<std::int16_t>(parseInt(line.tokens[2]));
+        auto header=line;header.tokens.resize(2u);
+        std::vector<Key> keys;
+        readArray(header,reader,keys,0u,
+            [&](const Line& row,const Reader&,Key& key) {
+                key.words[0]=bits(parseFloat(row.tokens[0]));
+                key.count=packed?2:5;
+                for(int i=1;i<key.count;++i)
+                    key.words[i]=packed?parseUInt(row.tokens[i]):bits(parseFloat(row.tokens[i]));
+            },[](const std::uint8_t*) {return Key{};});
+        std::uint8_t flags=packed?2u:4u;
+        if(raw.compressQuaternions && *raw.compressQuaternions!=packed) {
+            if(*raw.compressQuaternions) {compressQuaternionKeys(keys);flags=2u;}
+            else {
+                for(auto& key:keys) {
+                    const auto q=unpackEngineControllerQuaternion(key.words[1],reader.game());
+                    key.words[1]=bits(q.x);key.words[2]=bits(q.y);key.words[3]=bits(q.z);key.words[4]=bits(q.w);
+                    key.count=5;
+                }
+                flags=4u;
+            }
+        }
+        appendController(raw.node,{"orientation",kControllerOrientation,kNodeBase,offset},keys,flags);
+    } else return false;
+    return true;
 }
 
 bool parseControllerField(const Line& line,Reader& reader,RawNode& raw,GameVersion,
@@ -287,7 +340,7 @@ bool parseControllerField(const Line& line,Reader& reader,RawNode& raw,GameVersi
             if(columns==5u) {
                 cullQuaternionKeys(keys);
                 flags=4u;
-                if((raw.modelClassification&0x0200u)==0u) {
+                if(raw.compressQuaternions.value_or((raw.modelClassification&0x0200u)==0u)) {
                     compressQuaternionKeys(keys);
                     flags=2u;
                 }

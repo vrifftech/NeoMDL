@@ -158,12 +158,23 @@ struct RawNode {
     std::uint32_t tangentUvPrecision{32u};
     std::array<std::vector<Vec3>,3> textureIndices;
     std::vector<Vec3> colors;
+    std::vector<std::array<std::uint8_t,4>> packedColors;
+    std::vector<std::array<std::uint32_t,3>> colorIndices;
+    std::vector<TangentBasis> tangentBases;
+    std::vector<std::array<std::uint32_t,3>> tangentIndices;
+    std::vector<Vec3> cpuPositions;
+    std::vector<std::array<std::uint32_t,3>> cpuIndices;
+    std::vector<std::array<float,4>> facePlanes;
+    std::optional<Vec3> sphereCenter;
+    std::optional<float> sphereRadius;
     std::vector<RawFace> faces;
     std::vector<std::int32_t> vertexIndicesCount;
     std::vector<std::vector<std::uint32_t>> vertexIndices;
     std::vector<std::uint32_t> leftoverFaces;
     std::vector<std::vector<std::pair<std::string,float>>> weights;
     std::vector<std::array<std::int32_t,4>> skinWeightIndices;
+    std::optional<AsciiSkinSource> skinData;
+    std::vector<EngineFloatSkinChannels> skinChannels;
     std::vector<float> constraints;
     std::vector<Vec3> animatedVertices;
     std::vector<Vec3> animatedTexcoords;
@@ -174,6 +185,8 @@ struct RawNode {
     float samplePeriod{};
     bool animation{};
     std::uint16_t modelClassification{};
+    std::optional<bool> compressQuaternions;
+    std::size_t controllerDataBase{};
 };
 
 // Each field handler returns false only when its engine parser does not own
@@ -182,6 +195,7 @@ void initializeNode(RawNode& raw, GameVersion game);
 bool parseNodeField(const Line& line, Reader& reader, RawNode& raw, GameVersion game);
 bool parseMeshField(const Line& line, Reader& reader, RawNode& raw, GameVersion game);
 bool parseSkinField(const Line& line, Reader& reader, RawNode& raw, GameVersion game);
+bool parseControllerExtension(const Line& line, Reader& reader, RawNode& raw);
 void parseBaseTransformFields(const Line& line, Reader& reader, RawNode& raw);
 bool parseControllerField(const Line& line, Reader& reader, RawNode& raw, GameVersion game,
                           std::string_view group = {}, bool updateBaseTransform = true);

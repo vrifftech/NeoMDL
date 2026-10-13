@@ -1439,6 +1439,16 @@ private:
                 }
                 mesh.hasSkinBoneMap = true;
             }
+            auto skinSource=std::make_shared<AsciiSkinSource>();
+            const auto map=payload_->u32(skinOffset+360u,"skin forward-map offset");
+            const auto count=payload_->u32(skinOffset+364u,"skin forward-map count");
+            for(std::size_t i=0;i<count;++i)
+                skinSource->boneToPalette.push_back(payload_->f32(map+i*4u,"skin forward-map slot"));
+            skinSource->paletteToBone=mesh.skinBoneMap;
+            skinSource->inverseOrientations=mesh.inverseBindOrientations;
+            skinSource->inverseTranslations=mesh.inverseBindTranslations;
+            skinSource->boneConstantCount=mesh.boneConstantIndices.size();
+            mesh.asciiSkinSource=std::move(skinSource);
         }
         const auto mdxDataOffset = payload_->u32(
             offset + (model_.game == GameVersion::Kotor1 ? 324u : 332u), "MDX data offset");
@@ -1568,22 +1578,7 @@ private:
                 basis.bitangent = mdx.vec3(at, "MDX bitangent");
                 basis.tangent = mdx.vec3(at + 12u, "MDX tangent");
                 basis.normal = mdx.vec3(at + 24u, "MDX basis normal");
-                const auto goodVector = [](const Vec3& v) {
-                    const double length2 = static_cast<double>(v.x) * v.x +
-                        static_cast<double>(v.y) * v.y + static_cast<double>(v.z) * v.z;
-                    return finite(v.x) && finite(v.y) && finite(v.z) &&
-                           std::isfinite(length2) && length2 != 0.0;
-                };
-                const auto good = goodVector(basis.bitangent) && goodVector(basis.tangent) &&
-                                  goodVector(basis.normal);
-                if (good) {
-                    const auto b = normalize(basis.bitangent);
-                    const auto t = normalize(basis.tangent);
-                    const auto n = normalize(basis.normal);
-                    const auto c = cross(t, b);
-                    const float determinant = c.x * n.x + c.y * n.y + c.z * n.z;
-                    basis.valid = finite(determinant) && determinant != 0.0f;
-                }
+                basis.valid = usableTangentBasis(basis);
                 if (basis.valid) ++mesh.validTangentVertices;
             }
             if (skinChannelsReadable) {
@@ -2860,6 +2855,18 @@ std::vector<EngineFloatSkinChannels> decodeEngineFloatSkinChannels(const Mesh& m
         }
     }
     return out;
+}
+
+bool usableTangentBasis(const TangentBasis& basis) noexcept {
+    const auto goodVector = [](const Vec3& v) {
+        const double length2 = double(v.x)*v.x + double(v.y)*v.y + double(v.z)*v.z;
+        return finite(v.x) && finite(v.y) && finite(v.z) && std::isfinite(length2) && length2!=0.0;
+    };
+    if(!goodVector(basis.bitangent) || !goodVector(basis.tangent) || !goodVector(basis.normal)) return false;
+    const auto b=normalize(basis.bitangent),t=normalize(basis.tangent),n=normalize(basis.normal);
+    const auto c=cross(t,b);
+    const float determinant=c.x*n.x+c.y*n.y+c.z*n.z;
+    return finite(determinant) && determinant!=0.0f;
 }
 
 Quaternion unpackEngineControllerQuaternion(std::uint32_t packed, GameVersion game) noexcept {

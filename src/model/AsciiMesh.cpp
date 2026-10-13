@@ -286,15 +286,36 @@ std::vector<std::array<std::size_t,3>> processVertices(RawNode& raw,Mesh& mesh,
 }
 
 struct GeneratedVertex {
-    Vec3 position,normal,color;
+    Vec3 position,normal,color,cpuPosition;
+    std::uint8_t alpha{255u};
+    TangentBasis tangentBasis;
     std::array<Vec3,4> texcoords{};
     float constraint{};
     std::size_t source{};
 };
 bool same(const GeneratedVertex& a,const GeneratedVertex& b,bool dangly) {
-    if(!same(a.position,b.position) || !same(a.normal,b.normal) || !same(a.color,b.color)) return false;
+    if(!same(a.position,b.position) || !same(a.normal,b.normal) || !same(a.color,b.color) ||
+       a.alpha!=b.alpha || !same(a.cpuPosition,b.cpuPosition) ||
+       std::memcmp(&a.tangentBasis.bitangent,&b.tangentBasis.bitangent,sizeof(Vec3))!=0 ||
+       std::memcmp(&a.tangentBasis.tangent,&b.tangentBasis.tangent,sizeof(Vec3))!=0 ||
+       std::memcmp(&a.tangentBasis.normal,&b.tangentBasis.normal,sizeof(Vec3))!=0) return false;
     for(std::size_t i=0;i<4u;++i) if(!same(a.texcoords[i],b.texcoords[i])) return false;
     return !dangly || a.constraint==b.constraint;
+}
+
+void authoredVertexData(const RawNode& raw,const Mesh& mesh,std::size_t face,std::size_t corner,GeneratedVertex& vertex) {
+    const auto index=[&](const auto& indices) {
+        return indices.empty()?vertex.source:indices.at(face)[corner];
+    };
+    vertex.cpuPosition=raw.cpuPositions.empty()?vertex.position:raw.cpuPositions.at(index(raw.cpuIndices));
+    if(!raw.colors.empty()) vertex.color=raw.colors.at(index(raw.colorIndices));
+    if(!raw.packedColors.empty()) {
+        const auto& color=raw.packedColors.at(index(raw.colorIndices));
+        vertex.color={float(color[0])/255.0f,float(color[1])/255.0f,float(color[2])/255.0f};
+        vertex.alpha=color[3];
+    }
+    if(!raw.tangentBases.empty() && mesh.asciiTangents.value_or(true))
+        vertex.tangentBasis=raw.tangentBases.at(index(raw.tangentIndices));
 }
 
 // NWN:EE's active animmesh builder supplies the missing KOTOR ASCII producer.
@@ -445,7 +466,8 @@ std::vector<GeneratedVertex> generateAnimVertices(RawNode& raw,Mesh& mesh,
             vertex.position=raw.vertices.at(vertex.source);
             const auto normalIndex=normalIndices[i][corner];
             vertex.normal=raw.normals.at(normalIndex);
-            vertex.color=raw.colors.empty()?Vec3{1.0f,1.0f,1.0f}:raw.colors.at(vertex.source);
+            vertex.color={1.0f,1.0f,1.0f};
+            authoredVertexData(raw,mesh,i,corner,vertex);
             if(!raw.animTangents.empty()) candidate.tangent=raw.animTangents.at(normalIndex);
             if(!raw.animMirrorList.empty()) candidate.mirror=static_cast<std::uint8_t>(raw.animMirrorList.at(i));
             const auto texcoordIndex=sourceFace.texcoords[0][corner];
@@ -507,17 +529,19 @@ std::vector<GeneratedVertex> generateVertices(RawNode& raw,Mesh& mesh,
             vertex.source=raw.faces[i].vertices[corner];
             vertex.position=raw.vertices.at(vertex.source);
             vertex.normal=raw.normals.at(normals[i][corner]);
-            // Skin and dangly generation pass a null color pointer to their
-            // NodeVertex constructors; authored colors cannot split those
-            // vertices (dangly K1 0x5c7ea0, K2 0x6e6a40).
-            vertex.color=(!skin && !dangly && !raw.colors.empty())?raw.colors.at(vertex.source):Vec3{1.0f,1.0f,1.0f};
+            vertex.color={1.0f,1.0f,1.0f};
+            authoredVertexData(raw,mesh,i,corner,vertex);
             for(std::size_t channel=0;channel<4u;++channel)
                 if(!raw.texcoords[channel].empty())
                     vertex.texcoords[channel]=raw.texcoords[channel].at(raw.faces[i].texcoords[channel][corner]);
             if(dangly) vertex.constraint=raw.constraints.at(vertex.source);
             auto& candidates=positions[positionKey(vertex.position)];
             const auto found=std::find_if(candidates.begin(),candidates.end(),
-                [&](std::size_t index){return same(vertices[index],vertex,dangly);});
+                [&](std::size_t index){return same(vertices[index],vertex,dangly) &&
+                    (!skin || (raw.skinData?
+                        raw.skinChannels.at(vertices[index].source).weights==raw.skinChannels.at(vertex.source).weights &&
+                        raw.skinChannels.at(vertices[index].source).indices==raw.skinChannels.at(vertex.source).indices:
+                        raw.weights.at(vertices[index].source)==raw.weights.at(vertex.source)));});
             const auto index=found==candidates.end()?vertices.size():*found;
             if(found==candidates.end()) {candidates.push_back(index);vertices.push_back(vertex);}
             face.indices[corner]=static_cast<std::int16_t>(index);
@@ -626,8 +650,9 @@ static bool parseMeshValue(const Line& line,Reader& reader,RawNode& raw,GameVers
         vectorList(line,reader,raw.normals);
         mesh.explicitNormals=true;
     }
-    else if(key=="normalindices" && raw.node.flags!=0xa1u && raw.node.flags!=0x821u)
-        readArray(line,reader,raw.normalIndices,12u,
+    else if(key=="normalindices" || key=="colorindices" || key=="tangentindices" || key=="cpuindices")
+        readArray(line,reader,key=="normalindices"?raw.normalIndices:
+            key=="colorindices"?raw.colorIndices:key=="tangentindices"?raw.tangentIndices:raw.cpuIndices,12u,
             [](const Line& row,const Reader&,std::array<std::uint32_t,3>& value) {
                 unsigned int x=value[0],y=value[1],z=value[2];
                 std::sscanf(row.text.c_str(),"%u %u %u",&x,&y,&z);
@@ -644,6 +669,32 @@ static bool parseMeshValue(const Line& line,Reader& reader,RawNode& raw,GameVers
     else if(key=="texindices2") vectorList(line,reader,raw.textureIndices[1]);
     else if(key=="texindices3") vectorList(line,reader,raw.textureIndices[2]);
     else if(key=="colors") vectorList(line,reader,raw.colors);
+    else if(key=="colorsrgba") readArray(line,reader,raw.packedColors,4u,
+        [](const Line& row,const Reader&,std::array<std::uint8_t,4>& value) {
+            unsigned r{},g{},b{},a{};
+            std::sscanf(row.text.c_str(),"%u %u %u %u",&r,&g,&b,&a);
+            value={{std::uint8_t(r),std::uint8_t(g),std::uint8_t(b),std::uint8_t(a)}};
+        },[](const std::uint8_t* p) {return std::array<std::uint8_t,4>{{p[0],p[1],p[2],p[3]}};});
+    else if(key=="hastangentbasis") {
+        bool enabled{};boolean(line,enabled);mesh.asciiTangents=enabled;
+    }
+    else if(key=="tangentbasis") readArray(line,reader,raw.tangentBases,36u,
+        [](const Line& row,const Reader&,TangentBasis& value) {
+            auto& b=value.bitangent;auto& t=value.tangent;auto& n=value.normal;
+            std::sscanf(row.text.c_str(),"%f %f %f %f %f %f %f %f %f",
+                &b.x,&b.y,&b.z,&t.x,&t.y,&t.z,&n.x,&n.y,&n.z);
+            value.valid=usableTangentBasis(value);
+        },[](const std::uint8_t* p) {
+            TangentBasis value{vector(p),vector(p+12u),vector(p+24u),false};
+            value.valid=usableTangentBasis(value);return value;
+        });
+    else if(key=="cpuverts") vectorList(line,reader,raw.cpuPositions);
+    else if(key=="faceplanes") readArray(line,reader,raw.facePlanes,16u,
+        [](const Line& row,const Reader&,std::array<float,4>& value) {
+            std::sscanf(row.text.c_str(),"%f %f %f %f",&value[0],&value[1],&value[2],&value[3]);
+        },[](const std::uint8_t* p) {return std::array<float,4>{{real(p),real(p+4u),real(p+8u),real(p+12u)}};});
+    else if(key=="spherecenter") {raw.sphereCenter.emplace();vector(line,*raw.sphereCenter);}
+    else if(key=="sphereradius") {raw.sphereRadius.emplace();scalar(line,*raw.sphereRadius);}
     else if(key=="faces") {
         // InternalParseField parses this list only while it is empty. A later
         // faces directive neither replaces the first nonempty list nor
@@ -730,7 +781,10 @@ bool parseMeshField(const Line& initial,Reader& reader,RawNode& raw,GameVersion 
     if(!raw.mesh) return false;
     const auto offset=initial.bufferOffset;
     const auto extension=lower(initial.tokens.front());
-    if(extension=="tangentuvprecision" || extension=="normalpositionprecision")
+    if(extension=="tangentuvprecision" || extension=="normalpositionprecision" ||
+       extension=="hastangentbasis" || extension=="tangentbasis" || extension=="tangentindices" ||
+       extension=="colorsrgba" || extension=="colorindices" || extension=="cpuverts" ||
+       extension=="cpuindices" || extension=="faceplanes" || extension=="spherecenter" || extension=="sphereradius")
         return parseMeshValue(initial,reader,raw,game);
     if(raw.node.flags!=0xa1u && (extension=="normals" ||
             (extension=="normalindices" && raw.node.flags!=0x821u))) {
@@ -810,7 +864,8 @@ void retainTangentSource(const RawNode& raw,Mesh& mesh,
         const std::vector<GeneratedVertex>& generated,bool animated) {
     // NW's authored tangent4 pool makes CalculateTangentSpaceBasis return
     // immediately (0x457710). Do not rebuild it as a KOTOR nine-float basis.
-    if(mesh.dangly || (animated && !raw.animTangents.empty())) return;
+    if((mesh.dangly && !mesh.asciiTangents.value_or(false)) ||
+       (animated && !raw.animTangents.empty())) return;
     auto source=std::make_shared<AsciiTangentSource>();
     source->authoredFaceIndices=raw.tangentFaceSources;
     for(std::size_t i=0;i<mesh.faces.size();++i) {
@@ -860,7 +915,7 @@ std::vector<std::array<std::int16_t,3>> generateAsciiMeshGeometry(
             mesh.mdxRowSize=24u;
             for(const auto& texcoords:raw.texcoords)
                 if(!texcoords.empty()) mesh.mdxRowSize+=8u;
-            if(!raw.colors.empty()) mesh.mdxRowSize+=4u;
+            if(!raw.colors.empty() || !raw.packedColors.empty()) mesh.mdxRowSize+=4u;
             mesh.asciiMdxAllocation=model.asciiMdxAllocations.size();
             model.asciiMdxAllocations.push_back({mesh.enginePrelightVertexCount,
                 mesh.mdxRowSize,{},false,std::make_shared<Mesh>(mesh)});
@@ -893,6 +948,8 @@ void buildMesh(Model& model,RawNode& raw,std::size_t nodeIndex,
     }
     const auto normalIndices=mesh.skinned?std::move(raw.processedSkinNormals):
         animated?processAnimVertices(raw,mesh,job):processVertices(raw,mesh,job);
+    if(raw.sphereCenter) mesh.engineBounds->sphereCenter=*raw.sphereCenter;
+    if(raw.sphereRadius) mesh.engineBounds->sphereRadius=*raw.sphereRadius;
     // Dangly's PostProcess shares the no-face exit after ProcessVerts; no
     // vertex/index pools or MDX layout are generated (K1 0x5e96cc, K2 0x6e63a4).
     if(raw.faces.empty() && (raw.node.flags==0x21u || raw.node.flags==0x221u || mesh.dangly)) {
@@ -908,6 +965,12 @@ void buildMesh(Model& model,RawNode& raw,std::size_t nodeIndex,
     retainNormalPositionSource(raw,mesh);
     if(raw.node.flags==0x821u) {lightsaber(raw,mesh);return;}
     neighbors(raw,mesh);
+    if(!raw.facePlanes.empty())
+        for(std::size_t i=0;i<mesh.faces.size();++i) {
+            const auto& plane=raw.facePlanes.at(raw.tangentFaceSources[i]);
+            mesh.faces[i].normal={plane[0],plane[1],plane[2]};
+            mesh.faces[i].planeDistance=plane[3];
+        }
     retainTangentSource(raw,mesh,normalIndices,generated,animated);
     // InternalPostProcess narrows the generated count before allocating and
     // copying the MDX/CPU rows. The temporary NodeVertex list remains full
@@ -930,19 +993,21 @@ void buildMesh(Model& model,RawNode& raw,std::size_t nodeIndex,
         vertex.texcoord1={source.texcoords[1].x,source.texcoords[1].y};
         vertex.texcoord2={source.texcoords[2].x,source.texcoords[2].y};
         vertex.texcoord3={source.texcoords[3].x,source.texcoords[3].y};
-        if(animated && !raw.colors.empty()) {
-            // NW GenerateVertexData 0x453ce1..0x453d35 publishes rounded
-            // low-byte RGB and opaque alpha. Encode the same channel in
-            // the target's interleaved x86 MDX row.
+        if(!raw.colors.empty() || !raw.packedColors.empty()) {
+            // K1/K2 GL consumes four unsigned bytes, including alpha.
             vertex.color={{static_cast<std::uint8_t>(engineFloatToInt(source.color.x*255.0f+0.5f)),
                 static_cast<std::uint8_t>(engineFloatToInt(source.color.y*255.0f+0.5f)),
-                static_cast<std::uint8_t>(engineFloatToInt(source.color.z*255.0f+0.5f)),255u}};
+                static_cast<std::uint8_t>(engineFloatToInt(source.color.z*255.0f+0.5f)),source.alpha}};
         }
-        mesh.vertices.push_back(vertex);mesh.cpuPositions->push_back(source.position);
+        vertex.tangentBasis=source.tangentBasis;
+        mesh.vertices.push_back(vertex);mesh.cpuPositions->push_back(source.cpuPosition);
         raw.generatedVertexSources.push_back(source.source);raw.generatedVertexColors.push_back(source.color);
         if(mesh.dangly) mesh.dangly->constraints.push_back(source.constraint);
     }
-    if(mesh.dangly) mesh.dangly->restPositions=*mesh.cpuPositions;
+    if(mesh.dangly) {
+        mesh.dangly->restPositions.emplace();
+        for(const auto& vertex:mesh.vertices) mesh.dangly->restPositions->push_back(vertex.position);
+    }
 
 
     for(const auto& face:mesh.faces)
@@ -994,12 +1059,16 @@ void buildMesh(Model& model,RawNode& raw,std::size_t nodeIndex,
             mesh.mdxTexcoordOffsets[channel]=mesh.mdxRowSize;
             mesh.mdxRowSize+=8u;++mesh.textureCount;
         }
-    if(animated && !raw.colors.empty()) {
+    if(!raw.colors.empty() || !raw.packedColors.empty()) {
         mesh.hasVertexColors=true;mesh.mdxBitmap|=0x40u;
         mesh.mdxColorOffset=mesh.mdxRowSize;mesh.mdxRowSize+=4u;
     }
-    // The generated ordinary/dangly stream does not emit NodeVertex colors;
-    // the active NW animmesh producer does.
+    if(!raw.tangentBases.empty() && mesh.asciiTangents.value_or(true)) {
+        mesh.mdxBitmap|=0x80u;mesh.mdxTangentOffset=mesh.mdxRowSize;mesh.mdxRowSize+=36u;
+        mesh.validTangentVertices=static_cast<std::size_t>(std::count_if(mesh.vertices.begin(),mesh.vertices.end(),
+            [](const Vertex& vertex) {return vertex.tangentBasis.valid;}));
+        mesh.asciiTangents=true;
+    }
     auto prelight=std::make_shared<EnginePrelightSource>();
     prelight->authoredColors=mesh.hasVertexColors;
     for(const auto& vertex:mesh.vertices)

@@ -1,4 +1,5 @@
 #include <model/AsciiModelInternal.hpp>
+#include <model/EngineArithmetic.hpp>
 
 #include <algorithm>
 #include <cstring>
@@ -191,7 +192,45 @@ static bool parseSkinValue(const Line& line,Reader& reader,RawNode& raw,GameVers
     return false;
 }
 
+bool parseRetainedSkin(const Line& line,Reader& reader,RawNode& raw) {
+    const auto field=lower(line.tokens.front());
+    if(field!="skinbonemap" && field!="skinpalette" && field!="skinbindrotations" &&
+       field!="skinbindtranslations" && field!="skinweights") return false;
+    if(!raw.skinData) raw.skinData.emplace();
+    auto& skin=*raw.skinData;
+    if(field=="skinbonemap") readArray(line,reader,skin.boneToPalette,4u,
+        [](const Line& row,const Reader&,float& value) {value=parseFloat(row.tokens[0]);},
+        [](const std::uint8_t* p) {return scalar(p);});
+    else if(field=="skinpalette") {
+        std::vector<std::int16_t> palette;
+        readArray(line,reader,palette,2u,
+            [](const Line& row,const Reader&,std::int16_t& value) {value=static_cast<std::int16_t>(parseInt(row.tokens[0]));},
+            [](const std::uint8_t* p) {return static_cast<std::int16_t>(p[0]|(std::uint16_t(p[1])<<8u));});
+        for(std::size_t i=0;i<skin.paletteToBone.size();++i) skin.paletteToBone[i]=palette.at(i);
+    } else if(field=="skinbindrotations") readArray(line,reader,skin.inverseOrientations,16u,
+        [](const Line& row,const Reader&,Quaternion& q) {
+            std::sscanf(row.text.c_str(),"%f %f %f %f",&q.x,&q.y,&q.z,&q.w);
+        },[](const std::uint8_t* p) {return Quaternion{scalar(p),scalar(p+4u),scalar(p+8u),scalar(p+12u)};});
+    else if(field=="skinbindtranslations") readArray(line,reader,skin.inverseTranslations,12u,
+        [](const Line& row,const Reader&,Vec3& v) {
+            std::sscanf(row.text.c_str(),"%f %f %f",&v.x,&v.y,&v.z);
+        },[](const std::uint8_t* p) {return Vec3{scalar(p),scalar(p+4u),scalar(p+8u)};});
+    else readArray(line,reader,raw.skinChannels,32u,
+        [](const Line& row,const Reader&,EngineFloatSkinChannels& value) {
+            for(std::size_t i=0;i<4u;++i) {
+                value.weights[i]=parseFloat(row.tokens[i]);
+                value.indices[i]=parseFloat(row.tokens[i+4u]);
+            }
+        },[](const std::uint8_t* p) {
+            EngineFloatSkinChannels value;
+            for(std::size_t i=0;i<4u;++i) {value.weights[i]=scalar(p+i*4u);value.indices[i]=scalar(p+16u+i*4u);}
+            return value;
+        });
+    return true;
+}
+
 bool parseSkinField(const Line& initial,Reader& reader,RawNode& raw,GameVersion game) {
+    if(parseRetainedSkin(initial,reader,raw)) return true;
     bool handled=false;
 
 
@@ -217,74 +256,92 @@ void buildSkin(Model& model,RawNode& raw,Mesh& mesh,
     if(static_cast<std::int16_t>(mesh.enginePrelightVertexCount)<=0)
         throw ModelError("Cannot compile a generated skin with a nonpositive engine vertex count");
 
-    std::vector<Vec3> localPositions(model.nodes.size());
-    std::vector<Quaternion> localOrientations(model.nodes.size());
-    for(std::size_t i=0;i<model.nodes.size();++i)
-        constructedNodeFrame(model.nodes[i],localPositions[i],localOrientations[i],
-            model.game);
-
-    // CreateInstanceTreeR constructs a distinct Part for every child link.
-    // PartSkin climbs that instance's parent chain, which can differ from
-    // the MdlNode's last authored parent after repeated parent directives.
-    auto root=partPath.back();
-    auto frameOrientation=inverse(localOrientations[root]);
-    auto framePosition=rotate(frameOrientation,negative(localPositions[root]));
-    for(auto depth=partPath.size()-1u;depth!=0u;--depth) {
-        root=partPath[depth-1u];
-        const auto parentInverse=inverse(localOrientations[root]);
-        framePosition=add(framePosition,rotate(frameOrientation,
-                            rotate(parentInverse,negative(localPositions[root]))));
-        frameOrientation=product(frameOrientation,parentInverse);
-    }
-
     std::vector<std::size_t> depthFirst;
-    std::vector<Vec3> inversePositions(model.nodes.size());
-    std::vector<Quaternion> inverseOrientations(model.nodes.size());
-    std::vector<Vec3> engineInversePositions;
-    std::vector<Quaternion> engineInverseOrientations;
-    std::function<void(std::size_t,Vec3,Quaternion)> gather;
-    gather=[&](std::size_t node,Vec3 parentPosition,Quaternion parentOrientation) {
-        job.check();
-        const auto position=add(parentPosition,rotate(parentOrientation,localPositions[node]));
-        const auto orientation=product(parentOrientation,localOrientations[node]);
-        depthFirst.push_back(node);
-        inverseOrientations[node]=inverse(orientation);
-        inversePositions[node]=rotate(inverseOrientations[node],negative(position));
-        // GatherBones appends one row per Part visit, before descending.
-        // Two Parts sharing a node can have different ancestor frames;
-        // retaining by node index would overwrite the earlier engine row.
-        engineInverseOrientations.push_back(inverseOrientations[node]);
-        engineInversePositions.push_back(inversePositions[node]);
-        for(const auto child:model.nodes[node].children) gather(child,position,orientation);
-    };
-    gather(root,framePosition,frameOrientation);
+    std::shared_ptr<AsciiSkinSource> packedSource;
+    if(raw.skinData) {
+        packedSource=std::make_shared<AsciiSkinSource>(*raw.skinData);
+        packedSource->boneConstantCount=mesh.boneConstantIndices.size();
+        const auto visit=[&](const auto& self,std::size_t node)->void {
+            depthFirst.push_back(node);
+            for(const auto child:model.nodes[node].children) self(self,child);
+        };
+        visit(visit,partPath.front());
+        mesh.inverseBindOrientations=packedSource->inverseOrientations;
+        mesh.inverseBindTranslations=packedSource->inverseTranslations;
+        for(std::size_t i=0;i<packedSource->inverseOrientations.size();++i)
+            mesh.inverseBindOrientations.at(depthFirst.at(i))=packedSource->inverseOrientations[i];
+        for(std::size_t i=0;i<packedSource->inverseTranslations.size();++i)
+            mesh.inverseBindTranslations.at(depthFirst.at(i))=packedSource->inverseTranslations[i];
+    } else {
+        std::vector<Vec3> localPositions(model.nodes.size());
+        std::vector<Quaternion> localOrientations(model.nodes.size());
+        for(std::size_t i=0;i<model.nodes.size();++i)
+            constructedNodeFrame(model.nodes[i],localPositions[i],localOrientations[i],
+                model.game);
 
-    // Engine pools are indexed by depth-first part position. Model retains
-    // stable node indices, so translate both generated binds and palette
-    // entries together; node IDs used by animation are independent.
-    auto engineOrientations=std::move(mesh.inverseBindOrientations);
-    engineOrientations.insert(engineOrientations.end(),engineInverseOrientations.begin(),
-                              engineInverseOrientations.end());
-    auto packedSource=std::make_shared<AsciiSkinSource>();
-    packedSource->inverseOrientations=engineOrientations;
-    packedSource->inverseTranslations=std::move(engineInversePositions);
-    // Engine assigns only used palette slots. The packed encoder's explicit
-    // zero-padding policy supplies otherwise uninitialized storage bytes.
-    packedSource->paletteToBone.fill(0);
-    packedSource->boneConstantCount=depthFirst.size();
-    mesh.inverseBindOrientations.resize(engineOrientations.size());
-    mesh.inverseBindTranslations=std::move(inversePositions);
-    // PartSkin appends generated quaternions even when qbone_ref_inv alone
-    // supplied a prefix. Runtime indexing still starts at zero; preserve
-    // that prefix instead of requiring equally sized q/t arrays. Remap the
-    // consumed DFS prefix together with the translations and retain the
-    // unconsumed appended tail for inspection.
-    for(std::size_t i=0;i<depthFirst.size();++i)
-        mesh.inverseBindOrientations[depthFirst[i]]=engineOrientations[i];
-    std::copy(engineOrientations.begin()+static_cast<std::ptrdiff_t>(depthFirst.size()),
-              engineOrientations.end(),
-              mesh.inverseBindOrientations.begin()+static_cast<std::ptrdiff_t>(depthFirst.size()));
-    mesh.hasInverseBindPose=true;
+        // CreateInstanceTreeR constructs a distinct Part for every child link.
+        // PartSkin climbs that instance's parent chain, which can differ from
+        // the MdlNode's last authored parent after repeated parent directives.
+        auto root=partPath.back();
+        auto frameOrientation=inverse(localOrientations[root]);
+        auto framePosition=rotate(frameOrientation,negative(localPositions[root]));
+        for(auto depth=partPath.size()-1u;depth!=0u;--depth) {
+            root=partPath[depth-1u];
+            const auto parentInverse=inverse(localOrientations[root]);
+            framePosition=add(framePosition,rotate(frameOrientation,
+                                rotate(parentInverse,negative(localPositions[root]))));
+            frameOrientation=product(frameOrientation,parentInverse);
+        }
+
+        std::vector<Vec3> inversePositions(model.nodes.size());
+        std::vector<Quaternion> inverseOrientations(model.nodes.size());
+        std::vector<Vec3> engineInversePositions;
+        std::vector<Quaternion> engineInverseOrientations;
+        std::function<void(std::size_t,Vec3,Quaternion)> gather;
+        gather=[&](std::size_t node,Vec3 parentPosition,Quaternion parentOrientation) {
+            job.check();
+            const auto position=add(parentPosition,rotate(parentOrientation,localPositions[node]));
+            const auto orientation=product(parentOrientation,localOrientations[node]);
+            depthFirst.push_back(node);
+            inverseOrientations[node]=inverse(orientation);
+            inversePositions[node]=rotate(inverseOrientations[node],negative(position));
+            // GatherBones appends one row per Part visit, before descending.
+            // Two Parts sharing a node can have different ancestor frames;
+            // retaining by node index would overwrite the earlier engine row.
+            engineInverseOrientations.push_back(inverseOrientations[node]);
+            engineInversePositions.push_back(inversePositions[node]);
+            for(const auto child:model.nodes[node].children) gather(child,position,orientation);
+        };
+        gather(root,framePosition,frameOrientation);
+
+        // Engine pools are indexed by depth-first part position. Model retains
+        // stable node indices, so translate both generated binds and palette
+        // entries together; node IDs used by animation are independent.
+        auto engineOrientations=std::move(mesh.inverseBindOrientations);
+        engineOrientations.insert(engineOrientations.end(),engineInverseOrientations.begin(),
+                                  engineInverseOrientations.end());
+        packedSource=std::make_shared<AsciiSkinSource>();
+        packedSource->inverseOrientations=engineOrientations;
+        packedSource->inverseTranslations=std::move(engineInversePositions);
+        // Engine assigns only used palette slots. The packed encoder's explicit
+        // zero-padding policy supplies otherwise uninitialized storage bytes.
+        packedSource->paletteToBone.fill(0);
+        packedSource->boneConstantCount=depthFirst.size();
+        mesh.inverseBindOrientations.resize(engineOrientations.size());
+        mesh.inverseBindTranslations=std::move(inversePositions);
+        // PartSkin appends generated quaternions even when qbone_ref_inv alone
+        // supplied a prefix. Runtime indexing still starts at zero; preserve
+        // that prefix instead of requiring equally sized q/t arrays. Remap the
+        // consumed DFS prefix together with the translations and retain the
+        // unconsumed appended tail for inspection.
+        for(std::size_t i=0;i<depthFirst.size();++i)
+            mesh.inverseBindOrientations[depthFirst[i]]=engineOrientations[i];
+        std::copy(engineOrientations.begin()+static_cast<std::ptrdiff_t>(depthFirst.size()),
+                  engineOrientations.end(),
+                  mesh.inverseBindOrientations.begin()+static_cast<std::ptrdiff_t>(depthFirst.size()));
+    }
+    mesh.hasInverseBindPose=!raw.skinData || (!mesh.inverseBindOrientations.empty() &&
+        mesh.inverseBindOrientations.size()==mesh.inverseBindTranslations.size());
 
     const auto findBone=[&](const std::string& name) -> std::int32_t {
         // FindPartIndexDFS: ROOT is a special token, then case-insensitive
@@ -310,28 +367,41 @@ void buildSkin(Model& model,RawNode& raw,Mesh& mesh,
     for(std::size_t vertex=0;vertex<sources.size();++vertex) {
         job.check();
         const auto source=sources[vertex];
-        const auto& weights=raw.weights.at(source);
-        auto bones=raw.skinWeightIndices.at(source);
-        if(bones[0]==-1)
-            for(std::size_t channel=0;channel<4u;++channel)
-                bones[channel]=findBone(weights[channel].first);
         auto& channels=(*floats)[vertex];
         auto& influence=mesh.skinInfluences[vertex];
-        channels.indices.fill(-1.0f);
-        influence.boneIndices.fill(0xffffu);
-        for(std::size_t channel=0;channel<4u;++channel) {
-            const auto weight=weights[channel].second;
-            channels.weights[channel]=weight;
-            influence.weights[channel]=weight;
-            if(weight==0.0f) continue;
-            auto& slot=slots.at(static_cast<std::size_t>(bones[channel]));
-            if(slot<0) slot=nextSlot++;
-            channels.indices[channel]=static_cast<float>(slot);
-            influence.boneIndices[channel]=static_cast<std::uint16_t>(slot);
-            mesh.skinBoneMap.at(static_cast<std::size_t>(slot))=
-                static_cast<std::int16_t>(depthFirst.at(static_cast<std::size_t>(bones[channel])));
-            packedSource->paletteToBone.at(static_cast<std::size_t>(slot))=
-                static_cast<std::int16_t>(bones[channel]);
+        if(raw.skinData) {
+            channels=raw.skinChannels.at(source);
+            influence.weights=channels.weights;
+            for(std::size_t lane=0;lane<4u;++lane) {
+                influence.boneIndices[lane]=static_cast<std::uint16_t>(engineFloatToInt(channels.indices[lane]));
+                if(channels.weights[lane]!=0.0f) {
+                    const auto slot=static_cast<std::size_t>(engineFloatToInt(channels.indices[lane]));
+                    mesh.skinBoneMap.at(slot)=static_cast<std::int16_t>(depthFirst.at(
+                        static_cast<std::size_t>(packedSource->paletteToBone.at(slot))));
+                }
+            }
+        } else {
+            const auto& weights=raw.weights.at(source);
+            auto bones=raw.skinWeightIndices.at(source);
+            if(bones[0]==-1)
+                for(std::size_t channel=0;channel<4u;++channel)
+                    bones[channel]=findBone(weights[channel].first);
+            channels.indices.fill(-1.0f);
+            influence.boneIndices.fill(0xffffu);
+            for(std::size_t channel=0;channel<4u;++channel) {
+                const auto weight=weights[channel].second;
+                channels.weights[channel]=weight;
+                influence.weights[channel]=weight;
+                if(weight==0.0f) continue;
+                auto& slot=slots.at(static_cast<std::size_t>(bones[channel]));
+                if(slot<0) slot=nextSlot++;
+                channels.indices[channel]=static_cast<float>(slot);
+                influence.boneIndices[channel]=static_cast<std::uint16_t>(slot);
+                mesh.skinBoneMap.at(static_cast<std::size_t>(slot))=
+                    static_cast<std::int16_t>(depthFirst.at(static_cast<std::size_t>(bones[channel])));
+                packedSource->paletteToBone.at(static_cast<std::size_t>(slot))=
+                    static_cast<std::int16_t>(bones[channel]);
+            }
         }
         cpu->positions.push_back(mesh.vertices[vertex].position);
         cpu->normals.push_back(mesh.vertices[vertex].normal);
@@ -367,8 +437,8 @@ void buildSkin(Model& model,RawNode& raw,Mesh& mesh,
     mesh.mdxBoneIndexOffset=mesh.mdxRowSize+16u;
     mesh.mdxRowSize+=32u;
     mesh.hasSkinChannels=true;mesh.hasSkinBoneMap=true;
-    packedSource->boneToPalette.reserve(slots.size());
-    for(const auto slot:slots) packedSource->boneToPalette.push_back(static_cast<float>(slot));
+    if(!raw.skinData)
+        for(const auto slot:slots) packedSource->boneToPalette.push_back(static_cast<float>(slot));
     mesh.asciiSkinSource=std::move(packedSource);
     mesh.builtCpuSkinSource=std::move(cpu);
     mesh.builtFloatSkinChannels=std::move(floats);
