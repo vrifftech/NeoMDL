@@ -637,7 +637,9 @@ ReconstructedNormalStars reconstructNormalCornerStars(
     const std::vector<std::size_t>& faceOrder,
     const std::vector<Vec3>& positions,
     const neoshared::bif::JobControl& job,
-    const std::vector<std::array<double,3>>* precisePositions) {
+    const std::vector<std::array<double,3>>* precisePositions,
+    const std::vector<std::size_t>* movingFaces,
+    const std::vector<Vec3>* baselineCornerNormals) {
     using Triangle=std::array<std::array<float,3>,3>;
     const auto canonical=[](Triangle triangle) {
         auto result=triangle;
@@ -721,6 +723,7 @@ ReconstructedNormalStars reconstructNormalCornerStars(
         return std::atan2(std::sqrt((x*x+y*y)+z*z),
             (double(a.x)*b.x+double(a.y)*b.y)+double(a.z)*b.z);
     };
+    const bool compareAngles=precisePositions || baselineCornerNormals;
     struct Error {double squared,angle;};
     const auto errors=[&](std::size_t index) {
         Vec3 sum{};
@@ -733,25 +736,62 @@ ReconstructedNormalStars reconstructNormalCornerStars(
         for(const auto corner:groups[index].corners) {
             const auto target=vertices[static_cast<std::size_t>(
                 mesh.faces[corner/3u].indices[corner%3u])].normal;
-            result.push_back({difference(normal,target),precisePositions?angle(normal,target):0.0});
+            result.push_back({difference(normal,target),compareAngles?angle(normal,target):0.0});
         }
         return result;
     };
     std::vector<std::vector<Error>> baseline;
-    for(std::size_t group=0;group<groups.size();++group) baseline.push_back(errors(group));
+    for(std::size_t group=0;group<groups.size();++group) {
+        if(!baselineCornerNormals) baseline.push_back(errors(group));
+        else {
+            auto& limits=baseline.emplace_back();
+            for(const auto corner:groups[group].corners) {
+                const auto target=vertices[static_cast<std::size_t>(
+                    mesh.faces[corner/3u].indices[corner%3u])].normal;
+                const auto normal=(*baselineCornerNormals)[corner];
+                limits.push_back({difference(normal,target),angle(normal,target)});
+            }
+        }
+    }
+    std::vector<std::vector<std::size_t>> explicitDomains;
+    if(movingFaces) explicitDomains.push_back(*movingFaces);
+    const auto& domains=movingFaces?explicitDomains:incident;
+    const bool repairMode=movingFaces && baselineCornerNormals;
     bool improved;
     do {
         improved=false;
-        for(const auto& star:incident) {
+        for(const auto& star:domains) {
             std::vector<std::size_t> faces;
             std::vector<std::vector<std::uint8_t>> choices;
-            for(const auto face:star) if(anchors[face]) {
+            for(const auto face:star) if(movingFaces || anchors[face]) faces.push_back(face);
+            if(movingFaces) {
+                // Complete the smallest remaining contributor group first,
+                // so its immutable corner limits can prune the joint search.
+                std::vector<std::size_t> ordered;
+                while(!faces.empty()) {
+                    std::map<std::size_t,std::size_t> remaining;
+                    for(const auto face:faces)
+                        for(const auto group:faceGroups[face]) ++remaining[group];
+                    const auto next=std::min_element(remaining.begin(),remaining.end(),
+                        [](const auto& a,const auto& b) {
+                            return std::make_pair(a.second,a.first)<std::make_pair(b.second,b.first);
+                        })->first;
+                    for(auto face=faces.begin();face!=faces.end();) {
+                        const auto& contributions=faceGroups[*face];
+                        if(std::find(contributions.begin(),contributions.end(),next)!=contributions.end()) {
+                            ordered.push_back(*face);face=faces.erase(face);
+                        } else ++face;
+                    }
+                }
+                faces=std::move(ordered);
+            }
+            for(const auto face:faces) {
                 std::vector<std::uint8_t> options{current[face]};
                 for(std::uint8_t rotation=0u;rotation<3u;++rotation)
                     if(std::none_of(options.begin(),options.end(),[&](std::uint8_t other) {
                             return same(alternatives[face][rotation],alternatives[face][other]);
                         })) options.push_back(rotation);
-                faces.push_back(face);choices.push_back(std::move(options));
+                choices.push_back(std::move(options));
             }
             if(faces.empty()) continue;
             // Several cyclic starts can be necessary together: opposite
@@ -768,14 +808,22 @@ ReconstructedNormalStars reconstructNormalCornerStars(
             auto candidate=current,best=current;
             auto bestOrder=currentOrder;
             double bestScore=initialScore;
+            if(repairMode) {
+                bestScore=0.0;
+                for(const auto& ready:completed)
+                    for(const auto group:ready)
+                        for(const auto error:baseline[group]) bestScore+=error.squared;
+            }
+            bool foundRepair=false;
             std::size_t bestChanges{};
             std::size_t orderChanges{};
             const auto visit=[&](const auto& self,std::size_t depth,double score,
                                  std::size_t changes)->void {
                 job.check();
                 if(depth==faces.size()) {
-                    if(score<bestScore || (score==bestScore && changes<bestChanges)) {
-                        bestScore=score;bestChanges=changes;best=candidate;
+                    if(score<bestScore || (score==bestScore &&
+                            ((repairMode && !foundRepair) || changes<bestChanges))) {
+                        bestScore=score;bestChanges=changes;best=candidate;foundRepair=true;
                     }
                     return;
                 }
@@ -787,7 +835,7 @@ ReconstructedNormalStars reconstructNormalCornerStars(
                         const auto values=errors(group);
                         for(std::size_t i=0;i<values.size();++i) {
                             if(values[i].squared>baseline[group][i].squared ||
-                               (precisePositions && values[i].angle>baseline[group][i].angle)) {
+                               (compareAngles && values[i].angle>baseline[group][i].angle)) {
                                 accepted=false;break;
                             }
                             next+=values[i].squared;
@@ -796,11 +844,12 @@ ReconstructedNormalStars reconstructNormalCornerStars(
                     }
                     const auto nextChanges=changes+(rotation!=current[face]);
                     if(accepted && (next<bestScore ||
-                            (next==bestScore && nextChanges<bestChanges)))
+                            (next==bestScore && ((repairMode && !foundRepair) || nextChanges<bestChanges))))
                         self(self,depth+1u,next,nextChanges);
                 }
                 candidate[face]=current[face];crosses[face]=alternatives[face][current[face]];
             };
+            std::map<std::vector<std::size_t>,std::size_t> orderSignatures;
             const auto considerOrder=[&](const std::vector<std::size_t>& order) {
                 const auto ranks=SourceFaceNeighbors::ranks(order);
                 if(!neighbors.preserves(order,ranks)) return;
@@ -809,10 +858,23 @@ ReconstructedNormalStars reconstructNormalCornerStars(
                     std::sort(contributions.begin(),contributions.end(),
                         [&](std::size_t a,std::size_t b){return ranks[a]<ranks[b];});
                 }
+                if(movingFaces) {
+                    std::vector<std::size_t> signature;
+                    for(const auto& entry:last) {
+                        const auto& contributions=groups[entry.first].faces;
+                        signature.insert(signature.end(),contributions.begin(),contributions.end());
+                    }
+                    const auto found=orderSignatures.emplace(std::move(signature),orderChanges);
+                    if(!found.second) {
+                        if(found.first->second<=orderChanges) return;
+                        found.first->second=orderChanges;
+                    }
+                }
                 const auto previousScore=bestScore;
                 const auto previousChanges=bestChanges;
+                const auto previouslyFound=foundRepair;
                 visit(visit,0u,0.0,orderChanges);
-                if(bestScore<previousScore ||
+                if((!previouslyFound && foundRepair) || bestScore<previousScore ||
                    (bestScore==previousScore && bestChanges<previousChanges)) bestOrder=order;
             };
             considerOrder(currentOrder);
@@ -839,7 +901,7 @@ ReconstructedNormalStars reconstructNormalCornerStars(
                     if(changes==0u) return;
                     orderChanges=changes;considerOrder(order);
                 });
-            if(bestScore<initialScore) {
+            if(bestScore<initialScore || (repairMode && foundRepair)) {
                 current=std::move(best);currentOrder=std::move(bestOrder);improved=true;
                 for(const auto face:faces) crosses[face]=alternatives[face][current[face]];
             }
@@ -850,7 +912,7 @@ ReconstructedNormalStars reconstructNormalCornerStars(
                     [&](std::size_t a,std::size_t b){return ranks[a]<ranks[b];});
             }
         }
-    } while(improved);
+    } while(improved && !movingFaces);
     return {std::move(current),std::move(currentOrder)};
 }
 

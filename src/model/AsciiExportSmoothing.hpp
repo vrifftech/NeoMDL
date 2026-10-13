@@ -65,7 +65,9 @@ ReconstructedNormalStars reconstructNormalCornerStars(
     const std::vector<std::size_t>& faceOrder,
     const std::vector<Vec3>& positions,
     const neoshared::bif::JobControl&,
-    const std::vector<std::array<double,3>>* precisePositions = nullptr);
+    const std::vector<std::array<double,3>>* precisePositions = nullptr,
+    const std::vector<std::size_t>* movingFaces = nullptr,
+    const std::vector<Vec3>* baselineCornerNormals = nullptr);
 
 struct ReconstructedNormalRounding {
     std::vector<Vec3> positions;

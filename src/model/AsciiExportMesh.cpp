@@ -1278,11 +1278,13 @@ void reconstructNormalPositionPrecision(Writer& out,const Model& model,const Mod
         };
         if(!rebuildGroups()) continue;
         const auto products=[&](std::size_t face,std::size_t source,std::size_t axis,double value,
-                                std::size_t paired=std::numeric_limits<std::size_t>::max()) {
+                                std::size_t paired=std::numeric_limits<std::size_t>::max(),
+                                std::size_t rotation=3u) {
             std::array<Vec3,3> low;
             std::array<std::array<double,3>,3> precise;
             for(std::size_t corner=0;corner<3u;++corner) {
-                const auto vertex=plan.topology.sourceFaces[face][plan.sourceCorner(face,corner)];
+                const auto vertex=plan.topology.sourceFaces[face][rotation<3u?
+                    (rotation+corner)%3u:plan.sourceCorner(face,corner)];
                 low[corner]=plan.sourcePositions[vertex];precise[corner]=high[vertex];
                 if(vertex==source) precise[corner][axis]=value;
                 if(vertex==paired) precise[corner][axis]=high[paired][axis]-(value-high[source][axis]);
@@ -1294,7 +1296,8 @@ void reconstructNormalPositionPrecision(Writer& out,const Model& model,const Mod
         };
         const auto enumerateAxis=[&](std::size_t source,std::size_t axis,std::size_t paired,
                                      const std::set<std::size_t>& affected,
-                                     const std::vector<Vec3>& localCrosses,const auto& consider) {
+                                     const std::vector<Vec3>& localCrosses,const auto& consider,
+                                     bool cyclicStates=false) {
             out.job().check();
             const double initial=high[source][axis];
             auto pathFaces=incident[source];
@@ -1388,7 +1391,7 @@ void reconstructNormalPositionPrecision(Writer& out,const Model& model,const Mod
                     return value.literal && std::isfinite(value.constant);
                 });
             }
-            if(invariant) return;
+            if(invariant && !cyclicStates) return;
             std::set<std::vector<std::uint32_t>> visited;
             const auto emit=[&](double value) {
                 auto proposed=localCrosses;std::vector<std::uint32_t> key;
@@ -1396,6 +1399,11 @@ void reconstructNormalPositionPrecision(Writer& out,const Model& model,const Mod
                     const auto result=crossFrom(products(face,source,axis,value,paired));
                     proposed[face]=result;
                     key.push_back(rawBits(result.x));key.push_back(rawBits(result.y));key.push_back(rawBits(result.z));
+                    if(cyclicStates) for(std::size_t rotation=0;rotation<3u;++rotation) {
+                        const auto alternate=crossFrom(products(face,source,axis,value,paired,rotation));
+                        key.push_back(rawBits(alternate.x));key.push_back(rawBits(alternate.y));
+                        key.push_back(rawBits(alternate.z));
+                    }
                 }
                 if(visited.insert(std::move(key)).second) consider(value,proposed);
             };
@@ -1410,6 +1418,17 @@ void reconstructNormalPositionPrecision(Writer& out,const Model& model,const Mod
                     // Same-axis paths leave only one varying factor in each product.
                     bool constant=true;
                     for(const auto face:pathFaces) {
+                        if(cyclicStates) for(std::size_t rotation=0;rotation<3u;++rotation) {
+                            const auto a=products(face,source,axis,interval.first,paired,rotation),
+                                b=products(face,source,axis,interval.second,paired,rotation);
+                            for(std::size_t c=0;c<3u;++c) {
+                                const float lower=std::min(component(a[0],c),component(b[0],c))-
+                                    std::max(component(a[1],c),component(b[1],c));
+                                const float upper=std::max(component(a[0],c),component(b[0],c))-
+                                    std::min(component(a[1],c),component(b[1],c));
+                                constant=constant && rawBits(lower)==rawBits(upper);
+                            }
+                        }
                         const auto a=products(face,source,axis,interval.first,paired),
                             b=products(face,source,axis,interval.second,paired);
                         std::array<float,3> lows{},highs{};
@@ -1424,7 +1443,7 @@ void reconstructNormalPositionPrecision(Writer& out,const Model& model,const Mod
                         lowerCross[face]={lows[0],lows[1],lows[2]};
                         upperCross[face]={highs[0],highs[1],highs[2]};
                     }
-                    if(!constant && paired>=high.size()) {
+                    if(!constant && paired>=high.size() && !cyclicStates) {
                         constant=true;
                         for(const auto id:affected) {
                             Vec3 lower{},upper{};
@@ -1445,6 +1464,7 @@ void reconstructNormalPositionPrecision(Writer& out,const Model& model,const Mod
                 }
             }
         };
+        std::vector<std::vector<std::array<double,3>>> coupledOrigins;
         for(;;) {
             out.job().check();
             std::vector<Vec3> crosses;
@@ -1465,7 +1485,8 @@ void reconstructNormalPositionPrecision(Writer& out,const Model& model,const Mod
             struct Candidate {std::size_t source;std::array<double,3> position;double error;};
             const auto collectCandidates=[&](const std::vector<bool>& allowed,
                                              const std::vector<Vec3>& inputCrosses,
-                                             const std::vector<Vec3>* inputNormals) {
+                                             const std::vector<Vec3>* inputNormals,
+                                             std::optional<std::size_t> targetGroup=std::nullopt) {
                 std::vector<Candidate> candidates;
                 for(std::size_t source=0;source<high.size();++source) {
                     if(!allowed[source]) continue;
@@ -1498,6 +1519,7 @@ void reconstructNormalPositionPrecision(Writer& out,const Model& model,const Mod
                                 [&](double value,const std::vector<Vec3>& proposed) {
                                 double error{};bool improved=false;
                                 for(const auto id:affected) {
+                                    if(targetGroup && id!=*targetGroup) continue;
                                     const auto& group=groups[id];Vec3 sum{};
                                     for(const auto face:group.faces) {
                                         const auto cross=proposed[face];
@@ -1514,19 +1536,34 @@ void reconstructNormalPositionPrecision(Writer& out,const Model& model,const Mod
                                     }
                                 }
                                 if(improved) moves.push_back({axis,value,error});
-                            });
+                            },targetGroup.has_value());
                         }
                         if(moves.empty()) break;
                         const auto best=std::min_element(moves.begin(),moves.end(),[&](const Move& a,const Move& b) {
+                            if(targetGroup) return std::tie(a.error,a.axis,a.value)<std::tie(b.error,b.axis,b.value);
                             return std::make_tuple(a.error,std::abs(a.value-high[source][a.axis]),a.axis,a.value)<
                                 std::make_tuple(b.error,std::abs(b.value-high[source][b.axis]),b.axis,b.value);
                         });
+                        if(targetGroup) {
+                            double preceding{};
+                            for(const auto corner:groups[*targetGroup].corners) {
+                                const auto face=corner/3u,c=corner%3u;
+                                const auto target=plan.vertices[mesh.faces[face].indices[c]].normal;
+                                const auto before=inputNormals?inputNormals->at(*targetGroup):
+                                    current.meshes[index].normalAt(rows[index][face][c]);
+                                preceding+=difference(localNormals[*targetGroup],target)-difference(before,target);
+                            }
+                            for(const auto& move:moves) if(move.error==best->error) {
+                                auto position=high[source];position[move.axis]=move.value;
+                                candidates.push_back({source,position,preceding+move.error});
+                            }
+                        }
                         high[source][best->axis]=best->value;
                         for(const auto face:incident[source])
                             localCrosses[face]=crossFrom(products(face,high.size(),0u,0.0));
                         updateNormals();
                         double error{};
-                        for(const auto id:affected)
+                        for(const auto id:affected) if(!targetGroup || id==*targetGroup)
                             for(const auto corner:groups[id].corners) {
                                 const auto face=corner/3u,c=corner%3u;
                                 const auto target=plan.vertices[mesh.faces[face].indices[c]].normal;
@@ -1698,7 +1735,9 @@ void reconstructNormalPositionPrecision(Writer& out,const Model& model,const Mod
                     high[seed.second][seed.axis]-=seed.value-high[seed.first][seed.axis];
                     high[seed.first][seed.axis]=seed.value;
                     auto trial=plan;trial.preciseSourcePositions=high;
-                    if(seed.direct && accept(trial)) {accepted=true;break;}
+                    if(seed.direct && accept(trial)) {
+                        coupledOrigins.push_back(original);accepted=true;break;
+                    }
                     auto seedCrosses=crosses;
                     for(const auto source:{seed.first,seed.second})
                         for(const auto face:incident[source])
@@ -1719,9 +1758,196 @@ void reconstructNormalPositionPrecision(Writer& out,const Model& model,const Mod
                         trial.preciseSourcePositions[repair.source]=repair.position;
                         if(accept(trial)) {accepted=true;break;}
                     }
-                    if(accepted) break;
+                    if(accepted) {coupledOrigins.push_back(original);break;}
                     high=original;
                 }
+            }
+            if(!accepted && !coupledOrigins.empty() && !model.nodes[mesh.nodeIndex].aabb) {
+                const auto retained=high;
+                std::vector<Vec3> baselineCorners(mesh.faces.size()*3u);
+                for(std::size_t face=0;face<mesh.faces.size();++face)
+                    for(std::size_t corner=0;corner<3u;++corner)
+                        baselineCorners[face*3u+corner]=current.meshes[index].normalAt(rows[index][face][corner]);
+                const auto groupNormal=[&](std::size_t id,const std::vector<Vec3>& values) {
+                    Vec3 sum{};
+                    for(const auto face:groups[id].faces) {
+                        const auto value=values[face];sum={sum.x+value.x,sum.y+value.y,value.z+sum.z};
+                    }
+                    return normal(sum);
+                };
+                const auto localCrosses=[&] {
+                    std::vector<Vec3> result;
+                    for(std::size_t face=0;face<mesh.faces.size();++face)
+                        result.push_back(crossFrom(products(face,high.size(),0u,0.0)));
+                    return result;
+                };
+                const auto worsens=[&](std::size_t id,Vec3 proposed) {
+                    for(const auto corner:groups[id].corners) {
+                        const auto target=plan.vertices[mesh.faces[corner/3u].indices[corner%3u]].normal;
+                        const auto before=baselineCorners[corner];
+                        if(difference(proposed,target)>difference(before,target) ||
+                           angle(proposed,target)>angle(before,target)) return true;
+                    }
+                    return false;
+                };
+                std::vector<std::pair<double,std::size_t>> targets;
+                for(std::size_t id=0;id<groups.size();++id) {
+                    const auto& group=groups[id];
+                    if(!group.cancelled || !group.seamFree) continue;
+                    double error{};
+                    for(const auto corner:group.corners)
+                        error=std::max(error,angle(baselineCorners[corner],
+                            plan.vertices[mesh.faces[corner/3u].indices[corner%3u]].normal));
+                    if(error!=0.0) targets.emplace_back(-error,id);
+                }
+                std::sort(targets.begin(),targets.end());
+                auto origins=std::move(coupledOrigins);coupledOrigins.clear();
+                for(const auto& origin:origins) {
+                    std::set<std::size_t> originGroups;
+                    for(std::size_t vertex=0;vertex<high.size();++vertex) if(origin[vertex]!=retained[vertex])
+                        for(const auto face:incident[vertex])
+                            originGroups.insert(faceGroups[face].begin(),faceGroups[face].end());
+                    for(const auto& targetEntry:targets) {
+                        const auto targetId=targetEntry.second,source=groups[targetId].source;
+                        high=origin;
+                        const auto seedCrosses=localCrosses();
+                        std::set<std::size_t> affected;
+                        for(const auto face:incident[source])
+                            affected.insert(faceGroups[face].begin(),faceGroups[face].end());
+                        if(std::any_of(affected.begin(),affected.end(),[&](std::size_t id){return !groups[id].seamFree;})) continue;
+                        auto scored=affected;scored.insert(originGroups.begin(),originGroups.end());
+                        std::array<std::vector<double>,3> axisValues;
+                        for(std::size_t axis=0;axis<3u;++axis)
+                            enumerateAxis(source,axis,high.size(),affected,seedCrosses,
+                                [&](double value,const std::vector<Vec3>&) {axisValues[axis].push_back(value);},true);
+                        std::vector<std::pair<std::size_t,std::size_t>> axes{{0,1},{0,2},{1,2}};
+                        std::sort(axes.begin(),axes.end(),[&](const auto& a,const auto& b) {
+                            return std::make_tuple(axisValues[a.first].size()*axisValues[a.second].size(),a)<
+                                std::make_tuple(axisValues[b.first].size()*axisValues[b.second].size(),b);
+                        });
+                        for(const auto& pair:axes) {
+                            std::optional<std::size_t> leastWorsened;
+                            std::vector<std::array<double,3>> seeds;
+                            std::set<std::vector<std::uint32_t>> states;
+                            for(const auto first:axisValues[pair.first]) {
+                                high=origin;high[source][pair.first]=first;
+                                const auto intermediate=localCrosses();
+                                enumerateAxis(source,pair.second,high.size(),affected,intermediate,
+                                    [&](double second,const std::vector<Vec3>& proposed) {
+                                        std::size_t worse{};bool improves=false;
+                                        for(const auto id:scored) {
+                                            const auto value=groupNormal(id,proposed);
+                                            for(const auto corner:groups[id].corners) {
+                                                const auto target=plan.vertices[mesh.faces[corner/3u].indices[corner%3u]].normal;
+                                                const auto before=baselineCorners[corner];
+                                                const double previous=difference(before,target),next=difference(value,target);
+                                                const bool angleWorse=angle(value,target)>angle(before,target);
+                                                worse+=next>previous || angleWorse;
+                                                if(id==targetId) {
+                                                    if(next>previous || angleWorse) return;
+                                                    improves=improves || next<previous;
+                                                }
+                                            }
+                                        }
+                                        if(!improves) return;
+                                        if(leastWorsened && worse>*leastWorsened) return;
+                                        if(!leastWorsened || worse<*leastWorsened) {
+                                            leastWorsened=worse;seeds.clear();states.clear();
+                                        }
+                                        std::vector<std::uint32_t> key;
+                                        for(const auto face:incident[source]) for(std::size_t rotation=0;rotation<3u;++rotation) {
+                                            const auto cross=crossFrom(products(face,source,pair.second,second,high.size(),rotation));
+                                            key.push_back(rawBits(cross.x));key.push_back(rawBits(cross.y));key.push_back(rawBits(cross.z));
+                                        }
+                                        if(states.insert(std::move(key)).second) {
+                                            auto position=high[source];position[pair.second]=second;seeds.push_back(position);
+                                        }
+                                    },true);
+                            }
+                            std::sort(seeds.begin(),seeds.end());
+                            struct TopologyTrial {
+                                std::vector<std::pair<std::size_t,std::array<double,3>>> positions;
+                                std::vector<std::size_t> domain;
+                                std::size_t worsened;
+                                double error,targetError;
+                            };
+                            std::vector<TopologyTrial> trials;
+                            const auto addTopologyTrials=[&](const std::vector<Vec3>& proposed) {
+                                std::set<std::size_t> core(groups[targetId].faces.begin(),groups[targetId].faces.end());
+                                std::set<std::size_t> changedGroups;
+                                std::vector<std::pair<std::size_t,std::array<double,3>>> positions;
+                                for(std::size_t vertex=0;vertex<high.size();++vertex) {
+                                    if(high[vertex]!=origin[vertex]) positions.emplace_back(vertex,high[vertex]);
+                                    if(high[vertex]!=retained[vertex])
+                                        for(const auto face:incident[vertex])
+                                            changedGroups.insert(faceGroups[face].begin(),faceGroups[face].end());
+                                }
+                                std::size_t worse{};double error{},targetError{};
+                                for(const auto id:changedGroups) {
+                                    const auto value=groupNormal(id,proposed);
+                                    if(worsens(id,value)) {
+                                        if(!groups[id].seamFree) return;
+                                        core.insert(groups[id].faces.begin(),groups[id].faces.end());
+                                    }
+                                    for(const auto corner:groups[id].corners) {
+                                        const auto target=plan.vertices[mesh.faces[corner/3u].indices[corner%3u]].normal;
+                                        const auto before=baselineCorners[corner];
+                                        const double previous=difference(before,target),next=difference(value,target);
+                                        worse+=next>previous || angle(value,target)>angle(before,target);
+                                        error+=next-previous;
+                                        if(id==targetId) targetError+=next;
+                                    }
+                                }
+                                std::set<std::vector<std::size_t>> domains;
+                                domains.emplace(core.begin(),core.end());
+                                for(const auto face:core) for(const auto id:faceGroups[face]) {
+                                    if(!groups[id].cancelled || !groups[id].seamFree) continue;
+                                    auto expanded=core;expanded.insert(groups[id].faces.begin(),groups[id].faces.end());
+                                    domains.emplace(expanded.begin(),expanded.end());
+                                }
+                                for(const auto& domain:domains)
+                                    trials.push_back({positions,domain,worse,error,targetError});
+                            };
+                            for(const auto& seed:seeds) {
+                                high=origin;high[source]=seed;
+                                const auto proposed=localCrosses();
+                                addTopologyTrials(proposed);
+                                std::vector<Vec3> seedNormals;
+                                for(std::size_t id=0;id<groups.size();++id) seedNormals.push_back(groupNormal(id,proposed));
+                                std::vector<bool> neighbors(high.size());
+                                for(const auto face:groups[targetId].faces)
+                                    for(const auto vertex:plan.topology.sourceFaces[face]) neighbors[vertex]=true;
+                                const auto repairs=collectCandidates(neighbors,proposed,&seedNormals,targetId);
+                                const auto seeded=high;
+                                for(const auto& repair:repairs) {
+                                    high=seeded;high[repair.source]=repair.position;
+                                    addTopologyTrials(localCrosses());
+                                }
+                            }
+                            std::sort(trials.begin(),trials.end(),[](const auto& a,const auto& b) {
+                                return std::make_tuple(a.domain.size(),a.worsened,a.error,a.targetError,a.positions,a.domain)<
+                                    std::make_tuple(b.domain.size(),b.worsened,b.error,b.targetError,b.positions,b.domain);
+                            });
+                            trials.erase(std::unique(trials.begin(),trials.end(),[](const auto& a,const auto& b) {
+                                return a.positions==b.positions && a.domain==b.domain;
+                            }),trials.end());
+                            for(const auto& candidate:trials) {
+                                high=origin;
+                                for(const auto& position:candidate.positions) high[position.first]=position.second;
+                                auto stars=reconstructNormalCornerStars(mesh,plan.vertices,plan.topology.sourceVertices,
+                                    plan.topology.sourceFaces,plan.smoothing.masks,plan.cornerRotations,plan.faceOrder,
+                                    plan.sourcePositions,out.job(),&high,&candidate.domain,&baselineCorners);
+                                auto trial=plan;trial.preciseSourcePositions=high;
+                                trial.cornerRotations=std::move(stars.rotations);trial.faceOrder=std::move(stars.faceOrder);
+                                if(accept(std::move(trial))) {accepted=true;break;}
+                            }
+                            if(accepted) break;
+                        }
+                        if(accepted) break;
+                    }
+                    if(accepted) break;
+                }
+                if(!accepted) high=retained;
             }
             if(!accepted || !rebuildGroups()) break;
         }
