@@ -221,6 +221,7 @@ if(NEOMDL_BUILD_WX_GUI OR NEOMDL_BUILD_WX_MODULE)
         add_library(neomdl_wx STATIC
             src/wx/AsciiEditor.cpp
             src/wx/AsciiProperties.cpp
+            src/wx/AsciiDataProperties.cpp
             src/wx/ModelCanvas.cpp
             src/wx/SceneAudioPlayback.cpp
             src/wx/SceneAudioDevice.cpp

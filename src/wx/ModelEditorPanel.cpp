@@ -93,6 +93,8 @@ enum CommandId {
     ID_ExportAscii,
     ID_ExportPacked,
     ID_NodeProperties,
+    ID_VertexProperties,
+    ID_ControllerProperties,
     ID_ModelProperties,
     ID_RenameTexture,
     ID_ExportTextures,
@@ -353,10 +355,18 @@ public:
         editNode_ = new wxButton(detailsPanel, wxID_ANY, "Edit Selected Node...");
         editNode_->SetToolTip("Select a uniquely named node after the ASCII preview is current.");
         editNode_->Enable(false);
+        editVertices_ = new wxButton(detailsPanel, wxID_ANY, "Vertices...");
+        editControllers_ = new wxButton(detailsPanel, wxID_ANY, "Controllers...");
+        editVertices_->Enable(false);
+        editControllers_->Enable(false);
+        auto* dataProperties = new wxBoxSizer(wxHORIZONTAL);
+        dataProperties->Add(editVertices_, 1, wxRIGHT, FromDIP(5));
+        dataProperties->Add(editControllers_, 1);
         details_ = new wxTextCtrl(detailsPanel, wxID_ANY, wxEmptyString, wxDefaultPosition,
                                   wxDefaultSize, wxTE_MULTILINE | wxTE_READONLY | wxTE_RICH2);
         detailsLayout->Add(detailedDiagnostics_, 0, wxALL, FromDIP(5));
         detailsLayout->Add(editNode_, 0, wxEXPAND | wxLEFT | wxRIGHT | wxBOTTOM, FromDIP(5));
+        detailsLayout->Add(dataProperties, 0, wxEXPAND | wxLEFT | wxRIGHT | wxBOTTOM, FromDIP(5));
         detailsLayout->Add(details_, 1, wxEXPAND);
         detailsPanel->SetSizer(detailsLayout);
         const neosettings::AppSettings layoutSettings("NeoMDL");
@@ -410,6 +420,8 @@ public:
             updateDetails(selectedNode_);
         });
         editNode_->Bind(wxEVT_BUTTON, [this](wxCommandEvent&) { editSelectedNode(); });
+        editVertices_->Bind(wxEVT_BUTTON, [this](wxCommandEvent&) { editSelectedVertices(); });
+        editControllers_->Bind(wxEVT_BUTTON, [this](wxCommandEvent&) { editSelectedControllers(); });
         advancedAnimation_->Bind(wxEVT_COLLAPSIBLEPANE_CHANGED,
             [this, playback, preview](wxCollapsiblePaneEvent&) {
                 playback->FitInside();
@@ -541,6 +553,18 @@ public:
     void editSelectedNode() {
         const auto sourceIndex = document_->model().partSourceNodes[*selectedNode_];
         asciiEditor_->editNode(document_->sourceModel(), sourceIndex);
+    }
+    bool canEditVertices() const {
+        return canEditNode() && document_->sourceModel().nodes[
+            document_->model().partSourceNodes[*selectedNode_]].mesh.has_value();
+    }
+    void editSelectedVertices() {
+        const auto sourceIndex = document_->model().partSourceNodes[*selectedNode_];
+        asciiEditor_->editVertices(document_->sourceModel(), sourceIndex);
+    }
+    void editSelectedControllers() {
+        const auto sourceIndex = document_->model().partSourceNodes[*selectedNode_];
+        asciiEditor_->editControllers(document_->sourceModel(), sourceIndex);
     }
     bool asciiVisible() const noexcept { return asciiVisible_ && canvas_->areaScene().empty(); }
     void showAscii(bool visible) { asciiVisible_ = visible; updateAsciiVisibility(); }
@@ -747,7 +771,11 @@ public:
     }
 
 private:
-    void updateEditingControls() { editNode_->Enable(canEditNode()); }
+    void updateEditingControls() {
+        editNode_->Enable(canEditNode());
+        editVertices_->Enable(canEditVertices());
+        editControllers_->Enable(canEditNode());
+    }
     void populateAnimations() {
         animationChoice_->Clear();
         animationChoice_->Append("Bind pose");
@@ -1737,6 +1765,8 @@ private:
     wxTextCtrl* details_{};
     wxCheckBox* detailedDiagnostics_{};
     wxButton* editNode_{};
+    wxButton* editVertices_{};
+    wxButton* editControllers_{};
     ModelCanvas* canvas_{};
     wxCollapsiblePane* advancedAnimation_{};
     wxChoice* animationChoice_{};
@@ -3794,6 +3824,8 @@ private:
 
         auto* edit = new wxMenu;
         edit->Append(ID_NodeProperties, "Selected Node Properties...", "Edit the selected node through its ASCII source.");
+        edit->Append(ID_VertexProperties, "Selected Mesh Vertex Properties...", "Edit vertex values and corner assignments in source-index tables.");
+        edit->Append(ID_ControllerProperties, "Selected Node Controller Properties...", "Edit base controllers and animation keys for the selected node.");
         edit->Append(ID_ModelProperties, "Model Properties...", "Choose the animation root and head link.");
         edit->Append(ID_RenameTexture, "Rename Texture Throughout Model...", "Change matching texture references in this model.");
         bar->Append(edit, "&Edit");
@@ -5257,6 +5289,8 @@ private:
             case ID_ExportAscii: exportAsciiModel(); return;
             case ID_ExportPacked: exportPackedModel(); return;
             case ID_NodeProperties: activePage()->editSelectedNode(); return;
+            case ID_VertexProperties: activePage()->editSelectedVertices(); return;
+            case ID_ControllerProperties: activePage()->editSelectedControllers(); return;
             case ID_ModelProperties: activePage()->asciiEditor()->editModel(activePage()->document().sourceModel()); return;
             case ID_RenameTexture: activePage()->asciiEditor()->renameTexture(); return;
             case ID_ExportTextures: activePage()->asciiEditor()->exportTextureList(); return;
@@ -5413,6 +5447,8 @@ private:
         enableModuleCommand(ID_ExportAscii,editor&&editor->ready());
         enableModuleCommand(ID_ExportPacked,editor&&editor->ready());
         enableModuleCommand(ID_NodeProperties,active&&active->canEditNode());
+        enableModuleCommand(ID_VertexProperties,active&&active->canEditVertices());
+        enableModuleCommand(ID_ControllerProperties,active&&active->canEditNode());
         enableModuleCommand(ID_ModelProperties,editor&&editor->previewCurrent()&&!area);
         enableModuleCommand(ID_RenameTexture,editor&&editor->previewCurrent()&&!area);
         enableModuleCommand(ID_ExportTextures,editor&&editor->previewCurrent()&&!area);

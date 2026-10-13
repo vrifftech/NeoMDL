@@ -38,6 +38,8 @@ public:
     void cancelAndWait();
     bool save(bool choosePath = false);
     void editNode(const model::Model& model, std::size_t nodeIndex);
+    void editVertices(const model::Model& model, std::size_t nodeIndex);
+    void editControllers(const model::Model& model, std::size_t nodeIndex);
     void editModel(const model::Model& model);
     void renameTexture();
     void exportTextureList();
