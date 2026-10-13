@@ -527,10 +527,6 @@ void ModelCanvas::installArea(AreaScene pending,PreparedSceneAudioPlayback sound
     areaScene_ = std::move(pending);explicitDirtyArea_.reset();explicitDirtyIdentity_.clear();++dirtyAreaEpoch_;
     resetWorldClock(false);
     sceneAudioAssets_=std::move(sounds);
-    if(!sceneAudioAssets_.sounds.empty()) {
-        try {configureSceneAudio({});}
-        catch(const std::exception& e){sceneAudioStatus_=e.what();dialogueMessages_.push_back(sceneAudioStatus_);}
-    }
     std::string visualRecordError;
     if(!triggerScene_.replaceAreaTriggers(areaScene_.triggers(),visualRecordError))
         throw std::runtime_error("Area trigger load changed during installation: "+visualRecordError);
@@ -786,6 +782,7 @@ model::FogSettings ModelCanvas::effectiveFog() const noexcept {
         fog.start=*sample.fogNear;fog.end=*sample.fogFar;return fog;
     };
     auto fog=areaFog();
+    fog.mode=options_.fogEnabled?fog.mode:model::FogMode::Disabled;
     const auto force=effectiveForceSight();
     if(force.enabled) {
         // Scene::SetFogColor 0xbfc02 and DoFog select the retained gray color.
@@ -868,8 +865,12 @@ void ModelCanvas::updateWorldRoomSelection() {
             worldPlaybackSettings_.sceneFocus=*position;
         if(!areaScene_.empty()&&areaScene_.roomPositionQueriesAvailable())
             areaScene_.updateCurrentRoomFromWorld(input);
-    } else if(!areaScene_.empty()&&areaScene_.roomPositionQueriesAvailable())
-        areaScene_.updateCurrentRoomFromPosition(sceneCameraFrame().position);
+    } else {
+        const auto position=sceneCameraFrame().position;
+        if(worldPlaybackSettings_.cameraSceneFocus)worldPlaybackSettings_.sceneFocus=position;
+        if(!areaScene_.empty()&&areaScene_.roomPositionQueriesAvailable())
+            areaScene_.updateCurrentRoomFromPosition(position);
+    }
 }
 
 void ModelCanvas::synchronizeWorldPause() {
@@ -2175,7 +2176,7 @@ void ModelCanvas::setOptions(RenderOptions options) {
         updateSceneBounds();
     }
     if (!options_.previewLights) pendingLightElapsed_ = 0.0f;
-    if(!options_.engineLensFlares)pendingFlareElapsed_=0;
+    if(!options_.engineLensFlares.value_or(!areaScene_.empty()))pendingFlareElapsed_=0;
     shaderErrorReported_=false;
     Refresh(false);
 }
@@ -3004,7 +3005,7 @@ void ModelCanvas::advance(float elapsedSeconds, bool advanceParticles,
     // Scene texture controllers consume the frame clock, not animation seek time.
     pendingProcedureElapsed_ += elapsedSeconds;
     pendingDoorElapsed_ += elapsedSeconds;
-    if(options_.engineLensFlares)pendingFlareElapsed_+=elapsedSeconds;
+    if(options_.engineLensFlares.value_or(!areaScene_.empty()))pendingFlareElapsed_+=elapsedSeconds;
     else pendingFlareElapsed_=0;
     // Scene rendering and WindManager receive the full frame clock. The
     // emitter bucket applies its own engine 0.1-second update clamp.
@@ -3874,7 +3875,7 @@ void ModelCanvas::drawScene() {
             // selected shader does not read that unit. Do not cache the result.
             return textureCache_.bind(registered.id,error).id;
         };
-        sceneSettings.shadowsEnabled=options_.engineShadows&&effectiveAreaShadows();
+        sceneSettings.shadowsEnabled=options_.engineShadows.value_or(areaScene_.currentRoom().has_value())&&effectiveAreaShadows();
         sceneSettings.sceneAmbient=effectiveSceneAmbient();
         sceneSettings.triggersEnabled=options_.previewTriggers;
         sceneSettings.grassEnabled=areaScene_.grass().settings().enabled;
@@ -4046,7 +4047,7 @@ void ModelCanvas::drawGridAndAxes() {
     glDisable(GL_TEXTURE_2D);
     glDisable(GL_CULL_FACE);
     const auto& bounds = activeBounds();
-    if (options_.grid) {
+    if (options_.grid.value_or(areaScene_.empty())) {
         const float extent = bounds.valid
             ? std::max(10.0f, maximumExtent(bounds) * 1.5f) : 10.0f;
         const float step = std::pow(10.0f, std::floor(std::log10(std::max(0.1f, extent / 10.0f))));
@@ -4061,7 +4062,7 @@ void ModelCanvas::drawGridAndAxes() {
         }
         glEnd();
     }
-    if (options_.axes) {
+    if (options_.axes.value_or(areaScene_.empty())) {
         const float length = bounds.valid
             ? std::max(1.0f, maximumExtent(bounds) * 0.35f) : 2.0f;
         glLineWidth(2.0f);
@@ -4157,7 +4158,7 @@ void ModelCanvas::configurePreviewLights(const std::vector<neomdl::model::Mat4>&
     lightScene_.beginSelectionFrame(pendingLightElapsed_);
     shadowScene_.setSceneFocus(worldPlaybackSettings_.sceneFocus);
     if(k2Lights_)shadowScene_.retainFocusContainer(lightScene_);
-    if(options_.engineShadows)shadowScene_.retainContainer(lightScene_);
+    if(options_.engineShadows.value_or(areaScene_.currentRoom().has_value()))shadowScene_.retainContainer(lightScene_);
     for (const auto& owner : ownerLightSpheres_)
         lightScene_.retainOwnerForFrame(owner.first);
     for(const auto owner:retainedReferenceOwners)
@@ -4188,7 +4189,7 @@ bool ModelCanvas::synchronizeEngineQueries() {
 
 bool ModelCanvas::drawEngineLensFlares() {
     const float elapsed=pendingFlareElapsed_;pendingFlareElapsed_=0;
-    if(!options_.engineLensFlares||!options_.previewLights||!document_||!pose_)return false;
+    if(!options_.engineLensFlares.value_or(!areaScene_.empty())||!options_.previewLights||!document_||!pose_)return false;
     const auto diagnostic=[this](const std::string& text) {
         if(!shaderErrorReported_) {
             wxLogWarning("NeoMDL engine lens flares: %s",wxString::FromUTF8(text.c_str()));
@@ -4240,7 +4241,7 @@ bool ModelCanvas::drawEngineLensFlares() {
 }
 
 void ModelCanvas::drawEngineShadows() {
-    if (!options_.engineShadows || !options_.previewLights || !document_ || !effectiveAreaShadows()) return;
+    if (!options_.engineShadows.value_or(areaScene_.currentRoom().has_value()) || !options_.previewLights || !document_ || !effectiveAreaShadows()) return;
     const auto diagnostic=[this](const std::string& message) {
         if (!shaderErrorReported_) {
             wxLogWarning("NeoMDL engine shadows: %s",wxString::FromUTF8(message.c_str()));
@@ -5314,7 +5315,7 @@ void ModelCanvas::queueLightsabers() {
         }
         const float eyeDepth=mesh.vertices.empty()?-0.0f:-((minimumZ+maximumZ)*0.5f);
         if (parameters.lighting) {
-            if (options_.headlight) {
+            if (options_.headlight.value_or(areaScene_.empty())) {
                 auto& light = parameters.lights[parameters.lightCount++];
                 light.id = std::numeric_limits<std::uint64_t>::max();
                 light.priority = std::numeric_limits<std::int32_t>::min();
@@ -5820,7 +5821,7 @@ void ModelCanvas::drawMesh(const neomdl::model::Mesh& mesh,
         eyeDepth=mesh.vertices.empty()?-0.0f:-((minimumZ+maximumZ)*0.5f);
     }
     if(options_.lighting) {
-        if(options_.headlight) {
+        if(options_.headlight.value_or(areaScene_.empty())) {
             auto& light=parameters.lights[parameters.lightCount++];
             light.id=std::numeric_limits<std::uint64_t>::max();light.priority=std::numeric_limits<std::int32_t>::min();
             // Scene-oriented preview key light; not an authored MDL light.

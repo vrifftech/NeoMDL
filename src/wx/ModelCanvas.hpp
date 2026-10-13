@@ -102,6 +102,7 @@ struct WorldPlaybackSettings {
     // module camera. This is independent of whether a player is bound.
     bool moduleCameraPresent{true};
     DoorFadeSettings doorFade;
+    bool cameraSceneFocus{true};
     model::Vec3 sceneFocus{};
     // UpdateWind's active-pause state comes from the retained engine clock.
     std::uint8_t creatureWindMode{1};
@@ -181,21 +182,21 @@ struct RenderOptions {
     bool lightmaps{true};
     bool wireframe{};
     bool lighting{true};
-    bool grid{true};
-    bool axes{true};
+    // Unset uses standalone-model or area-view defaults.
+    std::optional<bool> grid;
+    std::optional<bool> axes;
     bool showHidden{};
     bool cullBackfaces{true};
     bool danglySimulation{true};
-    bool nodeHelpers{true};
+    bool nodeHelpers{};
     bool previewLights{true};
     // Scene::RenderOnlyGobs with enablegetnearestlights enabled. This is an
     // alternate scene mode, not a different ranking for the normal buckets.
     bool nearestLightsOnlyGobs{};
-    // Opt-in engine pass. Scene focus supplies the retained engine light
-    // container and anchors; explicit inputs remain an inspection mode.
-    bool engineShadows{};
+    // Area shadows follow the current room; explicit inputs remain diagnostic.
+    std::optional<bool> engineShadows;
     bool engineTwoSidedShadows{};
-    bool engineLensFlares{}; // engine room collection/query
+    std::optional<bool> engineLensFlares; // enabled for area views
     bool engineSoftShadows{}; // explicit Desktop branch, not hardware auto-detection
     neomdl::render::EngineSoftShadowMode engineSoftShadowMode{neomdl::render::EngineSoftShadowMode::DesktopARB};
     neomdl::material::K2HardwareInputs engineHardware; // captured engine capability context
@@ -204,9 +205,10 @@ struct RenderOptions {
     // Gob's runtime radius is externally supplied, not the rendered mesh AABB.
     // Gob::Gob initializes +0x164 to 1; GetMinimumSphere is a separate operation.
     float objectLightRadius{1.0f};
-    bool headlight{true};
+    std::optional<bool> headlight;
     bool gobNewSorting{true}; // global switch, independent of Force Sight
     neomdl::render::ProcedureMipPath procedureMipPath{neomdl::render::ProcedureMipPath::SgiAutomatic};
+    bool fogEnabled{true};
     neomdl::model::FogSettings fog{};
     std::array<float,3> sceneAmbient{{0.25f,0.25f,0.25f}};
     bool useLoadedAreaEnvironment{true};
@@ -216,7 +218,7 @@ struct RenderOptions {
     bool shadowCasterRegionFromAreaCamera{};
     bool previewEmitters{true};
     neomdl::ParticleSceneSettings particleSettings;
-    bool showCameras{true};
+    bool showCameras{};
     CameraPreviewSettings cameraSettings;
     bool showReferences{true};
     bool previewLightsabers{true};

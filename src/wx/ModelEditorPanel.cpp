@@ -34,6 +34,7 @@
 #include <wx/filedlg.h>
 #include <wx/menu.h>
 #include <wx/msgdlg.h>
+#include <wx/notebook.h>
 #include <wx/panel.h>
 #include <wx/progdlg.h>
 #include <wx/slider.h>
@@ -83,15 +84,14 @@ enum CommandId {
     ID_Open = wxID_HIGHEST + 23600,
     ID_ExportAscii,
     ID_ExportPacked,
+    ID_ExportOptions,
+    ID_AdvancedSettings,
+    ID_ResetView,
     ID_LoadArea,
     ID_ModuleArea,
     ID_ResourceProvenance,
-    ID_SceneShadows,
-    ID_ShadowCasters,
     ID_ClearArea,
     ID_AreaRoom,
-    ID_AreaEnvironment,
-    ID_WorldPlayback,
     ID_AreaAnimation,
     ID_RoomScriptAnimation,
     ID_TrackAnimation,
@@ -100,7 +100,6 @@ enum CommandId {
     ID_AreaWeather,
     ID_SceneAudio,
     ID_LoadGrass,
-    ID_GrassOptions,
     ID_CloseModel,
     ID_CloseAll,
     ID_FrameModel,
@@ -118,14 +117,9 @@ enum CommandId {
     ID_DanglySimulation,
     ID_NodeHelpers,
     ID_PreviewLights,
-    ID_NearestLightsOnlyGobs,
     ID_EngineShadows,
-    ID_EngineTwoSidedShadows,
-    ID_EngineSoftShadows,
-    ID_EngineSoftShadowsATI,
     ID_EngineLensFlares,
     ID_ForceSight,
-    ID_InspectMeshProjections,
     ID_PreviewEmitters,
     ID_ShowCameras,
     ID_ViewSelectedCamera,
@@ -135,27 +129,13 @@ enum CommandId {
     ID_CameraSettings,
     ID_ShowReferences,
     ID_PreviewLightsabers,
-    ID_LightsaberSettings,
-    ID_K2SkinSettings,
-    ID_MotionBlurOwners,
-    ID_DirtyMaterial,
-    ID_DirtyArea,
-    ID_EngineExecution,
-    ID_EngineExecutionReport,
-    ID_OwnerVisualEffects,
-    ID_SceneEffects,
-    ID_VideoEffectRow,
-    ID_RuntimeTextureRotation,
     ID_PreviewAabbs,
     ID_PreviewTriggers,
-    ID_TriggerVisualState,
-    ID_TriggerMineRuntime,
     ID_CreatureAppearance,
     ID_CreatureLipSync,
     ID_About,
     ID_Exit,
     ID_DetonateEmitters,
-    ID_ParticleSettings,
 };
 
 class NodeItemData final : public wxTreeItemData {
@@ -1929,12 +1909,9 @@ private:
                 "This is not gameplay replay: scripts and actor animation states are not inferred."),0,wxALL,10);
             auto* partial=new wxCheckBox(&settings,wxID_ANY,"Allow unresolved visual objects (report every omission)");
             box->Add(partial,0,wxALL,10);
-            auto* grass=new wxCheckBox(&settings,wxID_ANY,"Load ARE grass");
-            const bool grassSupported=engineAreaRuntimeSupported(game);
-            grass->SetValue(grassSupported);grass->Enable(grassSupported);box->Add(grass,0,wxALL,10);
             box->Add(settings.CreateButtonSizer(wxOK|wxCANCEL),0,wxALL|wxALIGN_RIGHT,10);settings.SetSizerAndFit(box);
             if(settings.ShowModal()!=wxID_OK)return;
-            AreaLoadOptions options;options.game=game;options.allowPartialVisuals=partial->GetValue();options.loadGrass=grass->GetValue();
+            AreaLoadOptions options;options.game=game;options.allowPartialVisuals=partial->GetValue();
             const auto area=areas.at(std::size_t(chosen));
             const auto identity=scope->scopeIdentity()+"/area/"+area;
             // Create wx/GL ownership on the UI thread. The worker receives
@@ -2137,6 +2114,8 @@ private:
         root->Add(resetTime,0,wxALL,10);
         auto* fadeDoors=new wxCheckBox(&dialog,wxID_ANY,"Enable engine door fading");
         fadeDoors->SetValue(settings.doorFade.enabled);root->Add(fadeDoors,0,wxALL,10);
+        auto* cameraFocus=new wxCheckBox(&dialog,wxID_ANY,"Use viewer camera for scene focus outside engine player/camera replay");
+        cameraFocus->SetValue(settings.cameraSceneFocus);root->Add(cameraFocus,0,wxALL,10);
         auto* fadeGrid=new wxFlexGridSizer(2,6,10);fadeGrid->AddGrowableCol(1);
         const auto fadeNumber=[&](const char* label,float value) {
             fadeGrid->Add(new wxStaticText(&dialog,wxID_ANY,label),0,wxALIGN_CENTER_VERTICAL);
@@ -2148,6 +2127,12 @@ private:
             fadeNumber("Scene focus X",settings.sceneFocus.x),fadeNumber("Scene focus Y",settings.sceneFocus.y),
             fadeNumber("Scene focus Z",settings.sceneFocus.z)};
         root->Add(fadeGrid,0,wxEXPAND|wxALL,10);
+        const auto enableFocus=[&] {
+            for(std::size_t i=2;i<5;++i)fadeValues[i]->Enable(!cameraFocus->GetValue()&&!engineRoom->GetValue());
+        };
+        enableFocus();
+        cameraFocus->Bind(wxEVT_CHECKBOX,[&](wxCommandEvent&){enableFocus();});
+        engineRoom->Bind(wxEVT_CHECKBOX,[&](wxCommandEvent&){enableFocus();});
         root->Add(new wxStaticText(&dialog,wxID_ANY,
             "The bound player's position follows its live owner transform. Dialogue playback supplies its camera state.\n"
             "A missing player or room hit retains the current room. Manual and replay room overrides retain priority."),
@@ -2169,6 +2154,7 @@ private:
             *destinations[i]=static_cast<float>(value);
         }
         settings.doorFade.enabled=fadeDoors->GetValue();
+        settings.cameraSceneFocus=cameraFocus->GetValue();
         page->setWorldPlaybackSettings(std::move(settings));
         const auto command=pauseCommand->GetSelection();
         if(command!=0) {
@@ -3141,6 +3127,27 @@ private:
             openFile(neosettings::pathFromWx(dialog.GetPath()));
     }
 
+    void showExportOptions() {
+        wxDialog dialog(this,wxID_ANY,"Export Options");
+        auto* root=new wxBoxSizer(wxVERTICAL);
+        root->Add(new wxStaticText(&dialog,wxID_ANY,"ASCII mesh normals"),0,wxALL,10);
+        wxArrayString modes;
+        modes.Add("Automatic");modes.Add("Smoothing groups");
+        modes.Add("Explicit normals (NeoMDL extension)");
+        modes.Add("Smoothing groups (adjust position rounding)");
+        auto* choice=new wxChoice(&dialog,wxID_ANY,wxDefaultPosition,wxDefaultSize,modes);
+        choice->SetSelection(asciiNormalMode_);root->Add(choice,0,wxEXPAND|wxLEFT|wxRIGHT,10);
+        auto* note=new wxStaticText(&dialog,wxID_ANY,
+            "Automatic uses smoothing groups for binary models and preserves existing ASCII mesh modes.\n\n"
+            "Explicit normals preserve current normals and may need recalculation after geometry edits.\n"
+            "Adjust position rounding allows selected coordinates to move by one float step to improve shading.\n\n"
+            "These options apply to subsequent exports in this session. Packed exports use the document's game version.");
+        note->Wrap(dialog.FromDIP(560));root->Add(note,0,wxALL,10);
+        root->Add(dialog.CreateButtonSizer(wxOK|wxCANCEL),0,wxEXPAND|wxALL,10);
+        dialog.SetSizerAndFit(root);
+        if(dialog.ShowModal()==wxID_OK)asciiNormalMode_=choice->GetSelection();
+    }
+
     void exportAsciiModel() {
         auto* page=activePage();
         if(!page || !page->document().hasModelOwner()) return;
@@ -3153,21 +3160,10 @@ private:
             wxui::toWx(filename),"ASCII models (*.mdl)|*.mdl|All files (*.*)|*.*",
             wxFD_SAVE|wxFD_OVERWRITE_PROMPT);
         if(file.ShowModal()!=wxID_OK) return;
-        wxArrayString normalModes;
-        normalModes.Add("Keep current mesh modes");normalModes.Add("Smoothing groups");
-        normalModes.Add("Explicit normals (NeoMDL extension)");
-        normalModes.Add("Smoothing groups (adjust position rounding)");
-        wxSingleChoiceDialog normalChoice(this,
-            "Smoothing groups calculate normals from geometry.\n"
-            "Explicit normals preserve current normals and may need recalculation after geometry edits.\n"
-            "Adjust position rounding allows selected source coordinates to move by one float step to improve normals and tangents.",
-            "ASCII mesh normals",normalModes);
-        normalChoice.SetSelection(0);
-        if(normalChoice.ShowModal()!=wxID_OK) return;
         model::AsciiExportOptions options;
-        if(normalChoice.GetSelection()!=0)options.explicitNormals=normalChoice.GetSelection()==2;
-        options.refineTangentRounding=normalChoice.GetSelection()==3;
-        options.refineNormalRounding=normalChoice.GetSelection()==3;
+        if(asciiNormalMode_!=0 || !document.model().asciiBuilt)options.explicitNormals=asciiNormalMode_==2;
+        options.refineTangentRounding=asciiNormalMode_==3;
+        options.refineNormalRounding=asciiNormalMode_==3;
         try {
             const auto output=neosettings::pathFromWx(file.GetPath());
             neoshared::checkResourceOutput(output,protectedInputs);
@@ -3286,7 +3282,6 @@ private:
     }
 
     void applyOptions() {
-        if(options_.fog.mode!=neomdl::model::FogMode::Disabled) lastFogMode_=options_.fog.mode;
         for (std::size_t index = 0; index < tabs_->GetPageCount(); ++index) {
             pageAt(index)->setOptions(options_);
             pageAt(index)->refreshDetails();
@@ -3299,18 +3294,6 @@ private:
         fileMenu_ = new wxMenu;
         auto* file = fileMenu_;
         file->Append(ID_Open, "&Open Model...\tCtrl+O");
-        file->Append(ID_ExportAscii, "Export &ASCII MDL...");
-        file->Append(ID_ExportPacked, "Export &packed MDL/MDX...");
-        file->Append(ID_LoadArea, "Load Area Layout...");
-        file->Append(ID_ModuleArea, "Load Module Area...");
-        file->Append(ID_ResourceProvenance, "Resource Scope and Load Report...");
-        file->Append(ID_ClearArea, "Clear Area Context");
-        file->Append(ID_AreaRoom, "Select Current Area Room...");
-        file->Append(ID_AreaEnvironment, "Area Environment / Camera Replay...");
-        file->Append(ID_WorldPlayback, "World Playback...");
-        file->Append(ID_AreaWeather, "Engine Area Weather...");
-        file->Append(ID_SceneAudio, "Scene Audio...");
-        file->Append(ID_LoadGrass, "Load Area Grass from ARE...");
         gameDirectoryMenu_ = neogames::appendOpenGameDirectoryMenu(
             *this, *file,
             [this](const neogames::SavedGameDirectory& directory) {
@@ -3318,6 +3301,12 @@ private:
             },
             neogames::GameDirectoryGameIds{"kotor", "kotor2"},
             "Open Model from Saved &Directory");
+        file->Append(ID_LoadArea, "Load Area Layout...");
+        file->Append(ID_ModuleArea, "Load Module Area...");
+        file->AppendSeparator();
+        file->Append(ID_ExportAscii, "Export &ASCII MDL...");
+        file->Append(ID_ExportPacked, "Export &Packed MDL/MDX...");
+        file->Append(ID_ExportOptions, "Export Options...");
         file->AppendSeparator();
         file->Append(ID_CloseModel, "&Close Model\tCtrl+W");
         file->Append(ID_CloseAll, "Close &All");
@@ -3328,91 +3317,172 @@ private:
         viewMenu_ = new wxMenu;
         auto* view = viewMenu_;
         view->Append(ID_FrameModel, "&Frame Model\tF");
+        auto* camera = new wxMenu;
+        camera->Append(ID_ViewSelectedCamera, "View Through Selected Camera");
+        camera->Append(ID_ViewCameraHook, "Attach to Camera Hook");
+        camera->Append(ID_ViewAreaCamera, "View Through Area Camera...");
+        camera->Append(ID_OrbitCamera, "Return to Orbit Camera");
+        camera->AppendSeparator();
+        camera->Append(ID_CameraSettings, "Projection Settings...");
+        view->AppendSubMenu(camera, "&Camera");
         view->AppendSeparator();
         view->AppendCheckItem(ID_Textures, "Show &Textures");
         view->AppendCheckItem(ID_Lightmaps, "Show &Lightmaps");
         view->AppendCheckItem(ID_Wireframe, "&Wireframe");
+        view->AppendCheckItem(ID_CullBackfaces, "Cull &Backfaces");
         view->AppendCheckItem(ID_Lighting, "&Lighting");
         view->AppendCheckItem(ID_Headlight, "Preview Key Light");
         view->AppendCheckItem(ID_PreviewLights, "Authored Model Lights");
-        view->AppendCheckItem(ID_NearestLightsOnlyGobs, "K2 Nearest-Light Gob-Only Mode",
-            "Engine roomless alternate mode: registration-order 3D light queries; ignored while area context is loaded");
-        view->AppendCheckItem(ID_EngineShadows, "Engine CPU Shadows (Scene Owners)",
-            "K2 CPU rigid/dangly shadow stage; requires an area current room; optional Desktop soft composition; skin/direct branches draw nothing");
-        view->AppendCheckItem(ID_EngineTwoSidedShadows, "Desktop Two-Sided Shadow Stencil",
-            "Use the recovered Desktop depth-pass/wrapping branch, not the default depth-fail two-draw branch");
-        view->AppendCheckItem(ID_EngineSoftShadows, "Desktop Engine Soft Shadows (ARB)",
-                              "Use the recovered 512-pixel ARB image-space shadow path; requires framebuffer objects and rectangle textures.");
-        view->AppendCheckItem(ID_EngineSoftShadowsATI, "Desktop Engine Soft Shadows (ATI Compatibility)",
-                              "Replay the supplied non-ARB path, including its incomplete pbuffer textures; this is not the ARB filter.");
-        view->AppendCheckItem(ID_EngineLensFlares, "Engine Lens Flares",
-            "Use collected room lights and engine scene hit queries");
-        view->AppendCheckItem(ID_ForceSight, "KOTOR II Force Sight",
-            "Engine Force Sight materials, owner traversal, grass and flares");
-        view->AppendCheckItem(ID_InspectMeshProjections, "Inspect Engine Mesh Projection Volumes",
-            "Inspector wireframe: explicit visible-room sources through DoDynamicMeshProjections; not a engine scene-stage insertion");
-        view->AppendCheckItem(ID_Fog, "Scene Fog");
+        view->AppendCheckItem(ID_EngineShadows, "Area Shadows");
+        view->AppendCheckItem(ID_EngineLensFlares, "Area Lens Flares");
+        view->AppendCheckItem(ID_Fog, "Show Fog");
         view->Append(ID_LightingSettings, "Lighting and Fog Settings...");
-        auto* camera = new wxMenu;
-        camera->Append(ID_ViewSelectedCamera, "View Through Selected Camera");
-        camera->Append(ID_ViewCameraHook, "Attach to Engine \"camerahook\"");
-        camera->Append(ID_ViewAreaCamera, "View Through GIT Placeable Camera...");
-        camera->Append(ID_OrbitCamera, "Return to Orbit Camera");
-        camera->AppendSeparator();
-        camera->Append(ID_CameraSettings, "Projection Settings...");
-        view->AppendSubMenu(camera, "Authored &Camera");
+        view->AppendSeparator();
+        view->AppendCheckItem(ID_ShowReferences, "Referenced Models");
+        view->AppendCheckItem(ID_PreviewEmitters, "Particles");
+        view->AppendCheckItem(ID_PreviewLightsabers, "Lightsabers");
+        view->AppendCheckItem(ID_DanglySimulation, "Simulate &Dangly Meshes");
+        view->AppendSeparator();
         view->AppendCheckItem(ID_Grid, "Show &Grid");
         view->AppendCheckItem(ID_Axes, "Show &Axes");
-        view->AppendCheckItem(ID_ShowHidden, "Show Meshes with Render Flag Off");
-        view->AppendCheckItem(ID_CullBackfaces, "Cull &Backfaces");
+        auto* inspection = new wxMenu;
+        inspection->AppendCheckItem(ID_ShowHidden, "Show Meshes with Render Flag Off");
+        inspection->AppendCheckItem(ID_NodeHelpers, "Node Helpers");
+        inspection->AppendCheckItem(ID_ShowCameras, "Camera Markers");
+        inspection->AppendCheckItem(ID_PreviewAabbs, "Collision Geometry");
+        inspection->AppendCheckItem(ID_PreviewTriggers, "Trigger Volumes");
+        inspection->AppendCheckItem(ID_ForceSight, "KOTOR II Force Sight");
+        view->AppendSubMenu(inspection, "&Inspection");
         view->AppendSeparator();
-        view->AppendCheckItem(ID_DanglySimulation, "Simulate &Dangly Meshes");
-        view->AppendCheckItem(ID_NodeHelpers, "Show Node &Helpers");
-        auto* previews = new wxMenu;
-        previews->AppendCheckItem(ID_PreviewEmitters, "Textured particles");
-        previews->Append(ID_DetonateEmitters, "Detonate explosion emitters");
-        previews->Append(ID_ParticleSettings, "Particle Scene Settings...");
-        previews->AppendCheckItem(ID_ShowCameras, "Cameras");
-        previews->AppendCheckItem(ID_ShowReferences, "Referenced Models");
-        previews->AppendCheckItem(ID_PreviewLightsabers, "Lightsabers");
-        previews->Append(ID_LightsaberSettings, "Lightsaber Render Settings...");
-        previews->Append(ID_MotionBlurOwners, "Engine Motion-blur Owners...");
-        previews->Append(ID_K2SkinSettings, "Manual Skin Blur Diagnostic...");
-        previews->Append(ID_DirtyMaterial, "Legacy Desktop Dirty Caller (Diagnostic)...");
-        previews->Append(ID_DirtyArea, "Dirty Area Inputs...");
-        previews->Append(ID_EngineExecution, "Procedural Upload Settings...");
-        previews->Append(ID_EngineExecutionReport, "Save Engine Execution Report...");
-        previews->Append(ID_OwnerVisualEffects, "Owner Visual Effects...");
-        previews->Append(ID_SceneEffects, "Engine Scene Effects...");
-        previews->Append(ID_VideoEffectRow, "Engine Video Effect Row...");
-        previews->Append(ID_AreaAnimation, "Area Object Animation...");
-        previews->Append(ID_RoomScriptAnimation, "Room Script Animation...");
-        previews->Append(ID_TrackAnimation, "Track Follower Animation...");
-        previews->Append(ID_DoorState, "Door OpenState...");
-        previews->Append(ID_CreatureAppearance, "Creature Appearance...");
-        previews->Append(ID_CreatureLipSync, "Creature Lip Sync...");
-        previews->Append(ID_DialoguePlayback, "Dialogue Playback...");
-        previews->Append(ID_SceneShadows, "Scene Shadow Inputs...");
-        previews->Append(ID_ShadowCasters, "Scene Shadow Casters...");
-        previews->Append(ID_GrassOptions, "Engine Triangle-bin Grass...");
-        previews->Append(ID_RuntimeTextureRotation, "Runtime Texture Rotation...");
-        previews->AppendCheckItem(ID_PreviewAabbs, "Engine AABB Collision Geometry");
-        previews->AppendCheckItem(ID_PreviewTriggers, "Engine Runtime Trigger Volumes");
-        previews->Append(ID_TriggerVisualState, "GIT Trigger Visual State...");
-        previews->Append(ID_TriggerMineRuntime, "Trap Runtime...");
-        view->AppendSubMenu(previews, "Node &Previews");
+        view->Append(ID_ResetView, "Reset View Settings");
         bar->Append(view, "&View");
 
+        auto* scene = new wxMenu;
+        scene->Append(ID_AreaRoom, "Current Area Room...");
+        scene->Append(ID_ClearArea, "Clear Area Context");
+        scene->Append(ID_LoadGrass, "Load Grass from ARE...");
+        scene->AppendSeparator();
+        auto* animation = new wxMenu;
+        animation->Append(ID_AreaAnimation, "Area Object Animation...");
+        animation->Append(ID_RoomScriptAnimation, "Room Animation...");
+        animation->Append(ID_TrackAnimation, "Track Follower Animation...");
+        animation->Append(ID_DoorState, "Door State...");
+        scene->AppendSubMenu(animation, "&Animation");
+        scene->Append(ID_CreatureAppearance, "Creature Appearance...");
+        scene->Append(ID_CreatureLipSync, "Creature Lip Sync...");
+        scene->Append(ID_DialoguePlayback, "Dialogue Playback...");
+        scene->AppendSeparator();
+        scene->Append(ID_SceneAudio, "Scene Audio...");
+        scene->Append(ID_AreaWeather, "Area Weather...");
+        scene->Append(ID_DetonateEmitters, "Detonate Explosion Emitters");
+        bar->Append(scene, "&Scene");
+
+        auto* tools = new wxMenu;
+        tools->Append(ID_ResourceProvenance, "Resource Scope and Load Report...");
+        tools->Append(ID_AdvancedSettings, "Advanced / Diagnostics...");
+        bar->Append(tools, "&Tools");
+
         helpMenu_ = new wxMenu;
-        auto* help = helpMenu_;
-        help->Append(ID_About, "&About NeoMDL");
-        bar->Append(help, "&Help");
+        helpMenu_->Append(ID_About, "&About NeoMDL");
+        bar->Append(helpMenu_, "&Help");
         setModuleMenus(bar);
         updateMenuChecks();
     }
 
+    void showAdvancedSettings() {
+        const auto* active=activePage();
+        const bool area=!active->areaScene().empty();
+        const bool k2=active->document().model().game==model::GameVersion::Kotor2;
+        wxDialog dialog(this,wxID_ANY,"Advanced / Diagnostics",wxDefaultPosition,wxDefaultSize,
+                        wxDEFAULT_DIALOG_STYLE|wxRESIZE_BORDER);
+        auto* root=new wxBoxSizer(wxVERTICAL);
+        root->Add(new wxStaticText(&dialog,wxID_ANY,
+            "Inspect rendering and replay captured runtime state. Changes affect the preview."),0,wxALL,10);
+        auto* notebook=new wxNotebook(&dialog,wxID_ANY);
+        const auto tab=[&](const char* title) {
+            auto* panel=new wxPanel(notebook);
+            panel->SetSizer(new wxBoxSizer(wxVERTICAL));
+            notebook->AddPage(panel,title);
+            return panel;
+        };
+        const auto action=[&](wxPanel* panel,const char* label,
+                              void (ModelEditorPanelImpl::*handler)(),bool enabled=true) {
+            auto* button=new wxButton(panel,wxID_ANY,label);
+            button->Enable(enabled);
+            button->Bind(wxEVT_BUTTON,[this,handler](wxCommandEvent&) {
+                (this->*handler)();updateState();
+            });
+            panel->GetSizer()->Add(button,0,wxEXPAND|wxALL,5);
+        };
+        const auto toggle=[&](wxPanel* panel,const char* label,bool RenderOptions::*member,bool enabled=true) {
+            auto* control=new wxCheckBox(panel,wxID_ANY,label);
+            control->SetValue(options_.*member);control->Enable(enabled);
+            control->Bind(wxEVT_CHECKBOX,[this,member](wxCommandEvent& event) {
+                options_.*member=event.IsChecked();applyOptions();
+            });
+            panel->GetSizer()->Add(control,0,wxALL,8);
+        };
+        auto* rendering=tab("Rendering");
+        toggle(rendering,"K2 nearest-light object-only mode",&RenderOptions::nearestLightsOnlyGobs,k2&&!area);
+        toggle(rendering,"Two-sided shadow stencil",&RenderOptions::engineTwoSidedShadows);
+        rendering->GetSizer()->Add(new wxStaticText(rendering,wxID_ANY,"Shadow rendering"),0,wxLEFT|wxTOP,8);
+        wxArrayString shadows;
+        shadows.Add("Hard shadows");shadows.Add("Soft shadows (ARB)");shadows.Add("Soft shadows (ATI compatibility)");
+        auto* shadow=new wxChoice(rendering,wxID_ANY,wxDefaultPosition,wxDefaultSize,shadows);
+        shadow->SetSelection(!options_.engineSoftShadows?0:
+            options_.engineSoftShadowMode==render::EngineSoftShadowMode::DesktopARB?1:2);
+        shadow->Bind(wxEVT_CHOICE,[this,shadow](wxCommandEvent&) {
+            options_.engineSoftShadows=shadow->GetSelection()!=0;
+            options_.engineSoftShadowMode=shadow->GetSelection()==2
+                ?render::EngineSoftShadowMode::DesktopATI:render::EngineSoftShadowMode::DesktopARB;
+            applyOptions();
+        });
+        rendering->GetSizer()->Add(shadow,0,wxEXPAND|wxALL,8);
+        toggle(rendering,"Inspect mesh projection volumes",&RenderOptions::inspectMeshProjections,k2&&area);
+        rendering->GetSizer()->Add(new wxStaticText(rendering,wxID_ANY,"Object light-query radius"),0,wxLEFT|wxTOP,8);
+        auto* radius=new wxSpinCtrlDouble(rendering,wxID_ANY,wxEmptyString,wxDefaultPosition,wxDefaultSize,
+            wxSP_ARROW_KEYS,0,1000000,options_.objectLightRadius,0.1);
+        radius->SetDigits(4);
+        radius->SetToolTip("External Gob +0x164 state. The engine constructor initializes it to 1; this is not the mesh AABB radius.");
+        radius->Bind(wxEVT_SPINCTRLDOUBLE,[this](wxSpinDoubleEvent& event) {
+            options_.objectLightRadius=static_cast<float>(event.GetValue());applyOptions();
+        });
+        rendering->GetSizer()->Add(radius,0,wxEXPAND|wxALL,8);
+        action(rendering,"Lightsaber Rendering...",&ModelEditorPanelImpl::showLightsaberSettings);
+        action(rendering,"Particle Settings...",&ModelEditorPanelImpl::showParticleSettings);
+        action(rendering,"Graphics and Texture Uploads...",&ModelEditorPanelImpl::showEngineExecution);
+        action(rendering,"Manual Skin Blur...",&ModelEditorPanelImpl::showK2SkinSettings);
+
+        auto* scene=tab("Scene");
+        action(scene,"World Playback...",&ModelEditorPanelImpl::chooseWorldPlayback);
+        action(scene,"Area Environment / Camera Replay...",&ModelEditorPanelImpl::chooseAreaEnvironment,area);
+        action(scene,"Shadow Inputs...",&ModelEditorPanelImpl::chooseSceneShadows);
+        action(scene,"Shadow Casters...",&ModelEditorPanelImpl::chooseShadowCasters);
+        action(scene,"Grass Settings...",&ModelEditorPanelImpl::chooseGrassOptions,area);
+        action(scene,"Motion-blur Owners...",&ModelEditorPanelImpl::showMotionBlurOwners);
+        action(scene,"Owner Visual Effects...",&ModelEditorPanelImpl::showOwnerVisualEffects);
+        action(scene,"Scene Effects...",&ModelEditorPanelImpl::showSceneEffects);
+        action(scene,"Video Effect Row...",&ModelEditorPanelImpl::showVideoEffectRow);
+        action(scene,"Texture Rotation...",&ModelEditorPanelImpl::showRuntimeTextureRotation);
+
+        auto* diagnostics=tab("Diagnostics");
+        action(diagnostics,"Legacy Dirty Material...",&ModelEditorPanelImpl::showDirtyMaterial,k2);
+        action(diagnostics,"Dirty Area Inputs...",&ModelEditorPanelImpl::showDirtyArea,k2);
+        action(diagnostics,"Trigger Highlight State...",&ModelEditorPanelImpl::showTriggerVisualState,
+            std::any_of(active->triggerScene().records().begin(),active->triggerScene().records().end(),
+                [](const auto& record){return record.source==RuntimeTriggerSource::AreaGit;}));
+        action(diagnostics,"Trap Runtime...",&ModelEditorPanelImpl::showTriggerMineRuntime,area);
+        action(diagnostics,"Save Engine Execution Report...",&ModelEditorPanelImpl::saveEngineExecutionReport);
+        root->Add(notebook,1,wxEXPAND|wxLEFT|wxRIGHT,10);
+        root->Add(new wxButton(&dialog,wxID_OK,"Close"),0,wxALIGN_RIGHT|wxALL,10);
+        dialog.SetSizerAndFit(root);
+        dialog.ShowModal();
+    }
+
     void updateMenuChecks() {
         if (!viewMenu_) return;
+        const auto* active=activePage();
+        const bool standalone=!active || active->areaScene().empty();
         const auto setCheck = [this](int id, bool checked) {
             if (auto* item = viewMenu_->FindItem(id)) item->Check(checked);
         };
@@ -3420,25 +3490,18 @@ private:
         setCheck(ID_Lightmaps, options_.lightmaps);
         setCheck(ID_Wireframe, options_.wireframe);
         setCheck(ID_Lighting, options_.lighting);
-        setCheck(ID_Headlight, options_.headlight);
-        setCheck(ID_Fog, options_.fog.mode!=neomdl::model::FogMode::Disabled);
-        setCheck(ID_Grid, options_.grid);
-        setCheck(ID_Axes, options_.axes);
+        setCheck(ID_Headlight, options_.headlight.value_or(standalone));
+        setCheck(ID_Fog, options_.fogEnabled);
+        setCheck(ID_Grid, options_.grid.value_or(standalone));
+        setCheck(ID_Axes, options_.axes.value_or(standalone));
         setCheck(ID_ShowHidden, options_.showHidden);
         setCheck(ID_CullBackfaces, options_.cullBackfaces);
         setCheck(ID_DanglySimulation, options_.danglySimulation);
         setCheck(ID_NodeHelpers, options_.nodeHelpers);
         setCheck(ID_PreviewLights, options_.previewLights);
-        setCheck(ID_NearestLightsOnlyGobs, options_.nearestLightsOnlyGobs);
-        setCheck(ID_EngineShadows, options_.engineShadows);
-        setCheck(ID_EngineTwoSidedShadows, options_.engineTwoSidedShadows);
-        setCheck(ID_EngineSoftShadows, options_.engineSoftShadows &&
-            options_.engineSoftShadowMode==render::EngineSoftShadowMode::DesktopARB);
-        setCheck(ID_EngineSoftShadowsATI, options_.engineSoftShadows &&
-            options_.engineSoftShadowMode==render::EngineSoftShadowMode::DesktopATI);
-        setCheck(ID_EngineLensFlares, options_.engineLensFlares);
+        setCheck(ID_EngineShadows, options_.engineShadows.value_or(active && active->areaScene().currentRoom().has_value()));
+        setCheck(ID_EngineLensFlares, options_.engineLensFlares.value_or(!standalone));
         setCheck(ID_ForceSight, activePage()&&activePage()->sceneEffects().forceSight);
-        setCheck(ID_InspectMeshProjections, options_.inspectMeshProjections);
         setCheck(ID_PreviewEmitters, options_.previewEmitters);
         setCheck(ID_ShowCameras, options_.showCameras);
         setCheck(ID_ShowReferences, options_.showReferences);
@@ -4608,9 +4671,6 @@ private:
             auto* control=new wxSpinCtrlDouble(&dialog,wxID_ANY,wxEmptyString,wxDefaultPosition,wxDefaultSize,
                 wxSP_ARROW_KEYS,min,max,value,increment);control->SetDigits(4);return control;
         };
-        auto* ownerRadius=number(options_.objectLightRadius,0,1000000,0.1);
-        add("Gob light-query radius",ownerRadius);
-        ownerRadius->SetToolTip("External Gob +0x164 state. The engine constructor initializes it to 1; this is not the mesh AABB radius.");
         auto* start=number(options_.fog.start,0,1000000,1);add("Linear fog start",start);
         auto* end=number(options_.fog.end,0.001,1000001,1);add("Linear fog end",end);
         auto* density=number(options_.fog.density,0,1000,0.005);add("Exponential density",density);
@@ -4629,7 +4689,6 @@ private:
                 wxMessageBox("Fog values must be finite and nonnegative.","Invalid fog",wxOK|wxICON_WARNING,&dialog);
                 continue;
             }
-            options_.objectLightRadius=static_cast<float>(ownerRadius->GetValue());
             options_.fog=fog;const auto a=ambient->GetColour();
             options_.sceneAmbient={{a.Red()/255.0f,a.Green()/255.0f,a.Blue()/255.0f}};
             applyOptions();break;
@@ -4653,15 +4712,14 @@ private:
             case ID_Open: chooseAndOpenModel(); return;
             case ID_ExportAscii: exportAsciiModel(); return;
             case ID_ExportPacked: exportPackedModel(); return;
+            case ID_ExportOptions: showExportOptions(); return;
+            case ID_AdvancedSettings: showAdvancedSettings(); return;
+            case ID_ResetView: options_=RenderOptions{};applyOptions();return;
             case ID_LoadArea: chooseArea(); return;
             case ID_ModuleArea: chooseModuleArea(); return;
             case ID_ResourceProvenance: showResourceProvenance(); return;
-            case ID_SceneShadows: chooseSceneShadows(); return;
-            case ID_ShadowCasters: chooseShadowCasters(); return;
             case ID_ClearArea: if (auto* page=activePage()) page->clearArea(); return;
             case ID_AreaRoom: chooseAreaRoom(); return;
-            case ID_AreaEnvironment: chooseAreaEnvironment(); return;
-            case ID_WorldPlayback: chooseWorldPlayback(); return;
             case ID_AreaWeather: showAreaWeather(); return;
             case ID_SceneAudio: showSceneAudio(); return;
             case ID_AreaAnimation: chooseAreaAnimation(); return;
@@ -4669,7 +4727,6 @@ private:
             case ID_TrackAnimation: chooseTrackAnimation(); return;
             case ID_DoorState: chooseDoorState(); return;
             case ID_LoadGrass: chooseGrassArea(); return;
-            case ID_GrassOptions: chooseGrassOptions(); return;
             case ID_CloseModel: closePage(tabs_->GetSelection()); return;
             case ID_CloseAll: closeAll(); return;
             case ID_FrameModel: if (auto* page = activePage()) page->frameModel(); return;
@@ -4679,7 +4736,7 @@ private:
             case ID_Lighting: options_.lighting = event.IsChecked(); applyOptions(); return;
             case ID_Headlight: options_.headlight=event.IsChecked();applyOptions();return;
             case ID_Fog:
-                options_.fog.mode=event.IsChecked() ? lastFogMode_ : neomdl::model::FogMode::Disabled;
+                options_.fogEnabled=event.IsChecked();
                 applyOptions();return;
             case ID_LightingSettings: showLightingSettings();return;
             case ID_Grid: options_.grid = event.IsChecked(); applyOptions(); return;
@@ -4692,8 +4749,6 @@ private:
                 options_.nodeHelpers = event.IsChecked(); applyOptions(); return;
             case ID_EngineShadows:
                 options_.engineShadows = event.IsChecked(); applyOptions(); return;
-            case ID_EngineTwoSidedShadows:
-                options_.engineTwoSidedShadows = event.IsChecked(); applyOptions(); return;
             case ID_EngineLensFlares:
                 options_.engineLensFlares = event.IsChecked(); applyOptions(); return;
             case ID_ForceSight: {
@@ -4704,19 +4759,8 @@ private:
                 }
                 updateState();return;
             }
-            case ID_EngineSoftShadows:
-                options_.engineSoftShadows = event.IsChecked();
-                options_.engineSoftShadowMode=render::EngineSoftShadowMode::DesktopARB;applyOptions();return;
-            case ID_EngineSoftShadowsATI:
-                options_.engineSoftShadows = event.IsChecked();
-                options_.engineSoftShadowMode=render::EngineSoftShadowMode::DesktopATI;applyOptions();return;
-            case ID_InspectMeshProjections:
-                options_.inspectMeshProjections = event.IsChecked(); applyOptions(); return;
-            case ID_NearestLightsOnlyGobs:
-                options_.nearestLightsOnlyGobs = event.IsChecked(); applyOptions(); return;
             case ID_PreviewLights:
                 options_.previewLights = event.IsChecked(); applyOptions(); return;
-            case ID_ParticleSettings: showParticleSettings();return;
             case ID_DetonateEmitters: if(auto* page=activePage()) page->detonateEmitters();return;
             case ID_PreviewEmitters:
                 options_.previewEmitters = event.IsChecked(); applyOptions(); return;
@@ -4750,23 +4794,10 @@ private:
                 options_.showReferences = event.IsChecked(); applyOptions(); return;
             case ID_PreviewLightsabers:
                 options_.previewLightsabers = event.IsChecked(); applyOptions(); return;
-            case ID_LightsaberSettings: showLightsaberSettings(); return;
-            case ID_MotionBlurOwners: showMotionBlurOwners(); return;
-            case ID_DirtyMaterial: showDirtyMaterial(); return;
-            case ID_DirtyArea: showDirtyArea(); return;
-            case ID_EngineExecution: showEngineExecution(); return;
-            case ID_EngineExecutionReport: saveEngineExecutionReport(); return;
-            case ID_K2SkinSettings: showK2SkinSettings(); return;
-            case ID_OwnerVisualEffects: showOwnerVisualEffects(); return;
-            case ID_SceneEffects: showSceneEffects(); return;
-            case ID_VideoEffectRow: showVideoEffectRow(); return;
-            case ID_RuntimeTextureRotation: showRuntimeTextureRotation(); return;
             case ID_PreviewAabbs:
                 options_.previewAabbs = event.IsChecked(); applyOptions(); return;
             case ID_PreviewTriggers:
                 options_.previewTriggers = event.IsChecked(); applyOptions(); return;
-            case ID_TriggerVisualState: showTriggerVisualState(); return;
-            case ID_TriggerMineRuntime: showTriggerMineRuntime(); return;
             case ID_CreatureAppearance: showCreatureAppearance(); return;
             case ID_CreatureLipSync: showCreatureLipSync(); return;
             case ID_DialoguePlayback: showDialoguePlayback(); return;
@@ -4790,11 +4821,10 @@ private:
         enableModuleCommand(ID_ExportPacked,activePage()&&activePage()->document().hasModelOwner()&&
             activePage()->document().model().asciiBuilt);
         enableModuleCommand(ID_ResourceProvenance,hasDocument);
-        enableModuleCommand(ID_SceneShadows,hasDocument);
-        enableModuleCommand(ID_ShadowCasters,hasDocument);
+        enableModuleCommand(ID_LoadArea,hasDocument&&engineAreaRuntimeSupported(activePage()->document().model().game));
+        enableModuleCommand(ID_ClearArea,hasDocument&&!activePage()->areaScene().empty());
+        enableModuleCommand(ID_AreaAnimation,hasDocument&&!activePage()->areaScene().objects().empty());
         enableModuleCommand(ID_AreaRoom,activePage()&&!activePage()->areaScene().empty());
-        enableModuleCommand(ID_AreaEnvironment,activePage()&&!activePage()->areaScene().empty());
-        enableModuleCommand(ID_WorldPlayback,hasDocument);
         enableModuleCommand(ID_SceneAudio,activePage()&&!activePage()->areaScene().empty());
         enableModuleCommand(ID_RoomScriptAnimation,activePage()&&!activePage()->areaScene().rooms().empty());
         enableModuleCommand(ID_TrackAnimation,activePage()&&std::any_of(activePage()->areaScene().objects().begin(),
@@ -4805,12 +4835,10 @@ private:
         enableModuleCommand(ID_CloseAll, tabs_->GetPageCount() != 0u);
         enableModuleCommand(ID_FrameModel, hasDocument);
         enableModuleCommand(ID_DetonateEmitters, hasDocument && options_.previewEmitters);
-        enableModuleCommand(ID_LightsaberSettings, hasDocument);
         const auto* active = activePage();
         const bool grassArea=active&&!active->areaScene().empty()&&
             engineAreaRuntimeSupported(active->areaScene().game());
         enableModuleCommand(ID_LoadGrass,grassArea);
-        enableModuleCommand(ID_GrassOptions,grassArea);
         const bool engineScene=active &&
             !model::engineSceneStageOrder(active->document().model().game).empty();
         enableModuleCommand(ID_DoorState,active&&std::any_of(active->areaScene().objects().begin(),
@@ -4820,25 +4848,16 @@ private:
                 [](const auto& placement){return placement.creatureState&&placement.runtimeInstance;});
         enableModuleCommand(ID_CreatureAppearance,hasLoadedCreature);
         enableModuleCommand(ID_DialoguePlayback,engineScene);
+        enableModuleCommand(ID_AdvancedSettings,engineScene);
+        enableModuleCommand(ID_EngineShadows,active&&active->areaScene().currentRoom().has_value());
+        enableModuleCommand(ID_EngineLensFlares,active&&!active->areaScene().empty());
         enableModuleCommand(ID_CreatureLipSync,engineScene&&
             (active->document().hasModelOwner()||hasLoadedCreature));
-        enableModuleCommand(ID_RuntimeTextureRotation,engineScene);
-        enableModuleCommand(ID_SceneEffects,engineScene);
         enableModuleCommand(ID_ForceSight,active&&active->document().model().game==model::GameVersion::Kotor2);
-        enableModuleCommand(ID_VideoEffectRow,active!=nullptr);
-        enableModuleCommand(ID_MotionBlurOwners,engineScene);
-        enableModuleCommand(ID_DirtyMaterial,active&&active->document().model().game==model::GameVersion::Kotor2);
-        enableModuleCommand(ID_DirtyArea,active&&active->document().model().game==model::GameVersion::Kotor2);
-        enableModuleCommand(ID_EngineExecution,engineScene);
-        enableModuleCommand(ID_EngineExecutionReport,active!=nullptr);
-        enableModuleCommand(ID_OwnerVisualEffects,engineScene);
-        enableModuleCommand(ID_K2SkinSettings,engineScene);
         enableModuleCommand(ID_ViewSelectedCamera,
                             active && active->canViewThroughSelectedCamera());
         enableModuleCommand(ID_ViewCameraHook, active && active->hasCameraHook());
         enableModuleCommand(ID_ViewAreaCamera,active&&!active->cameraScene().areaCameras().empty());
-        enableModuleCommand(ID_TriggerVisualState,active&&std::any_of(active->triggerScene().records().begin(),active->triggerScene().records().end(),[](const auto& record){return record.source==RuntimeTriggerSource::AreaGit;}));
-        enableModuleCommand(ID_TriggerMineRuntime,active&&!active->areaScene().empty());
         enableModuleCommand(ID_OrbitCamera, active && active->authoredCameraActive());
         enableModuleCommand(ID_CameraSettings,active&&active->cameraScene().engineRuntime());
         updateMenuChecks();
@@ -4863,7 +4882,7 @@ private:
 
     wxAuiNotebook* tabs_{};
     RenderOptions options_;
-    neomdl::model::FogMode lastFogMode_{neomdl::model::FogMode::Linear};
+    int asciiNormalMode_{};
     bool dark_{};
     wxMenu* fileMenu_{};
     wxMenu* viewMenu_{};
