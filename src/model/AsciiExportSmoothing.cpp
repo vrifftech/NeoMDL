@@ -225,7 +225,8 @@ struct Smoothing {
         return joined;
     }
 
-    std::vector<std::uint8_t> fitSharedContributions(std::vector<std::uint8_t> joined) const {
+    std::vector<std::uint8_t> fitSharedContributions(std::vector<std::uint8_t> joined,
+        std::vector<std::vector<std::uint8_t>>* relationCandidates=nullptr) const {
         // Corners of a retained row share the final result. Intersect their
         // current contribution sets to propose coupled removals together.
         std::map<std::pair<std::size_t,std::size_t>,std::vector<std::size_t>> groups;
@@ -252,6 +253,14 @@ struct Smoothing {
                        !std::binary_search(common.begin(),common.end(),entry.face)) removed.push_back(entry.relation);
             std::sort(removed.begin(),removed.end());
             removed.erase(std::unique(removed.begin(),removed.end()),removed.end());
+            if(relationCandidates) {
+                if(!removed.empty()) {
+                    auto candidate=joined;
+                    for(const auto relation:removed) candidate[relation]=0u;
+                    relationCandidates->push_back(std::move(candidate));
+                }
+                continue;
+            }
             for(const auto relation:removed)
                 affected.insert(affected.end(),relations[relation].corners.begin(),relations[relation].corners.end());
             std::sort(affected.begin(),affected.end());
@@ -1463,6 +1472,7 @@ ReconstructedSmoothing reconstructSmoothing(
     if(sharedCandidates) {
         std::vector<std::vector<std::uint8_t>> relationCandidates;
         work.fitSharedVertices(joined,true,false,&relationCandidates);
+        work.fitSharedContributions(joined,&relationCandidates);
         std::set<std::vector<std::uint32_t>> unique;
         for(const auto& candidate:relationCandidates) {
             auto masks=work.encode(candidate);

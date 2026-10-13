@@ -2609,6 +2609,22 @@ void reconstructSkinSeamSmoothing(Writer& out,const Model& model) {
                 reconstructSmoothing(mesh,plan.vertices,plan.topology.sourceVertices,
                     plan.topology.sourceFaces,out.job(),nullptr,false,nullptr,&plan.smoothing.masks,
                     false,nullptr,&plan.cornerRotations,&candidates);
+                // A shared-row move can need neighboring non-seam joins refitted
+                // before its complete seam output improves.
+                const auto index=static_cast<std::size_t>(&mesh-model.meshes.data());
+                std::vector<bool> seamCorners;
+                for(const auto& face:rows[index])
+                    for(const auto row:face)
+                        seamCorners.push_back(!same(current.meshes[index].vertices[row].normal,
+                            current.meshes[index].normalAt(row)));
+                const auto direct=candidates.size();
+                for(std::size_t i=0;i<direct;++i) {
+                    auto refined=reconstructSmoothing(mesh,plan.vertices,plan.topology.sourceVertices,
+                        plan.topology.sourceFaces,out.job(),nullptr,true,&seamCorners,&candidates[i],
+                        false,nullptr,&plan.cornerRotations);
+                    if(std::find(candidates.begin(),candidates.end(),refined.masks)==candidates.end())
+                        candidates.push_back(std::move(refined.masks));
+                }
                 for(const auto& masks:candidates) {
                     auto trial=plans;
                     trial.at(&mesh).smoothing.masks=masks;
