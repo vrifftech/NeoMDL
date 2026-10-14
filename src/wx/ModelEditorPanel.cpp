@@ -103,6 +103,7 @@ enum CommandId {
     ID_VertexProperties,
     ID_ReplaceMesh,
     ID_ConvertMesh,
+    ID_RecalculateNormals,
     ID_BinaryMeshFields,
     ID_InspectBinary,
     ID_CompareBinaries,
@@ -593,6 +594,15 @@ public:
     }
     void convertSelectedMesh(const AuthoringJob& runJob) {
         asciiEditor_->convertMesh(document_->sourceModel(),document_->model().partSourceNodes[*selectedNode_],runJob);
+    }
+    bool canRecalculateNormals() const {
+        if (!canEditVertices()) return false;
+        const auto& asset = document_->sourceModel();
+        const auto& node = asset.nodes[document_->model().partSourceNodes[*selectedNode_]];
+        return !node.lightsaber && !asset.meshes[*node.mesh].animated;
+    }
+    void recalculateSelectedNormals(const AuthoringJob& runJob) {
+        asciiEditor_->recalculateNormals(document_->sourceModel(),document_->model().partSourceNodes[*selectedNode_],runJob);
     }
     void editSelectedControllers() {
         const auto sourceIndex = document_->model().partSourceNodes[*selectedNode_];
@@ -3916,6 +3926,7 @@ private:
         edit->Append(ID_VertexProperties, "Selected Mesh Vertex Properties...", "Edit vertex values and corner assignments in source-index tables.");
         edit->Append(ID_ReplaceMesh, "Replace Selected Mesh...", "Queue mesh replacements from donor models.");
         edit->Append(ID_ConvertMesh, "Convert Selected Mesh to Trimesh", "Bake a skin at its constructed bind pose, or retain a lightsaber's stationary blade pieces. Undoable ASCII edit.");
+        edit->Append(ID_RecalculateNormals, "Recalculate Selected Mesh Normals...", "Choose normal weighting and a crease angle for the selected mesh. Undoable ASCII edit.");
         edit->Append(ID_ControllerProperties, "Selected Node Controller Properties...", "Edit base controllers and animation keys for the selected node.");
         edit->Append(ID_CollisionCompanions, "Collision Companions...", "Edit PWK, door DWK states and room WOK geometry, hooks and links.");
         edit->Append(ID_ModelProperties, "Model Properties...", "Choose the animation root and head link.");
@@ -5398,6 +5409,8 @@ private:
             case ID_ControllerProperties: activePage()->editSelectedControllers(); return;
             case ID_ConvertMesh:
                 activePage()->convertSelectedMesh([this](const wxString& title,const auto& work) {return runJob(title,work);});return;
+            case ID_RecalculateNormals:
+                activePage()->recalculateSelectedNormals([this](const wxString& title,const auto& work) {return runJob(title,work);});return;
             case ID_BinaryMeshFields:
                 editBinaryMeshFields(this,[this](const wxString& title,const auto& work) {return runJob(title,work);});return;
             case ID_InspectBinary:
@@ -5566,6 +5579,7 @@ private:
         enableModuleCommand(ID_VertexProperties,active&&active->canEditVertices());
         enableModuleCommand(ID_ReplaceMesh,active&&active->canReplaceMesh());
         enableModuleCommand(ID_ConvertMesh,active&&active->canConvertMesh());
+        enableModuleCommand(ID_RecalculateNormals,active&&active->canRecalculateNormals());
         enableModuleCommand(ID_ControllerProperties,active&&active->canEditNode());
         enableModuleCommand(ID_CollisionCompanions,editor&&editor->previewCurrent()&&!area);
         enableModuleCommand(ID_ModelProperties,editor&&editor->previewCurrent()&&!area);

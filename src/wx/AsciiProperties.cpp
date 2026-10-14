@@ -1,6 +1,7 @@
 #include "wx/AsciiEditor.hpp"
 #include "wx/AsciiSource.hpp"
 #include "core/MeshConversion.hpp"
+#include "core/MeshNormals.hpp"
 #include <model/AsciiModelInternal.hpp>
 #include <model/AsciiControllerFields.hpp>
 #include <neoshared/texture/FileUtil.hpp>
@@ -10,6 +11,7 @@
 #include <wx/dialog.h>
 #include <wx/filedlg.h>
 #include <wx/sizer.h>
+#include <wx/spinctrl.h>
 #include <wx/stattext.h>
 #include <wx/textctrl.h>
 
@@ -174,6 +176,46 @@ void AsciiEditor::convertMesh(const model::Model& asset, std::size_t nodeIndex, 
     if (runJob("Converting mesh to trimesh",[&](const auto& job) {
         converted = convertMeshToTrimesh(current,asset,nodeIndex,advanced_,job);
     })) replaceText(converted);
+}
+
+void AsciiEditor::recalculateNormals(const model::Model& asset, std::size_t nodeIndex, const AuthoringJob& runJob) {
+    wxDialog dialog(this, wxID_ANY, "Recalculate Normals — " + wxui::toWx(asset.nodes[nodeIndex].name));
+    auto* layout = new wxBoxSizer(wxVERTICAL);
+    auto* grid = new wxFlexGridSizer(2, FromDIP(8), FromDIP(12));
+    grid->AddGrowableCol(1);
+    grid->Add(new wxStaticText(&dialog, wxID_ANY, "Weighting"), 0, wxALIGN_CENTER_VERTICAL);
+    auto* weighting = new wxChoice(&dialog, wxID_ANY);
+    for (const auto* label : {"Face area (default)", "Corner angle", "Face area × corner angle", "Equal faces"})
+        weighting->Append(wxString::FromUTF8(label));
+    weighting->SetSelection(0);
+    grid->Add(weighting, 1, wxEXPAND);
+    grid->Add(new wxStaticText(&dialog, wxID_ANY, "Crease angle (degrees)"), 0, wxALIGN_CENTER_VERTICAL);
+    auto* crease = new wxSpinCtrlDouble(&dialog, wxID_ANY, "180", wxDefaultPosition, wxDefaultSize,
+        wxSP_ARROW_KEYS, 0, 180, 180, 1);
+    crease->SetDigits(1);
+    grid->Add(crease, 1, wxEXPAND);
+    layout->Add(grid, 0, wxEXPAND | wxALL, FromDIP(12));
+    auto* groups = new wxCheckBox(&dialog, wxID_ANY, "Respect existing smoothing groups");
+    groups->SetValue(true);
+    layout->Add(groups, 0, wxLEFT | wxRIGHT | wxBOTTOM, FromDIP(12));
+    auto* explanation = new wxStaticText(&dialog, wxID_ANY,
+        "Faces sharing a source vertex blend when their angle is at most the crease angle. "
+        "180° adds no angle limit. Clear the checkbox to smooth across group boundaries.\n\n"
+        "Apply replaces this mesh's normals and rebuilds its enabled tangent basis. "
+        "Undo restores the previous data.");
+    explanation->Wrap(FromDIP(430));
+    layout->Add(explanation, 0, wxEXPAND | wxLEFT | wxRIGHT | wxBOTTOM, FromDIP(12));
+    layout->Add(dialog.CreateSeparatedButtonSizer(wxOK | wxCANCEL), 0, wxEXPAND | wxALL, FromDIP(12));
+    dialog.FindWindow(wxID_OK)->SetLabel("Apply");
+    dialog.SetSizerAndFit(layout);
+    if (dialog.ShowModal() != wxID_OK) return;
+    const MeshNormalOptions options{static_cast<NormalWeighting>(weighting->GetSelection()),
+        crease->GetValue(), groups->GetValue()};
+    const auto current = text();
+    std::string recalculated;
+    if (runJob("Recalculating mesh normals", [&](const auto& job) {
+        recalculated = recalculateMeshNormals(current, asset, nodeIndex, options, job);
+    })) replaceText(recalculated);
 }
 
 void AsciiEditor::editModel(const model::Model& asset) {
