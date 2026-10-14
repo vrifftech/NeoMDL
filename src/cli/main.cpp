@@ -1,4 +1,5 @@
 #include <core/Conversion.hpp>
+#include <core/BinaryAnalysis.hpp>
 #include <neoshared/PathUtf8.hpp>
 
 #include <algorithm>
@@ -29,6 +30,7 @@ int main(int argc, char** argv) {
                      "The last mapping for a target wins. Names are case-insensitive. Donor animations are not loaded.\n"
                      "Geometry, normals, UVs, materials and skin weights transfer; target transforms and controllers stay.\n"
                      "Skin bones match by name in the target skeleton; texture files are not copied.\n";
+        std::cout << "--analyze-binary FILE... reports stored PC MDL/MDX structures without conversion.\n";
         std::cout << "--convert=ascii|binary|auto [--output-dir=DIR] FILE... converts one or more files.\n"
                      "auto detects the input format and writes its opposite. Outputs default beside each input.\n"
                      "--ascii-names=dash|dot|suffix selects name-ascii.mdl, name.ascii.mdl or name.mdl.ascii.\n"
@@ -42,6 +44,7 @@ int main(int argc, char** argv) {
     neomdl::ConversionOptions options;
     std::optional<std::filesystem::path> asciiOutput, packedOutput;
     std::optional<neomdl::ConversionMode> mode;
+    bool analyze = false;
     neomdl::AsciiNaming naming = neomdl::AsciiNaming::Dash;
     std::filesystem::path directory, donorPath;
     std::vector<std::filesystem::path> paths;
@@ -59,6 +62,7 @@ int main(int argc, char** argv) {
                     {"dot",neomdl::AsciiNaming::Dot},{"suffix",neomdl::AsciiNaming::Suffix}};
                 naming=names.at(std::string(argument.substr(14)));
             }
+            else if(argument=="--analyze-binary")analyze=true;
             else if(argument=="--game=k1")options.game=neomdl::model::GameVersion::Kotor1;
             else if(argument=="--game=k2")options.game=neomdl::model::GameVersion::Kotor2;
             else if(argument=="--geometry-only")options.ascii.includeAnimations=false;
@@ -92,8 +96,14 @@ int main(int argc, char** argv) {
                 std::cerr<<"Unknown option: "<<argument<<'\n';return 2;
             } else paths.push_back(std::filesystem::u8path(argv[i]));
         }
-        if (paths.empty() || (!mode && paths.size() > 2)) {
+        if (paths.empty() || (!analyze && !mode && paths.size() > 2)) {
             printUsage(); return 2;
+        }
+        if (analyze) {
+            std::vector<neomdl::BinaryAnalysisResult> results;
+            for (const auto& path : paths) results.push_back(neomdl::analyzeBinaryFile(path));
+            std::cout << neomdl::binaryBatchReport(results);
+            return std::any_of(results.begin(),results.end(),[](const auto& result) { return !result.error.empty(); }) ? 1 : 0;
         }
         const auto modelInput=[](const std::filesystem::path& path) {
             neomdl::ConversionRequest request;request.input=path;

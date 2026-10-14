@@ -1,5 +1,6 @@
 add_library(neomdl_model
     Model.cpp
+    PackedLayout.cpp
     AabbBuild.cpp
     ModelInstance.cpp
     AsciiModel.cpp

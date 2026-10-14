@@ -60,6 +60,7 @@ add_library(neomdl_core
     src/core/MeshReplacement.cpp
     src/core/MeshConversion.cpp
     src/core/BinaryEditing.cpp
+    src/core/BinaryAnalysis.cpp
     src/core/SceneEffects.cpp
     src/core/VideoEffects.cpp
     src/core/ObjectVisualState.cpp

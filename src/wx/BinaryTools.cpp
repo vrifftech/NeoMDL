@@ -1,7 +1,9 @@
 #include "wx/BinaryTools.hpp"
 #include "core/BinaryEditing.hpp"
+#include "core/BinaryAnalysis.hpp"
 #include "NeoWxUi.hpp"
 #include <neoshared/texture/FileUtil.hpp>
+#include <neoshared/PathUtf8.hpp>
 
 #include <wx/button.h>
 #include <wx/checkbox.h>
@@ -9,6 +11,10 @@
 #include <wx/dialog.h>
 #include <wx/filedlg.h>
 #include <wx/grid.h>
+#include <wx/dc.h>
+#include <wx/spinctrl.h>
+#include <wx/splitter.h>
+#include <wx/treectrl.h>
 #include <wx/sizer.h>
 #include <wx/stattext.h>
 #include <wx/textctrl.h>
@@ -122,19 +128,33 @@ struct BinaryViewData {
     std::array<std::vector<std::uint8_t>,2> bytes;
     std::vector<std::size_t> rows;
     std::size_t different{};
+    std::optional<model::PackedLayout> layout;
     std::size_t size() const { return std::max(bytes[0].size(),bytes[1].size()); }
     bool differs(std::size_t offset) const {
         return offset < size() && (offset >= bytes[0].size() || offset >= bytes[1].size() || bytes[0][offset] != bytes[1][offset]);
     }
 };
 
+wxColour typeColour(model::BinaryType type) {
+    static const wxColour light[]{wxColour(238,238,238),wxColour(228,230,250),wxColour(247,223,232),
+        wxColour(214,231,251),wxColour(245,211,220),wxColour(199,222,250),wxColour(211,242,217),
+        wxColour(252,235,187),wxColour(234,216,251)};
+    static const wxColour dark[]{wxColour(48,48,48),wxColour(58,60,95),wxColour(91,50,68),
+        wxColour(42,66,96),wxColour(98,45,62),wxColour(32,59,94),wxColour(35,76,48),
+        wxColour(91,72,30),wxColour(70,45,97)};
+    return (wxui::currentDarkMode() ? dark : light)[static_cast<std::size_t>(type)];
+}
+
 class BinaryViewTable final : public wxGridTableBase {
 public:
-    BinaryViewTable(const BinaryViewData& data, bool comparison, bool differences)
-        : data_(data), comparison_(comparison), differences_(differences) {}
-    int GetNumberRows() override { return static_cast<int>(differences_ ? data_.rows.size() : (data_.size()+15)/16); }
+    BinaryViewTable(const BinaryViewData& data, bool comparison, bool differences, std::size_t file = 0)
+        : data_(data), comparison_(comparison), differences_(differences), file_(file) {}
+    int GetNumberRows() override {
+        const auto size = comparison_ ? data_.size() : data_.bytes[file_].size();
+        return static_cast<int>(differences_ ? data_.rows.size() : (size+15)/16);
+    }
     int GetNumberCols() override { return comparison_ ? 32 : 17; }
-    std::size_t file(int column) const { return comparison_ ? column/16 : 0; }
+    std::size_t file(int column) const { return comparison_ ? column/16 : file_; }
     std::size_t offset(int row,int column = 0) const { return (differences_ ? data_.rows[row] : row)*16+column%16; }
     wxString GetRowLabelValue(int row) override { return wxString::Format("%08zX",offset(row)); }
     wxString GetColLabelValue(int column) override {
@@ -152,8 +172,20 @@ public:
         return at < bytes.size() ? wxString::Format("%02X",static_cast<unsigned>(bytes[at])) : wxString("—");
     }
     void SetValue(int,int,const wxString&) override {}
+    const model::PackedLayout* layout() const { return data_.layout ? &*data_.layout : nullptr; }
+    std::optional<model::BinaryLocation> location(int row,int column) const {
+        return data_.layout && column != 16 ? data_.layout->locate(file(column),offset(row,column)) : std::nullopt;
+    }
     wxGridCellAttr* GetAttr(int row,int column,wxGridCellAttr::wxAttrKind) override {
-        if (!comparison_ || !data_.differs(offset(row,column))) return nullptr;
+        if (!comparison_) {
+            const auto found = location(row,column);
+            if (!found || !found->field) return nullptr;
+            const auto& field = data_.layout->structures[found->structure].fields[*found->field];
+            auto* attr = new wxGridCellAttr;
+            attr->SetBackgroundColour(typeColour(field.type));
+            attr->SetTextColour(wxui::currentDarkMode() ? *wxWHITE : *wxBLACK); return attr;
+        }
+        if (!data_.differs(offset(row,column))) return nullptr;
         auto* attr = new wxGridCellAttr;
         const bool dark = wxui::currentDarkMode();
         attr->SetBackgroundColour(dark ? wxColour(100,48,40) : wxColour(255,213,200));
@@ -163,6 +195,36 @@ private:
     const BinaryViewData& data_;
     bool comparison_;
     bool differences_;
+    std::size_t file_;
+};
+
+class BinaryCellRenderer final : public wxGridCellStringRenderer {
+public:
+    wxGridCellRenderer* Clone() const override { return new BinaryCellRenderer; }
+    void Draw(wxGrid& grid,wxGridCellAttr& attr,wxDC& dc,const wxRect& rect,int row,int col,bool selected) override {
+        wxGridCellStringRenderer::Draw(grid,attr,dc,rect,row,col,selected);
+        const auto& table = *static_cast<BinaryViewTable*>(grid.GetTable());
+        const auto found = table.location(row,col);
+        if (!found) return;
+        const auto& region = table.layout()->structures[found->structure];
+        const auto at = table.offset(row,col);
+        dc.SetPen(wxPen(wxui::currentDarkMode() ? wxColour(160,160,160) : wxColour(110,110,110)));
+        if (found->field) {
+            const auto& field = region.fields[*found->field];
+            const auto first = region.offset+found->record*region.stride+field.offset;
+            const auto width = field.type == model::BinaryType::String ? field.size : model::binaryTypeWidth(field.type);
+            if ((at-first)%width == 0) dc.DrawLine(rect.GetLeft(),rect.GetTop()+3,rect.GetLeft(),rect.GetBottom()-2);
+        }
+        dc.SetPen(wxPen(wxui::currentDarkMode() ? *wxWHITE : *wxBLACK,2));
+        if (at == region.offset) {
+            dc.DrawLine(rect.GetLeft(),rect.GetTop()+1,rect.GetRight(),rect.GetTop()+1);
+            dc.DrawLine(rect.GetLeft()+1,rect.GetTop(),rect.GetLeft()+1,rect.GetBottom());
+        }
+        if (at+1 == region.offset+region.size()) {
+            dc.DrawLine(rect.GetLeft(),rect.GetBottom()-1,rect.GetRight(),rect.GetBottom()-1);
+            dc.DrawLine(rect.GetRight()-1,rect.GetTop(),rect.GetRight()-1,rect.GetBottom());
+        }
+    }
 };
 
 wxString binaryValues(const std::vector<std::uint8_t>& bytes,std::size_t offset) {
@@ -195,20 +257,206 @@ wxString binaryValues(const std::vector<std::uint8_t>& bytes,std::size_t offset)
     return wxui::toWx(text.str());
 }
 
-void viewBinaryFiles(wxWindow* parent, const AuthoringJob& runJob, bool comparison) {
-    std::vector<std::filesystem::path> paths(comparison ? 2 : 1);
+struct StructureItem final : wxTreeItemData {
+    explicit StructureItem(model::BinaryLocation value) : location(value) {}
+    model::BinaryLocation location;
+};
+
+class BinaryInspector final : public wxDialog {
+public:
+    BinaryInspector(wxWindow* parent,std::filesystem::path path,std::vector<std::uint8_t> bytes,const AuthoringJob& runJob)
+        : wxDialog(parent,wxID_ANY,"Binary Inspector",wxDefaultPosition,parent->FromDIP(wxSize(1170,800)),
+            wxDEFAULT_DIALOG_STYLE | wxRESIZE_BORDER),runJob_(runJob) {
+        paths_[0] = std::move(path); data_.bytes[0] = std::move(bytes);
+        auto* layout = new wxBoxSizer(wxVERTICAL);
+        auto* controls = new wxBoxSizer(wxHORIZONTAL);
+        auto* read = new wxButton(this,wxID_ANY,"Read Model Structures");
+        const auto extension = resourceKey(neoshared::pathToUtf8(paths_[0].extension()));
+        read->Enable(extension == ".mdl" || extension == ".mdx");
+        controls->Add(read,0,wxRIGHT,FromDIP(10));
+        files_ = new wxChoice(this,wxID_ANY); files_->Append(neosettings::pathToWx(paths_[0].filename())); files_->SetSelection(0);
+        controls->Add(files_,1,wxRIGHT,FromDIP(10));
+        mode_ = new wxChoice(this,wxID_ANY); mode_->Append("Hierarchy"); mode_->Append("File order"); mode_->SetSelection(0); mode_->Enable(false);
+        controls->Add(mode_,0,wxRIGHT,FromDIP(10));
+        controls->Add(new wxStaticText(this,wxID_ANY,"Record"),0,wxALIGN_CENTER_VERTICAL | wxRIGHT,FromDIP(4));
+        record_ = new wxSpinCtrl(this,wxID_ANY); record_->SetRange(0,0); record_->Enable(false); controls->Add(record_);
+        layout->Add(controls,0,wxEXPAND | wxALL,FromDIP(8));
+        path_ = new wxStaticText(this,wxID_ANY,neosettings::pathToWx(paths_[0]));
+        layout->Add(path_,0,wxLEFT | wxRIGHT | wxBOTTOM,FromDIP(8));
+        auto* legend = new wxBoxSizer(wxHORIZONTAL);
+        for (std::size_t i = 0; i < 9; ++i) {
+            const auto type = static_cast<model::BinaryType>(i);
+            auto* label = new wxStaticText(this,wxID_ANY,wxString(" ")+model::binaryTypeName(type)+" ");
+            label->SetBackgroundColour(typeColour(type));
+            legend->Add(label,0,wxRIGHT,FromDIP(5));
+        }
+        layout->Add(legend,0,wxLEFT | wxRIGHT | wxBOTTOM,FromDIP(8));
+        layout->Add(new wxStaticText(this,wxID_ANY,
+            "Type colors and value separators use the model map. Brackets mark structure starts/ends. Record numbers start at 0.\n"
+            "Select a structure/field to jump to its bytes; select a byte to locate its structure. Unclassified bytes retain raw numeric interpretation."),
+            0,wxLEFT | wxRIGHT | wxBOTTOM,FromDIP(8));
+        split_ = new wxSplitterWindow(this,wxID_ANY,wxDefaultPosition,wxDefaultSize,wxSP_LIVE_UPDATE);
+        tree_ = new wxTreeCtrl(split_,wxID_ANY,wxDefaultPosition,wxDefaultSize,wxTR_HAS_BUTTONS | wxTR_LINES_AT_ROOT | wxTR_HIDE_ROOT);
+        grid_ = new wxGrid(split_,wxID_ANY); tree_->Hide(); split_->Initialize(grid_); split_->SetMinimumPaneSize(FromDIP(150));
+        values_ = new wxTextCtrl(this,wxID_ANY,{},wxDefaultPosition,FromDIP(wxSize(-1,190)),wxTE_MULTILINE | wxTE_READONLY | wxTE_DONTWRAP);
+        values_->SetFont(wxFont(wxFontInfo(10).Family(wxFONTFAMILY_TELETYPE)));
+        layout->Add(split_,1,wxEXPAND | wxLEFT | wxRIGHT,FromDIP(8));
+        layout->Add(values_,0,wxEXPAND | wxALL,FromDIP(8));
+        layout->Add(CreateSeparatedButtonSizer(wxCANCEL),0,wxEXPAND | wxALL,FromDIP(8));
+        FindWindow(wxID_CANCEL)->SetLabel("Close"); SetSizer(layout); SetMinSize(FromDIP(wxSize(980,580)));
+        read->Bind(wxEVT_BUTTON,[&,read](wxCommandEvent&) {
+            try {
+                BinaryAnalysis result;
+                if (!runJob_("Reading binary structures",[&](const auto& job) { result = readBinaryAnalysis(paths_[0],job); })) return;
+                const auto previous = paths_[file_];
+                paths_ = std::move(result.paths); data_.bytes[0] = std::move(result.mdl);
+                if (result.mdx) data_.bytes[1] = std::move(*result.mdx);
+                data_.layout = std::move(result.layout);
+                file_ = previous == paths_[1] ? 1 : 0;
+                files_->Clear(); files_->Append("MDL: "+neosettings::pathToWx(paths_[0].filename()));
+                if (!paths_[1].empty()) files_->Append("MDX: "+neosettings::pathToWx(paths_[1].filename()));
+                files_->SetSelection(static_cast<int>(file_)); mode_->Enable(); read->Enable(false);
+                populate(); tree_->Show(); split_->SplitVertically(tree_,grid_,FromDIP(340));
+                display();
+            } catch (const std::exception& error) { wxui::showError(this,error); }
+        });
+        files_->Bind(wxEVT_CHOICE,[&](wxCommandEvent&) { file_ = files_->GetSelection(); display(); });
+        mode_->Bind(wxEVT_CHOICE,[&](wxCommandEvent&) {
+            const auto selected = selected_; populate();
+            if (selected) reveal(*selected);
+        });
+        tree_->Bind(wxEVT_TREE_ITEM_EXPANDING,[&](wxTreeEvent& event) {
+            const auto& item = *static_cast<StructureItem*>(tree_->GetItemData(event.GetItem()));
+            if (!item.location.field) fields(item.location.structure);
+        });
+        tree_->Bind(wxEVT_TREE_SEL_CHANGED,[&](wxTreeEvent& event) {
+            auto location = static_cast<StructureItem*>(tree_->GetItemData(event.GetItem()))->location;
+            if (selected_ && selected_->structure == location.structure) location.record = selected_->record;
+            jump(location);
+        });
+        record_->Bind(wxEVT_SPINCTRL,[&](wxSpinEvent&) {
+            auto location = *selected_; location.record = record_->GetValue(); jump(location);
+        });
+        grid_->Bind(wxEVT_GRID_SELECT_CELL,[&](wxGridEvent& event) { select(event.GetRow(),event.GetCol()); event.Skip(); });
+        wxui::applyTheme(this,wxui::currentDarkMode());
+        // Theme application owns control defaults; the type legend retains its palette.
+        for (std::size_t i = 0; i < 9; ++i) {
+            auto* label = legend->GetItem(i)->GetWindow();
+            label->SetBackgroundColour(typeColour(static_cast<model::BinaryType>(i)));
+            label->SetForegroundColour(wxui::currentDarkMode() ? *wxWHITE : *wxBLACK);
+        }
+        display();
+    }
+    ~BinaryInspector() override { DestroyChildren(); }
+
+private:
+    void display() {
+        grid_->SetTable(new BinaryViewTable(data_,false,false,file_),true);
+        grid_->EnableEditing(false); grid_->SetRowLabelSize(FromDIP(90));
+        grid_->SetDefaultCellFont(wxFont(wxFontInfo(10).Family(wxFONTFAMILY_TELETYPE)));
+        grid_->SetDefaultCellAlignment(wxALIGN_CENTER,wxALIGN_CENTER); grid_->SetDefaultRenderer(new BinaryCellRenderer);
+        for (int column = 0; column < 17; ++column) grid_->SetColSize(column,FromDIP(column == 16 ? 165 : 33));
+        path_->SetLabel(neosettings::pathToWx(paths_[file_])+wxString::Format("  (%zu bytes)",data_.bytes[file_].size()));
+        values_->ChangeValue("No byte selected."); selected_.reset(); record_->Enable(false);
+        if (grid_->GetNumberRows()) { grid_->SetGridCursor(0,0); select(0,0); }
+        grid_->ForceRefresh();
+    }
+    void populate() {
+        wxEventBlocker block(tree_); tree_->Freeze(); tree_->DeleteAllItems();
+        const auto root = tree_->AddRoot("Structures"); const auto& map = *data_.layout;
+        items_.assign(map.structures.size(),{}); fieldItems_.assign(map.structures.size(),{});
+        const auto append = [&](std::size_t i,wxTreeItemId parent) {
+            const auto& region = map.structures[i];
+            const auto label = wxui::toWx(region.name)+wxString::Format("  [%s 0x%zX, %zu x %zu]",
+                region.file == 0 ? "MDL" : "MDX",region.offset,region.count,region.stride);
+            items_[i] = tree_->AppendItem(parent,label,-1,-1,new StructureItem({i,0,{}}));
+            tree_->SetItemHasChildren(items_[i],!region.fields.empty());
+        };
+        if (mode_->GetSelection() == 0) {
+            for (std::size_t i = 0; i < map.structures.size(); ++i)
+                append(i,map.structures[i].parent ? items_[*map.structures[i].parent] : root);
+        } else {
+            for (std::size_t file = 0; file < 2; ++file) for (const auto i : map.ordered[file]) append(i,root);
+        }
+        tree_->Expand(root); tree_->Thaw();
+    }
+    void fields(std::size_t index) {
+        if (!fieldItems_[index].empty()) return;
+        const auto& region = data_.layout->structures[index];
+        for (std::size_t i = 0; i < region.fields.size(); ++i) {
+            const auto& field = region.fields[i];
+            fieldItems_[index].push_back(tree_->AppendItem(items_[index],wxui::toWx(field.name)+
+                wxString::Format("  [+%zu, %zu bytes, %s]",field.offset,field.size,model::binaryTypeName(field.type)),
+                -1,-1,new StructureItem({index,0,i})));
+        }
+    }
+    void reveal(const model::BinaryLocation& location) {
+        wxEventBlocker block(tree_);
+        auto item = items_[location.structure];
+        if (location.field) { fields(location.structure); item = fieldItems_[location.structure][*location.field]; }
+        tree_->SelectItem(item); tree_->EnsureVisible(item);
+    }
+    void jump(const model::BinaryLocation& location) {
+        const auto& region = data_.layout->structures[location.structure];
+        if (file_ != region.file) { file_ = region.file; files_->SetSelection(static_cast<int>(file_)); display(); }
+        const auto offset = region.offset+location.record*region.stride+(location.field ? region.fields[*location.field].offset : 0);
+        const auto row = static_cast<int>(offset/16), column = static_cast<int>(offset%16);
+        grid_->SetGridCursor(row,column); grid_->MakeCellVisible(row,column); select(row,column,location);
+    }
+    void select(int row,int column,std::optional<model::BinaryLocation> requested = {}) {
+        const auto& table = *static_cast<BinaryViewTable*>(grid_->GetTable());
+        const auto offset = table.offset(row,column);
+        const auto location = requested ? requested : data_.layout ? data_.layout->locate(file_,offset) : std::nullopt;
+        wxString text;
+        if (location) {
+            const auto& region = data_.layout->structures[location->structure];
+            text = wxui::toWx(region.name)+wxString::Format(" | 0x%zX..0x%zX (end exclusive), %zu bytes\nRecord %zu of %zu; stride %zu",
+                region.offset,region.offset+region.size(),region.size(),location->record,region.count,region.stride);
+            if (location->field) {
+                const auto& field = region.fields[*location->field];
+                text += " | "+wxui::toWx(field.name)+" ("+model::binaryTypeName(field.type)+")";
+            } else text += requested ? " | Whole record" : " | Unclassified field";
+            text += '\n'; selected_ = location;
+            record_->SetRange(0,static_cast<int>(region.count-1)); record_->SetValue(static_cast<int>(location->record));
+            record_->Enable(region.count > 1); reveal(*location);
+        } else {
+            selected_.reset(); record_->Enable(false);
+            wxEventBlocker block(tree_); tree_->UnselectAll();
+            text = data_.layout ? "Outside mapped structures.\n" : "Raw bytes. Read Model Structures to enable typed navigation for PC MDL/MDX.\n";
+        }
+        values_->ChangeValue(text+binaryValues(data_.bytes[file_],offset));
+    }
+
+    const AuthoringJob& runJob_;
+    BinaryViewData data_;
+    std::array<std::filesystem::path,2> paths_;
+    std::size_t file_{};
+    wxChoice *files_{}, *mode_{};
+    wxSpinCtrl* record_{};
+    wxStaticText* path_{};
+    wxSplitterWindow* split_{};
+    wxTreeCtrl* tree_{};
+    wxGrid* grid_{};
+    wxTextCtrl* values_{};
+    std::vector<wxTreeItemId> items_;
+    std::vector<std::vector<wxTreeItemId>> fieldItems_;
+    std::optional<model::BinaryLocation> selected_;
+};
+
+void viewBinaryComparison(wxWindow* parent, const AuthoringJob& runJob) {
+    std::vector<std::filesystem::path> paths(2);
     for (std::size_t i = 0; i < paths.size(); ++i) {
-        wxFileDialog file(parent,comparison ? (i ? "Compare — File B" : "Compare — File A") : "Inspect Binary File",{},{},
+        wxFileDialog file(parent,i ? "Compare — File B" : "Compare — File A",{},{},
             "Model binaries (*.mdl;*.mdx;*.wok;*.pwk;*.dwk)|*.mdl;*.mdx;*.wok;*.pwk;*.dwk|All files (*.*)|*.*",wxFD_OPEN | wxFD_FILE_MUST_EXIST);
         if (file.ShowModal() != wxID_OK) return;
         paths[i] = neosettings::pathFromWx(file.GetPath());
     }
     try {
         BinaryViewData data;
-        if (!runJob(comparison ? "Comparing binary files" : "Reading binary file",[&](const auto& job) {
+        if (!runJob("Comparing binary files",[&](const auto& job) {
             ResourceLoadScope scope(job);
             for (std::size_t i = 0; i < paths.size(); ++i) data.bytes[i] = readResourceFile(paths[i]);
-            for (std::size_t row = 0; comparison && row*16 < data.size(); ++row) {
+            for (std::size_t row = 0; row*16 < data.size(); ++row) {
                 if (row%4096 == 0) job.update(row*16,data.size(),"Comparing stored bytes");
                 bool different = false;
                 for (std::size_t i = row*16; i < std::min(row*16+16,data.size()); ++i)
@@ -216,23 +464,19 @@ void viewBinaryFiles(wxWindow* parent, const AuthoringJob& runJob, bool comparis
                 if (different) data.rows.push_back(row);
             }
         })) return;
-        wxDialog dialog(parent,wxID_ANY,comparison ? "Binary Comparison" : "Binary Inspector",
-            wxDefaultPosition,parent->FromDIP(wxSize(comparison ? 1230 : 920,740)),
+        wxDialog dialog(parent,wxID_ANY,"Binary Comparison",
+            wxDefaultPosition,parent->FromDIP(wxSize(1230,740)),
             wxDEFAULT_DIALOG_STYLE | wxRESIZE_BORDER);
         auto* layout = new wxBoxSizer(wxVERTICAL);
         for (std::size_t i = 0; i < paths.size(); ++i)
-            layout->Add(new wxStaticText(&dialog,wxID_ANY,(comparison ? wxString(i ? "B: " : "A: ") : wxString{})+neosettings::pathToWx(paths[i])+
+            layout->Add(new wxStaticText(&dialog,wxID_ANY,wxString(i ? "B: " : "A: ")+neosettings::pathToWx(paths[i])+
                 wxString::Format("  (%zu bytes)",data.bytes[i].size())),0,wxALL,dialog.FromDIP(6));
-        wxCheckBox* only = nullptr;
-        if (comparison) {
-            layout->Add(new wxStaticText(&dialog,wxID_ANY,wxString::Format("%zu differing byte positions. ",data.different)+
+        layout->Add(new wxStaticText(&dialog,wxID_ANY,wxString::Format("%zu differing byte positions. ",data.different)+
                 "Offsets are absolute; inserted bytes shift subsequent comparisons. — marks absent bytes."),0,wxALL,dialog.FromDIP(6));
-            only = new wxCheckBox(&dialog,wxID_ANY,"Show only differing rows"); only->SetValue(true);
-            layout->Add(only,0,wxALL,dialog.FromDIP(6));
-        }
-        layout->Add(new wxStaticText(&dialog,wxID_ANY,comparison ?
-            "Select a byte in either file to interpret values from that offset." :
-            "Select a hex byte to interpret values. Characters selects the row's first byte; dots mark nonprintable ASCII."),
+        auto* only = new wxCheckBox(&dialog,wxID_ANY,"Show only differing rows"); only->SetValue(true);
+        layout->Add(only,0,wxALL,dialog.FromDIP(6));
+        layout->Add(new wxStaticText(&dialog,wxID_ANY,
+            "Select a byte in either file to interpret values from that offset."),
             0,wxALL,dialog.FromDIP(6));
         auto* grid = new wxGrid(&dialog,wxID_ANY);
         auto* values = new wxTextCtrl(&dialog,wxID_ANY,{},wxDefaultPosition,dialog.FromDIP(wxSize(-1,145)),
@@ -242,22 +486,22 @@ void viewBinaryFiles(wxWindow* parent, const AuthoringJob& runJob, bool comparis
         const auto select = [&](int row,int column) {
             const auto& table = *static_cast<BinaryViewTable*>(grid->GetTable());
             const auto file = table.file(column);
-            values->ChangeValue((comparison ? wxString(file ? "B: " : "A: ") : wxString{})+
+            values->ChangeValue(wxString(file ? "B: " : "A: ")+
                 neosettings::pathToWx(paths[file].filename())+"\n"+binaryValues(data.bytes[file],table.offset(row,column)));
         };
         const auto display = [&] {
-            grid->SetTable(new BinaryViewTable(data,comparison,comparison && only->GetValue()),true);
+            grid->SetTable(new BinaryViewTable(data,true,only->GetValue()),true);
             grid->EnableEditing(false); grid->SetRowLabelSize(dialog.FromDIP(90));
             grid->SetDefaultCellFont(font);
             grid->SetDefaultCellAlignment(wxALIGN_CENTER,wxALIGN_CENTER);
             for (int column = 0; column < grid->GetNumberCols(); ++column)
-                grid->SetColSize(column,dialog.FromDIP(!comparison && column == 16 ? 170 : 33));
+                grid->SetColSize(column,dialog.FromDIP(33));
             values->ChangeValue("No byte selected.");
             if (grid->GetNumberRows()) { grid->SetGridCursor(0,0); select(0,0); }
             grid->ForceRefresh();
         };
         display();
-        if (comparison) only->Bind(wxEVT_CHECKBOX,[&](wxCommandEvent&) { display(); });
+        only->Bind(wxEVT_CHECKBOX,[&](wxCommandEvent&) { display(); });
         grid->Bind(wxEVT_GRID_SELECT_CELL,[&](wxGridEvent& event) {
             select(event.GetRow(),event.GetCol()); event.Skip();
         });
@@ -272,7 +516,59 @@ void viewBinaryFiles(wxWindow* parent, const AuthoringJob& runJob, bool comparis
 
 } // namespace
 
-void inspectBinaryFile(wxWindow* parent, const AuthoringJob& runJob) { viewBinaryFiles(parent,runJob,false); }
-void compareBinaryFiles(wxWindow* parent, const AuthoringJob& runJob) { viewBinaryFiles(parent,runJob,true); }
+void inspectBinaryFile(wxWindow* parent, const AuthoringJob& runJob) {
+    wxFileDialog file(parent,"Inspect Binary File",{}, {},
+        "Model binaries (*.mdl;*.mdx;*.wok;*.pwk;*.dwk)|*.mdl;*.mdx;*.wok;*.pwk;*.dwk|All files (*.*)|*.*",wxFD_OPEN | wxFD_FILE_MUST_EXIST);
+    if (file.ShowModal() != wxID_OK) return;
+    try {
+        const auto path = neosettings::pathFromWx(file.GetPath());
+        std::vector<std::uint8_t> bytes;
+        if (!runJob("Reading binary file",[&](const auto& job) { ResourceLoadScope scope(job); bytes = readResourceFile(path); })) return;
+        BinaryInspector dialog(parent,path,std::move(bytes),runJob); dialog.ShowModal();
+    } catch (const std::exception& error) { wxui::showError(parent,error); }
+}
+void analyzeBinaryFiles(wxWindow* parent, const AuthoringJob& runJob) {
+    wxFileDialog input(parent,"Analyze Binary Models",{}, {},"Binary MDL (*.mdl)|*.mdl;*.MDL",
+        wxFD_OPEN | wxFD_FILE_MUST_EXIST | wxFD_MULTIPLE);
+    if (input.ShowModal() != wxID_OK) return;
+    wxArrayString paths; input.GetPaths(paths);
+    std::vector<BinaryAnalysisResult> results;
+    const bool completed = runJob("Analyzing binary structures",[&](const auto& job) {
+        for (std::size_t i = 0; i < paths.size(); ++i) {
+            job.update(i,paths.size(),"Analyzing "+wxui::toStd(paths[i]));
+            results.push_back(analyzeBinaryFile(neosettings::pathFromWx(paths[i]),job));
+        }
+    });
+    auto report = binaryBatchReport(results);
+    report += std::to_string(results.size())+" of "+std::to_string(paths.size())+" files processed.";
+    if (!completed) report += " Cancelled; remaining files were not analyzed.";
+    wxDialog dialog(parent,wxID_ANY,"Binary Structure Analysis",wxDefaultPosition,parent->FromDIP(wxSize(1000,740)),
+        wxDEFAULT_DIALOG_STYLE | wxRESIZE_BORDER);
+    auto* layout = new wxBoxSizer(wxVERTICAL);
+    auto* text = new wxTextCtrl(&dialog,wxID_ANY,wxui::toWx(report),wxDefaultPosition,wxDefaultSize,
+        wxTE_MULTILINE | wxTE_READONLY | wxTE_DONTWRAP);
+    text->SetFont(wxFont(wxFontInfo(10).Family(wxFONTFAMILY_TELETYPE)));
+    layout->Add(text,1,wxEXPAND | wxALL,dialog.FromDIP(8));
+    auto* buttons = new wxBoxSizer(wxHORIZONTAL);
+    auto* save = new wxButton(&dialog,wxID_ANY,"Save Report..."); buttons->AddStretchSpacer();
+    buttons->Add(save,0,wxRIGHT,dialog.FromDIP(8)); buttons->Add(new wxButton(&dialog,wxID_CANCEL,"Close"));
+    layout->Add(buttons,0,wxEXPAND | wxALL,dialog.FromDIP(8)); dialog.SetSizer(layout);
+    dialog.SetMinSize(parent->FromDIP(wxSize(800,480)));
+    save->Bind(wxEVT_BUTTON,[&](wxCommandEvent&) {
+        wxFileDialog output(&dialog,"Save Binary Analysis",{},"binary-analysis.txt","Text (*.txt)|*.txt",wxFD_SAVE | wxFD_OVERWRITE_PROMPT);
+        if (output.ShowModal() != wxID_OK) return;
+        try {
+            const auto path = neosettings::pathFromWx(output.GetPath());
+            std::vector<std::filesystem::path> inputs;
+            for (const auto& name : paths) inputs.push_back(neosettings::pathFromWx(name));
+            for (const auto& result : results) for (const auto& source : result.inputs) if (!source.empty()) inputs.push_back(source);
+            neoshared::checkResourceOutput(path,inputs);
+            neoshared::texture::writeFileBytes(path,{report.begin(),report.end()});
+        } catch (const std::exception& error) { wxui::showError(&dialog,error); }
+    });
+    wxui::applyTheme(&dialog,wxui::currentDarkMode()); dialog.ShowModal();
+}
+
+void compareBinaryFiles(wxWindow* parent, const AuthoringJob& runJob) { viewBinaryComparison(parent,runJob); }
 
 } // namespace neomdl::ui
