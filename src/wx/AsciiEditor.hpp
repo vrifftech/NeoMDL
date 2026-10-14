@@ -13,6 +13,7 @@
 class wxButton;
 class wxChoice;
 class wxSearchCtrl;
+class wxStaticText;
 class wxStyledTextCtrl;
 class wxTextCtrl;
 
@@ -34,6 +35,7 @@ public:
     bool advanced() const noexcept { return advanced_; }
     bool edited() const noexcept { return revision_ != 0; }
     bool modified() const;
+    const std::filesystem::path& savePath() const noexcept { return savePath_; }
     std::string text() const;
     const std::shared_ptr<const ModelDocument>& source() const { return source_; }
     void updatePreview();
@@ -66,6 +68,7 @@ private:
     void findNext();
     void replaceText(const std::string& text);
     void generateAscii(bool advanced);
+    void setSavePath(const std::filesystem::path& path);
 
     std::shared_ptr<const ModelDocument> source_;
     std::function<void(std::unique_ptr<ModelDocument>)> apply_;
@@ -74,6 +77,7 @@ private:
     wxSearchCtrl* search_{};
     wxChoice* format_{};
     wxTextCtrl* status_{};
+    wxStaticText* saveLocation_{};
     wxButton* update_{};
     wxTimer timer_;
     std::future<Result> worker_;

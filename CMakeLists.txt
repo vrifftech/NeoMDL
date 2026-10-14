@@ -289,4 +289,9 @@ if(NEOMDL_BUILD_WX_GUI OR NEOMDL_BUILD_WX_MODULE)
     endif()
 endif()
 
+set(NEOMDL_DOC_DESTINATION "${CMAKE_INSTALL_DOCDIR}")
+if(APPLE AND TARGET NeoMDL)
+    set(NEOMDL_DOC_DESTINATION "NeoMDL.app/Contents/Resources/docs")
+endif()
+
 neo_apply_minimal_release_to_directory_targets()

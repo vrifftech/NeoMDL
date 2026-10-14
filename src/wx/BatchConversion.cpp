@@ -119,21 +119,28 @@ void showBatchConversion(wxWindow* parent, ConversionMode mode, const AuthoringJ
             std::filesystem::create_directories(destination);
             for (long i = 0; i < files->GetItemCount(); ++i) files->SetItem(i, 1, "Queued");
             std::vector<ConversionReport> results;
-            const bool completed = runJob(title, [&](const auto& job) {
-                for (std::size_t i = 0; i < requests.size(); ++i) {
-                    auto current = job;
-                    current.progress = [&, i](std::size_t, std::size_t, const std::string& detail) {
-                        job.update(i, requests.size(), std::to_string(i + 1) + "/" + std::to_string(requests.size()) + ": " + detail);
-                    };
-                    current.update(0, 0, "Converting " + neoshared::pathToUtf8(requests[i].input.filename()));
-                    results.push_back(convertFile(requests[i], options, inputs, current));
-                }
-            });
+            wxString interrupted = "Cancelled";
+            try {
+                runJob(title, [&](const auto& job) {
+                    for (std::size_t i = 0; i < requests.size(); ++i) {
+                        auto current = job;
+                        current.progress = [&, i](std::size_t, std::size_t, const std::string& detail) {
+                            job.update(i, requests.size(), std::to_string(i + 1) + "/" + std::to_string(requests.size()) + ": " + detail);
+                        };
+                        current.update(0, 0, "Converting " + neoshared::pathToUtf8(requests[i].input.filename()));
+                        results.push_back(convertFile(requests[i], options, inputs, current));
+                    }
+                });
+            } catch (const std::exception& error) {
+                interrupted = wxui::toWx(std::string("Stopped: ") + error.what());
+                wxui::showError(&dialog, error);
+            }
             for (std::size_t i = 0; i < results.size(); ++i) {
                 const auto& result = results[i];
                 files->SetItem(i, 1, result.error.empty() ? wxString::Format("Converted (%.2f s)", result.seconds) : wxui::toWx("Failed: " + result.error));
             }
-            if (!completed && results.size() < paths.size()) files->SetItem(results.size(), 1, "Cancelled");
+            for (std::size_t i = results.size(); i < paths.size(); ++i)
+                files->SetItem(i, 1, i == results.size() ? interrupted : "Not run");
         } catch (const std::exception& error) { wxui::showError(&dialog, error); }
     });
     controls(); wxui::applyTheme(&dialog, wxui::currentDarkMode()); dialog.ShowModal();

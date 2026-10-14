@@ -11,6 +11,7 @@
 #include <wx/filedlg.h>
 #include <wx/srchctrl.h>
 #include <wx/sizer.h>
+#include <wx/stattext.h>
 #include <wx/stc/stc.h>
 
 #include <algorithm>
@@ -38,6 +39,9 @@ AsciiEditor::AsciiEditor(wxWindow* parent, std::shared_ptr<const ModelDocument> 
     toolbar->Add(search_, 1, wxALIGN_CENTER_VERTICAL | wxRIGHT, FromDIP(5));
     toolbar->Add(update_, 0);
     layout->Add(toolbar, 0, wxEXPAND | wxALL, FromDIP(5));
+    saveLocation_ = new wxStaticText(this, wxID_ANY, "ASCII file: not saved", wxDefaultPosition,
+        wxDefaultSize, wxST_ELLIPSIZE_MIDDLE | wxST_NO_AUTORESIZE);
+    layout->Add(saveLocation_, 0, wxEXPAND | wxLEFT | wxRIGHT | wxBOTTOM, FromDIP(5));
     editor_ = new wxStyledTextCtrl(this);
     editor_->SetCodePage(wxSTC_CP_UTF8);
     editor_->SetWrapMode(wxSTC_WRAP_NONE);
@@ -84,7 +88,7 @@ AsciiEditor::AsciiEditor(wxWindow* parent, std::shared_ptr<const ModelDocument> 
 
     if (source_->originalAscii()) {
         installText(*source_->originalAscii());
-        savePath_ = source_->path();
+        setSavePath(source_->path());
         status_->ChangeValue("Preview current. Edits update after a 0.5-second typing pause.");
     } else generateAscii(false);
 }
@@ -255,12 +259,20 @@ void AsciiEditor::setAppearance(bool dark) {
     editor_->SetSelForeground(true, colors.selectionText);
 }
 
+void AsciiEditor::setSavePath(const std::filesystem::path& path) {
+    savePath_ = path;
+    const auto label = "ASCII file: " + neosettings::pathToWx(path);
+    saveLocation_->SetLabel(label);
+    saveLocation_->SetToolTip(label);
+}
+
 bool AsciiEditor::save(bool choosePath) {
     auto path = savePath_;
     if (choosePath || path.empty()) {
         const auto name = path.empty() ? asciiModelFilename(source_->sourceModel().name,asciiNamingPreference())
                                        : neoshared::pathToUtf8(path.filename());
-        wxFileDialog dialog(this, "Save ASCII Model and Companions", neosettings::pathToWx(source_->path().parent_path()),
+        const auto directory = path.empty() ? source_->path().parent_path() : path.parent_path();
+        wxFileDialog dialog(this, "Save ASCII Model and Companions", neosettings::pathToWx(directory),
             wxui::toWx(name), "ASCII models (*.mdl;*.mdl.ascii)|*.mdl;*.mdl.ascii", wxFD_SAVE | wxFD_OVERWRITE_PROMPT);
         if (dialog.ShowModal() != wxID_OK) return false;
         path = neosettings::pathFromWx(dialog.GetPath());
@@ -292,7 +304,7 @@ bool AsciiEditor::save(bool choosePath) {
         const auto buffer = text();
         neoshared::texture::writeFileBytes(path, std::vector<std::uint8_t>(buffer.begin(), buffer.end()));
         for(const auto& output:outputs) neoshared::texture::writeFileBytes(output.path,output.bytes);
-        savePath_ = path;
+        setSavePath(path);
         editor_->SetSavePoint();
         collisionsModified_=false;
         changed_();

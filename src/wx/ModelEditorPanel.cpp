@@ -2055,7 +2055,10 @@ private:
         const auto* editor = page->asciiEditor();
         if (!editor || !editor->modified()) return true;
         tabs_->SetSelection(tabs_->GetPageIndex(page));
-        wxMessageDialog dialog(this, "Save ASCII edits to " + wxui::toWx(page->document().title()) + " before continuing?",
+        const auto destination = editor->savePath().empty()
+            ? "for " + wxui::toWx(page->document().title())
+            : "to " + neosettings::pathToWx(editor->savePath());
+        wxMessageDialog dialog(this, "Save ASCII edits " + destination + " before continuing?",
             "Unsaved ASCII edits", wxYES_NO | wxCANCEL | wxICON_QUESTION);
         dialog.SetYesNoLabels("Save ASCII", "Discard");
         const auto answer = dialog.ShowModal();
@@ -5457,10 +5460,10 @@ private:
             event.Skip();
         });
         tabs_->Bind(wxEVT_AUINOTEBOOK_PAGE_CLOSE, [this](wxAuiNotebookEvent& event) {
-            const int page = event.GetSelection();
+            auto* page = pageAt(event.GetSelection());
             event.Veto();
             if (jobRunning_) { cancelJob_.store(true); return; }
-            CallAfter([this, page] { closePage(page); });
+            CallAfter([this, page] { closePage(tabs_->GetPageIndex(page)); });
         });
         Bind(wxEVT_MENU, [this](wxCommandEvent& event) {
             if (jobRunning_) return;
@@ -5615,7 +5618,7 @@ private:
             case ID_PreviewTriggers:
                 options_.previewTriggers = event.IsChecked(); applyDisplayOptions(); return;
             case ID_About:
-                wxMessageBox("NeoMDL is a model viewer, ASCII editor and ASCII / binary MDL converter for Knights of the Old Republic I and II.\n\nEdit an individual model's ASCII beside its 3D preview. Inspect geometry, materials, animations, particles, lightsabers and area layouts. Model dependencies resolve through the model directory, the active resource session or a selected game installation.",
+                wxMessageBox("NeoMDL " NEOMDL_VERSION "\n\nModel viewer, ASCII editor and ASCII / binary MDL converter for Knights of the Old Republic I and II.\n\nEdit an individual model's ASCII beside its 3D preview. Inspect geometry, materials, animations, particles, lightsabers and area layouts. Model dependencies resolve through the model directory, the active resource session or a selected game installation.",
                              "About NeoMDL", wxOK | wxICON_INFORMATION, this);
                 return;
             case ID_Exit: requestModuleClose(); return;
