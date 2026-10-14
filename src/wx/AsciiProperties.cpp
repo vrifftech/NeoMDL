@@ -45,7 +45,7 @@ void AsciiEditor::editNode(const model::Model& asset, std::size_t nodeIndex) {
     SourceText source(text());
     const auto blocks = source.nodes();
     const auto& block = *std::find_if(blocks.begin(), blocks.end(), [&](const auto& item) {
-        return item.geometry && model::ascii::equal(item.name, node.name);
+        return item.geometry && source.matches(item, node, nodeIndex);
     });
     wxDialog dialog(this, wxID_ANY, "Node Properties — " + wxui::toWx(node.name),
         wxDefaultPosition, wxDefaultSize, wxDEFAULT_DIALOG_STYLE | wxRESIZE_BORDER);
@@ -126,6 +126,16 @@ void AsciiEditor::editNode(const model::Model& asset, std::size_t nodeIndex) {
                 if (regenerate) { tangent->SetValue(true); edits["hastangentbasis"] = "1"; tangentChanged = true; }
             });
         }
+        if (advanced_ && node.lightsaber) {
+            auto* rebuild = new wxCheckBox(&dialog, wxID_ANY, "Regenerate saber arrays from geometry on Apply");
+            rebuild->SetToolTip("Replaces retained saber arrays using verts, normals, tverts, faces and selector colors. The whole change can be undone.");
+            grid->Add(rebuild, 0, wxALIGN_CENTER_VERTICAL); grid->AddSpacer(1);
+            rebuild->Bind(wxEVT_CHECKBOX, [&, rebuild](wxCommandEvent&) {
+                for (const auto* field : {"saberverts", "sabernormals", "saberuvs", "saberoriginalverts"})
+                    if (rebuild->GetValue()) edits[field] = std::nullopt;
+                    else edits.erase(field);
+            });
+        }
     }
     layout->Add(grid, 1, wxEXPAND | wxALL, FromDIP(12));
     if (!advanced_ && node.mesh && !node.lightsaber && !asset.meshes[*node.mesh].animated)
@@ -154,7 +164,7 @@ void AsciiEditor::editNode(const model::Model& asset, std::size_t nodeIndex) {
         edits["tangentbasis"] = std::nullopt;
         edits["tangentindices"] = std::nullopt;
     }
-    source.editNode(node.name, edits);
+    source.editNode(node, nodeIndex, edits);
     replaceText(source.text());
 }
 
@@ -168,6 +178,7 @@ void AsciiEditor::convertMesh(const model::Model& asset, std::size_t nodeIndex, 
 
 void AsciiEditor::editModel(const model::Model& asset) {
     SourceText source(text());
+    const bool identities = advanced_ && (!asset.asciiBuilt || asset.nodes.front().asciiIdentity);
     wxDialog dialog(this, wxID_ANY, "Model Properties");
     auto* layout = new wxBoxSizer(wxVERTICAL);
     auto* root = new wxChoice(&dialog, wxID_ANY);
@@ -177,7 +188,8 @@ void AsciiEditor::editModel(const model::Model& asset) {
         const auto& node = asset.nodes[i];
         const auto selection = static_cast<int>(nodeIndices.size());
         nodeIndices.push_back(i);
-        root->Append(wxui::toWx(node.name + (!node.parent ? " (geometry root)" : "")));
+        root->Append(wxui::toWx(node.name + (identities ? " [" + std::to_string(node.asciiIdentity.value_or(i)) + "]" : "") +
+            (!node.parent ? " (geometry root)" : "")));
         if (!node.parent) geometryRoot = selection;
         if (model::ascii::equal(node.name, "neck_g")) neck = selection;
         if (asset.animationRootNode == i) root->SetSelection(selection);
@@ -202,8 +214,12 @@ void AsciiEditor::editModel(const model::Model& asset) {
     while (SourceText::key(source.lines[begin]) != "beginmodelgeom") ++begin;
     auto end = begin + 1;
     while (SourceText::key(source.lines[end]) != "endmodelgeom") end = source.nextRecord(end);
-    source.edit({begin, end, {}, true, {}}, {{"smodelanimationrootname",
-        asset.nodes[nodeIndices[root->GetSelection()]].name}});
+    const auto selected = nodeIndices[root->GetSelection()];
+    const auto& node = asset.nodes[selected];
+    source.edit({begin, end, {}, true, {}}, identities ?
+        Edits{{"smodelanimationrootname", std::nullopt},
+              {"smodelanimationrootidentity", std::to_string(node.asciiIdentity.value_or(selected))}} :
+        Edits{{"smodelanimationrootname", node.name}});
     replaceText(source.text());
 }
 

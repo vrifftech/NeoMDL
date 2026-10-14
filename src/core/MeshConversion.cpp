@@ -111,12 +111,13 @@ std::string convertMeshToTrimesh(const std::string& text, const model::Model& as
         "colors","colorsrgba","colorindices","hastangentbasis","tangentbasis","tangentindices",
         "cpuverts","cpuindices","faceplanes","faces","bmin","bmax","spherecenter","sphereradius",
         "vertexindicescount","leftoverfaces","vertexindices","weights","qbone_ref_inv","tbone_ref_inv",
-        "boneconstantindices","skinbonemap","skinpalette","skinbindrotations","skinbindtranslations","skinweights"};
+        "boneconstantindices","skinbonemap","skinpalette","skinbindrotations","skinbindtranslations","skinweights",
+        "saberverts","sabernormals","saberuvs","saberoriginalverts"};
     SourceText source(text);
     source.materializeTangentPolicies();
     const auto blocks = source.nodes();
     for (auto block = blocks.rbegin(); block != blocks.rend(); ++block) {
-        if (!model::ascii::equal(block->name,node.name)) continue;
+        if (!source.matches(*block,node,nodeIndex)) continue;
         std::string type; std::istringstream(SourceText::value(source.lines[block->begin])) >> type;
         if (!block->geometry && !model::ascii::equal(type,"skin") && !model::ascii::equal(type,"lightsaber")) continue;
         std::vector<std::string> body;

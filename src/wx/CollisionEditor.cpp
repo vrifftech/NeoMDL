@@ -198,7 +198,7 @@ void AsciiEditor::useRoomCollision(const model::Model& asset,std::size_t index,
         "texindices1","texindices2","texindices3","tangentbasis","tangentindices","cpuverts","cpuindices",
         "colors","colorsrgba","colorindices","faceplanes","spherecenter","sphereradius",
         "vertexindices","vertexindicescount","leftoverfaces"}) edits[field]=std::nullopt;
-    SourceText source(text());source.editNode(asset.nodes[index].name,edits);replaceText(source.text());
+    SourceText source(text());source.editNode(asset.nodes[index],index,edits);replaceText(source.text());
 }
 
 } // namespace neomdl::ui

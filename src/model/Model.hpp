@@ -565,6 +565,9 @@ struct Node {
     std::uint16_t flags{};
     std::uint16_t id{};
     std::uint32_t engineNameIndex{};
+    // Advanced ASCII identities address source records independently of names.
+    std::optional<std::uint32_t> asciiIdentity;
+    std::optional<std::uint16_t> asciiNodeId;
     std::string name;
     std::optional<std::size_t> parent;
     Vec3 position{};

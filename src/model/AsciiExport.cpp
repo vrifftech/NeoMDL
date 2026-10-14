@@ -236,7 +236,27 @@ std::uint16_t animationFieldFlags(const Model& model,const Node& node) {
     return kNodeBase;
 }
 
-void writeTree(Writer& writer,const Model& model,const std::vector<Node>& nodes,bool animation) {
+std::optional<std::size_t> animationTarget(const Model& model,const Node& node) {
+    std::optional<std::size_t> result;
+    for(std::size_t i=0;i<model.nodes.size();++i)
+        if(model.nodes[i].id==node.id && ascii::equal(model.nodes[i].name,node.name)) {
+            if(result) return std::nullopt; // The stored part ID itself is ambiguous.
+            result=i;
+        }
+    return result;
+}
+
+std::vector<std::uint32_t> nodeIdentities(const std::vector<Node>& nodes) {
+    std::uint32_t next{};
+    for(const auto& node:nodes) if(node.asciiIdentity) next=std::max(next,*node.asciiIdentity+1u);
+    std::vector<std::uint32_t> result;
+    result.reserve(nodes.size());
+    for(const auto& node:nodes) result.push_back(node.asciiIdentity?*node.asciiIdentity:next++);
+    return result;
+}
+
+void writeTree(Writer& writer,const Model& model,const std::vector<Node>& nodes,bool animation,
+               const std::vector<std::uint32_t>& modelIdentities) {
     if(nodes.empty())throw ModelError("ASCII export requires the model/animation's engine root node");
     std::optional<std::size_t> root;
     for(std::size_t i=0;i<nodes.size();++i)if(!nodes[i].parent) {
@@ -245,23 +265,33 @@ void writeTree(Writer& writer,const Model& model,const std::vector<Node>& nodes,
     }
     if(!root)throw ModelError("ASCII export cannot represent a tree without a root");
     std::vector<bool> emitted(nodes.size(),false);
+    const auto identities=writer.advanced()?nodeIdentities(nodes):std::vector<std::uint32_t>{};
     std::unordered_map<std::string,std::size_t> firstNames;
     std::function<void(std::size_t)> writeNode=[&](std::size_t index) {
         writer.job().check();
         if(index>=nodes.size()||emitted[index])throw ModelError("ASCII export found inconsistent engine tree links");
         const auto& node=nodes[index];
         const auto name=writer.token(node.name,"node name");
-        const auto flags=animation?animationFieldFlags(model,node):node.flags;
+        const auto target=animation && writer.advanced()?animationTarget(model,node):std::nullopt;
+        const auto flags=animation && node.flags==kNodeBase?
+            (writer.advanced()?(target?model.nodes[*target].flags:kNodeBase):animationFieldFlags(model,node)):node.flags;
         writer.indent(0);
         writer.line("node "+nodeType(flags)+" "+name);
         writer.indent(2);
+        if(writer.advanced()) {
+            writer.line("nodeidentity "+std::to_string(identities[index]));
+            writer.line(target?"animationtarget "+std::to_string(modelIdentities[*target]):"nodeid "+std::to_string(node.id));
+        }
         if(node.parent) {
             if(*node.parent>=nodes.size())throw ModelError("ASCII export parent index is outside its tree");
             const auto& parent=nodes[*node.parent];
-            const auto found=firstNames.find(folded(parent.name));
-            if(folded(parent.name)=="null"||found==firstNames.end()||found->second!=*node.parent)
-                throw ModelError("ASCII export parent '"+parent.name+"' is ambiguous under engine name lookup");
-            writer.line("parent "+writer.token(parent.name,"parent name"));
+            if(writer.advanced()) writer.line("parentidentity "+std::to_string(identities[*node.parent]));
+            else {
+                const auto found=firstNames.find(folded(parent.name));
+                if(folded(parent.name)=="null"||found==firstNames.end()||found->second!=*node.parent)
+                    throw ModelError("ASCII export parent '"+parent.name+"' is ambiguous under engine name lookup");
+                writer.line("parent "+writer.token(parent.name,"parent name"));
+            }
         } else writer.line("parent NULL");
         firstNames.emplace(folded(name),index);emitted[index]=true;
         if(!animation && !writer.advanced())standardHeaderTransforms(writer,node);
@@ -380,8 +410,9 @@ AsciiExportResult exportAsciiModel(const Model& model,const neoshared::bif::JobC
     writer.line("ignorefog "+std::to_string(model.fog?0:1));
     writer.line("setanimationscale "+writer.scalar(model.animationScale));
     writer.line("beginmodelgeom "+modelTarget);
+    const auto identities=options.advanced?nodeIdentities(model.nodes):std::vector<std::uint32_t>{};
     reconstructSkinSeamSmoothing(writer,model);
-    writeTree(writer,model,model.nodes,false);
+    writeTree(writer,model,model.nodes,false,identities);
     if(model.engineBounds.valid) {
         writer.line("bmin "+writer.vector(model.engineBounds.minimum));
         writer.line("bmax "+writer.vector(model.engineBounds.maximum));
@@ -389,7 +420,8 @@ AsciiExportResult exportAsciiModel(const Model& model,const neoshared::bif::JobC
     writer.line("radius "+writer.scalar(model.engineRadius));
     if(model.animationRootNode) {
         if(*model.animationRootNode>=model.nodes.size())throw ModelError("ASCII export animation root is outside its tree");
-        writer.line("sModelAnimationRootName "+writer.token(model.nodes[*model.animationRootNode].name,"animation root"));
+        writer.line(options.advanced?"sModelAnimationRootIdentity "+std::to_string(identities[*model.animationRootNode]):
+            "sModelAnimationRootName "+writer.token(model.nodes[*model.animationRootNode].name,"animation root"));
     } else
         writer.warning("The absent model animation-root selection cannot be preserved: engine ASCII load assigns the tree root, enabling animation controllers that compiled playback leaves disabled.");
     writer.line("endmodelgeom "+modelTarget);writer.line();
@@ -412,7 +444,7 @@ AsciiExportResult exportAsciiModel(const Model& model,const neoshared::bif::JobC
         // serialized order so an load retains the stored event order.
         for(auto event=animation.events.rbegin();event!=animation.events.rend();++event)
             writer.line("event "+writer.scalar(event->time)+(event->name.empty()?std::string{}:" "+writer.token(event->name,"event name")));
-        writeTree(writer,model,animation.nodes,true);
+        writeTree(writer,model,animation.nodes,true,identities);
         writer.line("doneanim "+clip+" "+modelTarget);writer.line();
     }
     writer.line("donemodel "+modelTarget);

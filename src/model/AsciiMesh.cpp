@@ -592,7 +592,7 @@ void neighbors(RawNode& raw,Mesh& mesh) {
     }
 }
 
-void lightsaber(RawNode& raw,Mesh& mesh) {
+void generateLightsaber(RawNode& raw) {
 
 
 
@@ -633,7 +633,12 @@ void lightsaber(RawNode& raw,Mesh& mesh) {
                 // is back-piece row 88, just like the other three corners.
                 copy(destination++,base+corner);
     }
-    out.postprocessed=true;
+}
+
+void lightsaber(RawNode& raw,Mesh& mesh) {
+    if(!raw.retainedLightsaber) generateLightsaber(raw);
+    auto& out=*raw.node.lightsaber;
+    out.postprocessed=out.positions.size()==LightsaberNodeData::generatedVertexCount;
     mesh.vertices.clear();mesh.indices.clear();mesh.engineDrawIndices.clear();mesh.engineDraws.clear();
     mesh.cpuPositions=out.originalPositions;
 }
@@ -781,6 +786,18 @@ bool parseMeshField(const Line& initial,Reader& reader,RawNode& raw,GameVersion 
     if(!raw.mesh) return false;
     const auto offset=initial.bufferOffset;
     const auto extension=lower(initial.tokens.front());
+    if(raw.node.lightsaber && (extension=="saberverts" || extension=="sabernormals" ||
+            extension=="saberuvs" || extension=="saberoriginalverts")) {
+        raw.advancedAscii=raw.retainedLightsaber=true;
+        auto& saber=*raw.node.lightsaber;
+        if(extension=="saberuvs") readArray(initial,reader,saber.texcoords,8u,
+            [](const Line& row,const Reader&,Vec2& value) {
+                value={parseFloat(row.tokens.at(0)),parseFloat(row.tokens.at(1))};
+            },[](const std::uint8_t* p) {return Vec2{real(p),real(p+4u)};});
+        else vectorList(initial,reader,extension=="saberverts"?saber.positions:
+            extension=="sabernormals"?saber.normals:saber.originalPositions);
+        return true;
+    }
     if(extension=="tangentuvprecision" || extension=="normalpositionprecision")
         return parseMeshValue(initial,reader,raw,game);
     if(extension=="hastangentbasis" || extension=="tangentbasis" || extension=="tangentindices" ||

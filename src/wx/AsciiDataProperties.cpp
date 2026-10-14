@@ -129,6 +129,10 @@ const std::map<std::string, std::pair<std::string, std::vector<std::string>>> ve
     {"weights", {"Skin weights", {"Bone 1", "Weight 1", "Bone 2", "Weight 2", "Bone 3", "Weight 3", "Bone 4", "Weight 4"}}},
     {"skinweights", {"Skin weights and palette slots", {"Weight 1", "Weight 2", "Weight 3", "Weight 4", "Slot 1", "Slot 2", "Slot 3", "Slot 4"}}},
     {"cpuverts", {"CPU positions", {"X", "Y", "Z"}}},
+    {"saberverts", {"Retained saber positions", {"X", "Y", "Z"}}},
+    {"sabernormals", {"Retained saber normals", {"X", "Y", "Z"}}},
+    {"saberuvs", {"Retained saber UVs", {"U", "V"}}},
+    {"saberoriginalverts", {"Retained saber CPU positions", {"X", "Y", "Z"}}},
     {"tangentbasis", {"Tangent basis", {"Bitangent X", "Bitangent Y", "Bitangent Z", "Tangent X", "Tangent Y", "Tangent Z", "Normal X", "Normal Y", "Normal Z"}}},
     {"normalindices", {"Normal corner indices", {"Corner 0", "Corner 1", "Corner 2"}}},
     {"colorindices", {"Color corner indices", {"Corner 0", "Corner 1", "Corner 2"}}},
@@ -201,12 +205,12 @@ PropertyRow newControllerRow(const PropertySheet& sheet) {
 class DataPropertiesDialog final : public wxDialog {
 public:
     DataPropertiesDialog(wxWindow* parent, const SourceText& source, const model::Node& node,
-                         bool controllers, bool advanced)
+                         std::size_t nodeIndex, bool controllers, bool advanced)
         : wxDialog(parent, wxID_ANY, wxui::toWx(std::string(controllers ? "Controller Properties — " : "Vertex Properties — ") + node.name),
                    wxDefaultPosition, wxDefaultSize, wxDEFAULT_DIALOG_STYLE | wxRESIZE_BORDER),
           controllers_(controllers), advanced_(advanced), flags_(node.flags) {
         for (const auto& block : source.nodes())
-            if (model::ascii::equal(block.name, node.name) && (controllers || block.geometry)) contexts_.push_back(block);
+            if (source.matches(block, node, nodeIndex) && (controllers || block.geometry)) contexts_.push_back(block);
         for (std::size_t context = 0; context < contexts_.size(); ++context) {
             const auto& block = contexts_[context];
             insertions_.push_back(block.end);
@@ -353,7 +357,9 @@ private:
             else if (current_->keyword.find("bezierkey") != std::string::npos && current_->columns.size() == 4)
                 note_->SetLabel("Scalar Bezier rows retain the engine's three stored values; they are not vector-style tangent handles.\nTimes are in seconds. Apply rebuilds the preview; the whole edit can be undone in the ASCII pane.");
             else note_->SetLabel("Edit constants or key times and values. Row order is retained.\nApply rebuilds the preview; the whole edit can be undone in the ASCII pane.");
-        } else note_->SetLabel("Row numbers are source indices, starting at zero. Positions, UVs and normals can use separate pools.\nApply rebuilds the preview. Supplied normals, tangents, CPU positions, face planes and bounds remain authored.");
+        } else if (advanced_ && (flags_ & model::kNodeLightsaber))
+            note_->SetLabel("Retained saber arrays control the compiled payload; geometry edits take effect after regeneration in Node Properties.\nEdit each retained pool independently. Apply rebuilds the preview and can be undone.");
+        else note_->SetLabel("Row numbers are source indices, starting at zero. Positions, UVs and normals can use separate pools.\nApply rebuilds the preview. Supplied normals, tangents, CPU positions, face planes and bounds remain authored.");
         Layout();
     }
     void moveRow(int direction) {
@@ -429,13 +435,13 @@ private:
 
 void AsciiEditor::editVertices(const model::Model& asset, std::size_t nodeIndex) {
     SourceText source(text());
-    DataPropertiesDialog dialog(this, source, asset.nodes[nodeIndex], false, advanced_);
+    DataPropertiesDialog dialog(this, source, asset.nodes[nodeIndex], nodeIndex, false, advanced_);
     if (dialog.ShowModal() == wxID_OK && dialog.apply(source)) replaceText(source.text());
 }
 
 void AsciiEditor::editControllers(const model::Model& asset, std::size_t nodeIndex) {
     SourceText source(text());
-    DataPropertiesDialog dialog(this, source, asset.nodes[nodeIndex], true, advanced_);
+    DataPropertiesDialog dialog(this, source, asset.nodes[nodeIndex], nodeIndex, true, advanced_);
     if (dialog.ShowModal() == wxID_OK && dialog.apply(source)) replaceText(source.text());
 }
 

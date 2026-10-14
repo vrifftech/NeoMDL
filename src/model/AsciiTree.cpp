@@ -64,7 +64,7 @@ void synchronizeIds(std::vector<Node>& nodes, const std::vector<Node>& reference
     auto next = maximum + 1;
     std::function<void(std::size_t, std::size_t)> synchronize =
         [&](std::size_t source, std::size_t target) {
-            nodes[source].id = reference[target].id;
+            if (!nodes[source].asciiNodeId) nodes[source].id = reference[target].id;
             for (const auto child : nodes[source].children) {
                 const auto& candidates = reference[target].children;
                 const auto match = std::find_if(candidates.begin(), candidates.end(),
@@ -72,7 +72,7 @@ void synchronizeIds(std::vector<Node>& nodes, const std::vector<Node>& reference
                         return ascii::equal(nodes[child].name, reference[candidate].name);
                     });
                 if (match != candidates.end()) synchronize(child, *match);
-                else nodes[child].id = static_cast<std::uint16_t>(next++);
+                else if (!nodes[child].asciiNodeId) nodes[child].id = static_cast<std::uint16_t>(next++);
                 // Engine does not recurse into an unmatched child. Its
                 // descendants retain their original constructor IDs.
             }
@@ -92,6 +92,8 @@ void convertAnimationNode(Node& node) {
     replacement.flags = kNodeBase;
     replacement.id = node.id;
     replacement.engineNameIndex = node.engineNameIndex;
+    replacement.asciiIdentity = node.asciiIdentity;
+    replacement.asciiNodeId = node.asciiNodeId;
     replacement.name = std::move(node.name);
     replacement.parent = node.parent;
     replacement.children = std::move(node.children);
@@ -174,9 +176,11 @@ namespace ascii {
 void finalizeNodeTree(Model& model, std::vector<RawNode>&, Animation* animation) {
     if (animation) {
         for (auto& node : animation->nodes) convertAnimationNode(node);
-        postProcessAnimation(*animation);
+        // Explicit identities describe the retained tree, including empty
+        // compiled nodes; constructor pruning would discard their references.
+        if (!animation->nodes.front().asciiIdentity) postProcessAnimation(*animation);
         synchronizeIds(animation->nodes, model.nodes);
-    } else {
+    } else if (!model.nodes.front().asciiIdentity) {
         reorderChildren(model, treeRoot(model.nodes));
     }
 }

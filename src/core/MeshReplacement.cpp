@@ -59,7 +59,7 @@ model::AsciiExportResult replaceMeshes(const std::string& text, const model::Mod
         "sampleperiod", "animverts", "animtverts", "tangents", "mirrorlist",
         "displacement", "tightness", "period", "constraints", "weights", "qbone_ref_inv", "tbone_ref_inv",
         "boneconstantindices", "skinbonemap", "skinpalette", "skinbindrotations", "skinbindtranslations",
-        "skinweights", "aabb"};
+        "skinweights", "aabb", "saberverts", "sabernormals", "saberuvs", "saberoriginalverts"};
     const auto targets = namedMeshes(target);
     struct Replacement { std::size_t target; const MeshReplacement* mapping; };
     std::map<std::string, Replacement> replacements;

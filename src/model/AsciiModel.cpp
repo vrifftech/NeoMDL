@@ -7,6 +7,7 @@
 #include <cstdio>
 #include <memory>
 #include <sstream>
+#include <unordered_map>
 
 namespace neomdl::model::ascii {
 
@@ -295,6 +296,7 @@ void retainCurrentTree(std::vector<RawNode>& nodes, std::optional<std::size_t>& 
 void parseNode(const Line& header, Reader& reader, Model& model,
                std::vector<RawNode>& nodes, std::optional<std::size_t>& root,
                std::uint32_t& nodeCounter, bool animation,
+               std::unordered_map<std::uint32_t,std::size_t>& identities,
                std::array<std::vector<Vec3>,3>& textureIndices) {
     // Model/Animation::InternalParseField pass the bytes immediately after
     // the case-sensitive "node" prefix to ParseNode's two %s conversions.
@@ -315,6 +317,32 @@ void parseNode(const Line& header, Reader& reader, Model& model,
     while(reader.next(line)) {
         const auto& field=line.tokens.front();
         if(prefix(field,"endnode")) break;
+        if(equal(field,"nodeidentity")) {
+            raw.advancedAscii=true;
+            raw.node.asciiIdentity=parseUInt(line.tokens.at(1));
+            identities[*raw.node.asciiIdentity]=index;
+            continue;
+        }
+        if(equal(field,"nodeid")) {
+            raw.advancedAscii=true;
+            raw.node.asciiNodeId=static_cast<std::uint16_t>(parseUInt(line.tokens.at(1)));
+            continue;
+        }
+        if(equal(field,"parentidentity")) {
+            raw.advancedAscii=true;
+            raw.node.parent=identities.at(parseUInt(line.tokens.at(1)));
+            nodes[*raw.node.parent].node.children.push_back(index);
+            continue;
+        }
+        if(equal(field,"animationtarget")) {
+            raw.advancedAscii=true;
+            const auto identity=parseUInt(line.tokens.at(1));
+            const auto target=std::find_if(model.nodes.begin(),model.nodes.end(),[&](const Node& node) {
+                return node.asciiIdentity==identity;
+            });
+            raw.node.asciiNodeId=model.nodes.at(static_cast<std::size_t>(target-model.nodes.begin())).id;
+            continue;
+        }
         if(parseControllerExtension(line,reader,raw)) continue;
 
 
@@ -355,7 +383,8 @@ void parseNode(const Line& header, Reader& reader, Model& model,
     auto nameIndex=model.engineNames.size();
     if(animation) {
         for(auto candidate=model.engineNames.size();candidate!=0u;--candidate)
-            if(equal(model.engineNames[candidate-1u],raw.node.name)) {
+            if(raw.advancedAscii ? model.engineNames[candidate-1u]==raw.node.name :
+                equal(model.engineNames[candidate-1u],raw.node.name)) {
                 nameIndex=candidate-1u;
                 break;
             }
@@ -365,7 +394,8 @@ void parseNode(const Line& header, Reader& reader, Model& model,
     // Engine lookup translates this index through the model's name table;
     // animation declarations can reuse an entry with different letter case.
     raw.node.name=model.engineNames[nameIndex];
-    raw.node.id=static_cast<std::uint16_t>(nodeCounter++);
+    raw.node.id=raw.node.asciiNodeId.value_or(static_cast<std::uint16_t>(nodeCounter));
+    ++nodeCounter;
     // MdlNodeEmitter::InternalPostProcess changes the owning model header
     // immediately when this node closes, before later header fields parse.
     if(!animation && raw.node.emitter && model.engineRadius<40.0f) model.engineRadius=40.0f;
@@ -449,10 +479,14 @@ void loadTree(Reader& reader, Model& model, std::vector<RawNode>& nodes,
                 std::optional<std::size_t>& root, std::uint32_t& nodeCounter,
                 Animation* animation,
                 std::string& animationRootName,
+                std::optional<std::uint32_t>& animationRootIdentity,
                 std::array<std::vector<Vec3>,3>& textureIndices) {
     // LoadMaxTree keeps this %s destination in its own stack frame. A
     // repeated empty field retains a name written earlier in the same block.
     std::string rootNameScratch;
+    std::unordered_map<std::uint32_t,std::size_t> identities;
+    for(std::size_t i=0;i<nodes.size();++i)
+        if(nodes[i].node.asciiIdentity) identities[*nodes[i].node.asciiIdentity]=i;
     Line line;
     while(reader.next(line)) {
         const auto& field=line.tokens.front();
@@ -460,11 +494,16 @@ void loadTree(Reader& reader, Model& model, std::vector<RawNode>& nodes,
         // insensitive field comparisons (K1 0x5af488, K2 0x7ad83d).
         if(prefix(field,"done") || prefix(field,"end")) break;
         if(prefix(field,"node")) parseNode(line,reader,model,nodes,root,nodeCounter,
-                                          animation!=nullptr,textureIndices);
+                                          animation!=nullptr,identities,textureIndices);
         else if(animation) parseAnimationField(line,reader,*animation);
+        else if(equal(field,"sModelAnimationRootIdentity")) {
+            model.advancedAscii=true;
+            animationRootIdentity=parseUInt(line.tokens.at(1));
+        }
         else if(equal(field,"sModelAnimationRootName")) {
             scanString(fieldStart(line)+23u,rootNameScratch);
             animationRootName=rootNameScratch;
+            animationRootIdentity.reset();
         } else if(equal(field,"bmin") || equal(field,"bmax")) {
             auto& point=equal(field,"bmin")?model.engineBounds.minimum:model.engineBounds.maximum;
             std::sscanf(fieldStart(line)+4u,"%f %f %f",&point.x,&point.y,&point.z);
@@ -641,6 +680,7 @@ std::shared_ptr<Model> decodeAsciiModelInContext(const std::vector<std::uint8_t>
     std::optional<std::size_t> modelRoot;
     std::uint32_t modelNodeCounter{};
     std::string modelAnimationRootName;
+    std::optional<std::uint32_t> modelAnimationRootIdentity;
     Line line;
     job.update(0u,bytes.size(),"Parsing ASCII model: "+sourceLabel);
     while(reader.next(line)) {
@@ -663,6 +703,7 @@ std::shared_ptr<Model> decodeAsciiModelInContext(const std::vector<std::uint8_t>
             modelRoot.reset();
             modelNodeCounter=0u;
             modelAnimationRootName.clear();
+            modelAnimationRootIdentity.reset();
         } else if(command=="beginmodelgeom") {
             auto& model=*current;
 
@@ -670,7 +711,7 @@ std::shared_ptr<Model> decodeAsciiModelInContext(const std::vector<std::uint8_t>
 
             if(superclass) modelNodeCounter=superclass->engineNodeCount+1u;
             loadTree(reader,model,modelNodes,modelRoot,modelNodeCounter,nullptr,
-                       modelAnimationRootName,context.textureIndices);
+                       modelAnimationRootName,modelAnimationRootIdentity,context.textureIndices);
             retainCurrentTree(modelNodes,modelRoot);
             model.nodes.clear();
             for(const auto& raw:modelNodes) model.nodes.push_back(raw.node);
@@ -696,7 +737,12 @@ std::shared_ptr<Model> decodeAsciiModelInContext(const std::vector<std::uint8_t>
             // blocks search when resolving parent names.
             for(std::size_t index=0;index<modelNodes.size();++index)
                 modelNodes[index].node.children=model.nodes[index].children;
-            model.animationRootNode=findBuiltNode(model,modelRoot,modelAnimationRootName);
+            if(modelAnimationRootIdentity) {
+                const auto found=std::find_if(model.nodes.begin(),model.nodes.end(),[&](const Node& node) {
+                    return node.asciiIdentity==modelAnimationRootIdentity;
+                });
+                model.animationRootNode=static_cast<std::size_t>(found-model.nodes.begin());
+            } else model.animationRootNode=findBuiltNode(model,modelRoot,modelAnimationRootName);
             if(!model.animationRootNode) model.animationRootNode=modelRoot;
         } else if(command=="newanim") {
             requireTokens(line,2u,reader);
@@ -709,8 +755,9 @@ std::shared_ptr<Model> decodeAsciiModelInContext(const std::vector<std::uint8_t>
             std::optional<std::size_t> root;
             std::uint32_t nodeCounter{};
             std::string ignoredRoot;
+            std::optional<std::uint32_t> ignoredIdentity;
             loadTree(reader,model,nodes,root,nodeCounter,&animation,ignoredRoot,
-                       context.textureIndices);
+                       ignoredIdentity,context.textureIndices);
             animation.engineNodeCount=nodeCounter;
             retainCurrentTree(nodes,root);
             for(const auto& raw:nodes) animation.nodes.push_back(raw.node);

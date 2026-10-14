@@ -557,11 +557,15 @@ public:
     AsciiEditor* asciiEditor() const noexcept { return asciiEditor_; }
     model::GameVersion outputGame() const noexcept { return outputGame_; }
     void setOutputGame(model::GameVersion game) noexcept { outputGame_ = game; }
-    bool canEditNode() const {
-        if (!asciiEditor_ || !asciiEditor_->previewCurrent() || !selectedNode_ || !canvas_->areaScene().empty()) return false;
+    bool selectedNameIsUnique() const {
         const auto& name = document_->model().nodes[*selectedNode_].name;
         return std::count_if(document_->sourceModel().nodes.begin(), document_->sourceModel().nodes.end(),
             [&](const auto& node) { return wxui::toWx(node.name).CmpNoCase(wxui::toWx(name)) == 0; }) == 1;
+    }
+    bool canEditNode() const {
+        if (!asciiEditor_ || !asciiEditor_->previewCurrent() || !selectedNode_ || !canvas_->areaScene().empty()) return false;
+        return (asciiEditor_->advanced() && (!document_->sourceModel().asciiBuilt ||
+            document_->model().nodes[*selectedNode_].asciiIdentity)) || selectedNameIsUnique();
     }
     void editSelectedNode() {
         const auto sourceIndex = document_->model().partSourceNodes[*selectedNode_];
@@ -571,6 +575,7 @@ public:
         return canEditNode() && document_->sourceModel().nodes[
             document_->model().partSourceNodes[*selectedNode_]].mesh.has_value();
     }
+    bool canReplaceMesh() const { return canEditVertices() && selectedNameIsUnique(); }
     void editSelectedVertices() {
         const auto sourceIndex = document_->model().partSourceNodes[*selectedNode_];
         asciiEditor_->editVertices(document_->sourceModel(), sourceIndex);
@@ -832,6 +837,10 @@ private:
 
     void applyAsciiPreview(std::unique_ptr<ModelDocument> document) {
         const auto selection = selectedNode_ ? document_->model().nodes[*selectedNode_].name : std::string{};
+        std::optional<std::uint32_t> selectionIdentity;
+        if (selectedNode_ && document->sourceModel().nodes.front().asciiIdentity)
+            selectionIdentity = document_->model().nodes[*selectedNode_].asciiIdentity.value_or(
+                static_cast<std::uint32_t>(document_->model().partSourceNodes[*selectedNode_]));
         const auto animation = selectedAnimation();
         const auto clip = animation ? document_->animation(*animation).name : std::string{};
         const auto* run = selectedRun();
@@ -845,7 +854,8 @@ private:
         selectedNode_.reset();
         populateTree();
         for (std::size_t i = 0; i < document_->model().nodes.size(); ++i)
-            if (!selection.empty() && document_->model().nodes[i].name == selection) {
+            if (selectionIdentity ? document_->model().nodes[i].asciiIdentity == selectionIdentity :
+                !selection.empty() && document_->model().nodes[i].name == selection) {
                 tree_->SelectItem(nodeItems_[i]);
                 break;
             }
@@ -5550,7 +5560,7 @@ private:
         enableModuleCommand(ID_ExportPacked,editor&&editor->ready());
         enableModuleCommand(ID_NodeProperties,active&&active->canEditNode());
         enableModuleCommand(ID_VertexProperties,active&&active->canEditVertices());
-        enableModuleCommand(ID_ReplaceMesh,active&&active->canEditVertices());
+        enableModuleCommand(ID_ReplaceMesh,active&&active->canReplaceMesh());
         enableModuleCommand(ID_ConvertMesh,active&&active->canConvertMesh());
         enableModuleCommand(ID_ControllerProperties,active&&active->canEditNode());
         enableModuleCommand(ID_CollisionCompanions,editor&&editor->previewCurrent()&&!area);

@@ -71,7 +71,8 @@ struct SourceText {
             "vertexindicescount", "leftoverfaces", "constraints", "animverts", "animtverts",
             "tangents", "mirrorlist", "texturenames", "flaresizes", "flarepositions", "flarecolorshifts",
             "weights", "qbone_ref_inv", "tbone_ref_inv", "boneconstantindices", "skinbonemap",
-            "skinpalette", "skinbindrotations", "skinbindtranslations", "skinweights", "controllerdata"};
+            "skinpalette", "skinbindrotations", "skinbindtranslations", "skinweights", "controllerdata",
+            "saberverts", "sabernormals", "saberuvs", "saberoriginalverts"};
         const auto keyword = std::string_view(name);
         const auto suffix = name.size() >= 9 && name.compare(name.size() - 9, 9, "bezierkey") == 0 ? 9u :
             name.size() >= 3 && name.compare(name.size() - 3, 3, "key") == 0 ? 3u : 0u;
@@ -126,10 +127,15 @@ struct SourceText {
         lines.insert(lines.begin() + static_cast<std::ptrdiff_t>(block.begin + 1),
                      replacement.begin(), replacement.end());
     }
-    void editNode(const std::string& name, const Edits& edits) {
+    bool matches(const Block& block, const Node& node, std::size_t nodeIndex) const {
+        const auto identity = field(block, block.geometry ? "nodeidentity" : "animationtarget");
+        if (!identity.empty()) return parseUInt(identity) == node.asciiIdentity.value_or(static_cast<std::uint32_t>(nodeIndex));
+        return field(block, "nodeidentity").empty() && equal(block.name, node.name);
+    }
+    void editNode(const Node& node, std::size_t nodeIndex, const Edits& edits) {
         const auto blocks = nodes();
         const auto found = std::find_if(blocks.begin(), blocks.end(), [&](const auto& block) {
-            return block.geometry && equal(block.name, name);
+            return block.geometry && matches(block, node, nodeIndex);
         });
         edit(*found, edits);
     }

@@ -144,6 +144,7 @@ struct RawFace {
 
 struct RawNode {
     bool advancedAscii{};
+    bool retainedLightsaber{};
     Node node;
     std::optional<Mesh> mesh;
     std::string parentName;
