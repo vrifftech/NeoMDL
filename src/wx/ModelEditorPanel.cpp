@@ -104,6 +104,7 @@ enum CommandId {
     ID_ReplaceMesh,
     ID_ConvertMesh,
     ID_BinaryMeshFields,
+    ID_InspectBinary,
     ID_CompareBinaries,
     ID_ControllerProperties,
     ID_CollisionCompanions,
@@ -3927,6 +3928,7 @@ private:
         developerMenu_->Append(ID_EngineGraphics, "Hardware Emulation...");
         developerMenu_->Append(ID_DeveloperSettings, "Rendering Diagnostics...");
         developerMenu_->Append(ID_EngineReport, "Save Rendering Report...");
+        developerMenu_->Append(ID_InspectBinary, "Inspect Binary File...", "Inspect raw hex, characters and numeric values in a file.");
         developerMenu_->Append(ID_CompareBinaries, "Compare Binary Files...", "Highlight differences between two files at their stored byte offsets.");
         bar->Append(developerMenu_, "&Developer");
 
@@ -5386,6 +5388,8 @@ private:
                 activePage()->convertSelectedMesh([this](const wxString& title,const auto& work) {return runJob(title,work);});return;
             case ID_BinaryMeshFields:
                 editBinaryMeshFields(this,[this](const wxString& title,const auto& work) {return runJob(title,work);});return;
+            case ID_InspectBinary:
+                inspectBinaryFile(this,[this](const wxString& title,const auto& work) {return runJob(title,work);});return;
             case ID_CompareBinaries:
                 compareBinaryFiles(this,[this](const wxString& title,const auto& work) {return runJob(title,work);});return;
             case ID_CollisionCompanions: activePage()->asciiEditor()->editCollisions(activePage()->document().sourceModel()); return;

@@ -15,6 +15,10 @@
 #include <wx/valtext.h>
 
 #include <algorithm>
+#include <cstring>
+#include <iomanip>
+#include <limits>
+#include <sstream>
 
 namespace neomdl::ui {
 
@@ -114,7 +118,7 @@ void editBinaryMeshFields(wxWindow* parent, const AuthoringJob& runJob) {
 
 namespace {
 
-struct BinaryComparison {
+struct BinaryViewData {
     std::array<std::vector<std::uint8_t>,2> bytes;
     std::vector<std::size_t> rows;
     std::size_t different{};
@@ -124,48 +128,87 @@ struct BinaryComparison {
     }
 };
 
-class BinaryComparisonTable final : public wxGridTableBase {
+class BinaryViewTable final : public wxGridTableBase {
 public:
-    BinaryComparisonTable(const BinaryComparison& comparison, bool differences)
-        : data_(comparison), differences_(differences) {}
+    BinaryViewTable(const BinaryViewData& data, bool comparison, bool differences)
+        : data_(data), comparison_(comparison), differences_(differences) {}
     int GetNumberRows() override { return static_cast<int>(differences_ ? data_.rows.size() : (data_.size()+15)/16); }
-    int GetNumberCols() override { return 32; }
-    std::size_t offset(int row) const { return (differences_ ? data_.rows[row] : row)*16; }
+    int GetNumberCols() override { return comparison_ ? 32 : 17; }
+    std::size_t file(int column) const { return comparison_ ? column/16 : 0; }
+    std::size_t offset(int row,int column = 0) const { return (differences_ ? data_.rows[row] : row)*16+column%16; }
     wxString GetRowLabelValue(int row) override { return wxString::Format("%08zX",offset(row)); }
-    wxString GetColLabelValue(int column) override { return wxString::Format("%c:%X",column < 16 ? 'A' : 'B',column%16); }
+    wxString GetColLabelValue(int column) override {
+        if (comparison_) return wxString::Format("%c:%X",column < 16 ? 'A' : 'B',column%16);
+        return column == 16 ? wxString("Characters") : wxString::Format("%X",column);
+    }
     wxString GetValue(int row,int column) override {
-        const auto at = offset(row)+column%16; const auto& bytes = data_.bytes[column/16];
+        const auto at = offset(row,column); const auto& bytes = data_.bytes[file(column)];
+        if (!comparison_ && column == 16) {
+            wxString characters;
+            for (std::size_t i = at; i < at+16; ++i)
+                characters += i >= bytes.size() ? ' ' : bytes[i] >= 32 && bytes[i] <= 126 ? static_cast<char>(bytes[i]) : '.';
+            return characters;
+        }
         return at < bytes.size() ? wxString::Format("%02X",static_cast<unsigned>(bytes[at])) : wxString("—");
     }
     void SetValue(int,int,const wxString&) override {}
     wxGridCellAttr* GetAttr(int row,int column,wxGridCellAttr::wxAttrKind) override {
-        if (!data_.differs(offset(row)+column%16)) return nullptr;
+        if (!comparison_ || !data_.differs(offset(row,column))) return nullptr;
         auto* attr = new wxGridCellAttr;
         const bool dark = wxui::currentDarkMode();
         attr->SetBackgroundColour(dark ? wxColour(100,48,40) : wxColour(255,213,200));
         attr->SetTextColour(dark ? *wxWHITE : *wxBLACK); return attr;
     }
 private:
-    const BinaryComparison& data_;
+    const BinaryViewData& data_;
+    bool comparison_;
     bool differences_;
 };
 
-} // namespace
+wxString binaryValues(const std::vector<std::uint8_t>& bytes,std::size_t offset) {
+    if (offset >= bytes.size()) return "No byte at the selected offset.";
+    std::ostringstream text;
+    text << "Offset 0x" << std::hex << std::uppercase << offset << std::dec << " (" << offset << ") — little-endian\n";
+    for (const unsigned width : {1u,2u,4u,8u}) {
+        const auto bits = width*8;
+        text << bits << "-bit: ";
+        if (width > bytes.size()-offset) {
+            text << "unavailable (requires " << width << " bytes)\n";
+            continue;
+        }
+        std::uint64_t value = 0;
+        for (unsigned i = 0; i < width; ++i) value |= std::uint64_t(bytes[offset+i]) << (i*8);
+        text << "unsigned " << value << "   signed ";
+        const auto mask = std::numeric_limits<std::uint64_t>::max() >> (64-bits);
+        if (value & (std::uint64_t(1) << (bits-1))) text << '-' << ((~value & mask)+1);
+        else text << value;
+        if (width == 4) {
+            const auto raw = static_cast<std::uint32_t>(value);
+            float number; std::memcpy(&number,&raw,sizeof(number));
+            text << "   float " << std::setprecision(std::numeric_limits<float>::max_digits10) << number;
+        } else if (width == 8) {
+            double number; std::memcpy(&number,&value,sizeof(number));
+            text << "   float " << std::setprecision(std::numeric_limits<double>::max_digits10) << number;
+        }
+        text << '\n';
+    }
+    return wxui::toWx(text.str());
+}
 
-void compareBinaryFiles(wxWindow* parent, const AuthoringJob& runJob) {
-    std::array<std::filesystem::path,2> paths;
+void viewBinaryFiles(wxWindow* parent, const AuthoringJob& runJob, bool comparison) {
+    std::vector<std::filesystem::path> paths(comparison ? 2 : 1);
     for (std::size_t i = 0; i < paths.size(); ++i) {
-        wxFileDialog file(parent,i ? "Compare — File B" : "Compare — File A",{},{},
+        wxFileDialog file(parent,comparison ? (i ? "Compare — File B" : "Compare — File A") : "Inspect Binary File",{},{},
             "Model binaries (*.mdl;*.mdx;*.wok;*.pwk;*.dwk)|*.mdl;*.mdx;*.wok;*.pwk;*.dwk|All files (*.*)|*.*",wxFD_OPEN | wxFD_FILE_MUST_EXIST);
         if (file.ShowModal() != wxID_OK) return;
         paths[i] = neosettings::pathFromWx(file.GetPath());
     }
     try {
-        BinaryComparison data;
-        if (!runJob("Comparing binary files",[&](const auto& job) {
+        BinaryViewData data;
+        if (!runJob(comparison ? "Comparing binary files" : "Reading binary file",[&](const auto& job) {
             ResourceLoadScope scope(job);
             for (std::size_t i = 0; i < paths.size(); ++i) data.bytes[i] = readResourceFile(paths[i]);
-            for (std::size_t row = 0; row*16 < data.size(); ++row) {
+            for (std::size_t row = 0; comparison && row*16 < data.size(); ++row) {
                 if (row%4096 == 0) job.update(row*16,data.size(),"Comparing stored bytes");
                 bool different = false;
                 for (std::size_t i = row*16; i < std::min(row*16+16,data.size()); ++i)
@@ -173,32 +216,63 @@ void compareBinaryFiles(wxWindow* parent, const AuthoringJob& runJob) {
                 if (different) data.rows.push_back(row);
             }
         })) return;
-        wxDialog dialog(parent,wxID_ANY,"Binary Comparison",wxDefaultPosition,parent->FromDIP(wxSize(1230,680)),
+        wxDialog dialog(parent,wxID_ANY,comparison ? "Binary Comparison" : "Binary Inspector",
+            wxDefaultPosition,parent->FromDIP(wxSize(comparison ? 1230 : 920,740)),
             wxDEFAULT_DIALOG_STYLE | wxRESIZE_BORDER);
         auto* layout = new wxBoxSizer(wxVERTICAL);
         for (std::size_t i = 0; i < paths.size(); ++i)
-            layout->Add(new wxStaticText(&dialog,wxID_ANY,wxString(i ? "B: " : "A: ")+neosettings::pathToWx(paths[i])+
+            layout->Add(new wxStaticText(&dialog,wxID_ANY,(comparison ? wxString(i ? "B: " : "A: ") : wxString{})+neosettings::pathToWx(paths[i])+
                 wxString::Format("  (%zu bytes)",data.bytes[i].size())),0,wxALL,dialog.FromDIP(6));
-        layout->Add(new wxStaticText(&dialog,wxID_ANY,wxString::Format("%zu differing byte positions. ",data.different)+
-            "Offsets are absolute; inserted bytes shift subsequent comparisons. — marks absent bytes."),0,wxALL,dialog.FromDIP(6));
-        auto* only = new wxCheckBox(&dialog,wxID_ANY,"Show only differing rows"); only->SetValue(true);
-        layout->Add(only,0,wxALL,dialog.FromDIP(6));
+        wxCheckBox* only = nullptr;
+        if (comparison) {
+            layout->Add(new wxStaticText(&dialog,wxID_ANY,wxString::Format("%zu differing byte positions. ",data.different)+
+                "Offsets are absolute; inserted bytes shift subsequent comparisons. — marks absent bytes."),0,wxALL,dialog.FromDIP(6));
+            only = new wxCheckBox(&dialog,wxID_ANY,"Show only differing rows"); only->SetValue(true);
+            layout->Add(only,0,wxALL,dialog.FromDIP(6));
+        }
+        layout->Add(new wxStaticText(&dialog,wxID_ANY,comparison ?
+            "Select a byte in either file to interpret values from that offset." :
+            "Select a hex byte to interpret values. Characters selects the row's first byte; dots mark nonprintable ASCII."),
+            0,wxALL,dialog.FromDIP(6));
         auto* grid = new wxGrid(&dialog,wxID_ANY);
+        auto* values = new wxTextCtrl(&dialog,wxID_ANY,{},wxDefaultPosition,dialog.FromDIP(wxSize(-1,145)),
+            wxTE_MULTILINE | wxTE_READONLY | wxTE_DONTWRAP);
+        const auto font = wxFont(wxFontInfo(10).Family(wxFONTFAMILY_TELETYPE));
+        values->SetFont(font);
+        const auto select = [&](int row,int column) {
+            const auto& table = *static_cast<BinaryViewTable*>(grid->GetTable());
+            const auto file = table.file(column);
+            values->ChangeValue((comparison ? wxString(file ? "B: " : "A: ") : wxString{})+
+                neosettings::pathToWx(paths[file].filename())+"\n"+binaryValues(data.bytes[file],table.offset(row,column)));
+        };
         const auto display = [&] {
-            grid->SetTable(new BinaryComparisonTable(data,only->GetValue()),true);
+            grid->SetTable(new BinaryViewTable(data,comparison,comparison && only->GetValue()),true);
             grid->EnableEditing(false); grid->SetRowLabelSize(dialog.FromDIP(90));
-            grid->SetDefaultCellFont(wxFont(wxFontInfo(10).Family(wxFONTFAMILY_TELETYPE)));
+            grid->SetDefaultCellFont(font);
             grid->SetDefaultCellAlignment(wxALIGN_CENTER,wxALIGN_CENTER);
-            for (int column = 0; column < 32; ++column) grid->SetColSize(column,dialog.FromDIP(33));
+            for (int column = 0; column < grid->GetNumberCols(); ++column)
+                grid->SetColSize(column,dialog.FromDIP(!comparison && column == 16 ? 170 : 33));
+            values->ChangeValue("No byte selected.");
+            if (grid->GetNumberRows()) { grid->SetGridCursor(0,0); select(0,0); }
             grid->ForceRefresh();
         };
-        display(); only->Bind(wxEVT_CHECKBOX,[&](wxCommandEvent&) { display(); });
+        display();
+        if (comparison) only->Bind(wxEVT_CHECKBOX,[&](wxCommandEvent&) { display(); });
+        grid->Bind(wxEVT_GRID_SELECT_CELL,[&](wxGridEvent& event) {
+            select(event.GetRow(),event.GetCol()); event.Skip();
+        });
         layout->Add(grid,1,wxEXPAND | wxALL,dialog.FromDIP(6));
+        layout->Add(values,0,wxEXPAND | wxALL,dialog.FromDIP(6));
         layout->Add(dialog.CreateSeparatedButtonSizer(wxCANCEL),0,wxEXPAND | wxALL,dialog.FromDIP(6));
         dialog.FindWindow(wxID_CANCEL)->SetLabel("Close");
-        dialog.SetSizer(layout); dialog.SetMinSize(parent->FromDIP(wxSize(850,450)));
+        dialog.SetSizer(layout); dialog.SetMinSize(parent->FromDIP(wxSize(850,520)));
         wxui::applyTheme(&dialog,wxui::currentDarkMode()); dialog.ShowModal();
     } catch (const std::exception& error) { wxui::showError(parent,error); }
 }
+
+} // namespace
+
+void inspectBinaryFile(wxWindow* parent, const AuthoringJob& runJob) { viewBinaryFiles(parent,runJob,false); }
+void compareBinaryFiles(wxWindow* parent, const AuthoringJob& runJob) { viewBinaryFiles(parent,runJob,true); }
 
 } // namespace neomdl::ui
