@@ -26,7 +26,7 @@ Options:
   --build-type TYPE        Debug, Release, RelWithDebInfo, or MinSizeRel
   --wx ON|OFF              Build the wxWidgets renderer [default: ON]
   --require-wx ON|OFF      Fail if wxWidgets/OpenGL are unavailable [default: OFF]
-  --cli ON|OFF             Build neomdl-info [default: ON]
+  --cli ON|OFF             Build neomdl-cli [default: ON]
   --minimal-release ON|OFF Enable minimal release flags [default: ON]
   --jobs N                 Parallel build jobs
   --target NAME            Build only a named target

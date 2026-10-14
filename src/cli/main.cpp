@@ -9,7 +9,7 @@
 
 int main(int argc, char** argv) {
     const auto printUsage = [] {
-        std::cout << "Usage: neomdl-info [--game=k1|--game=k2] [--geometry-only] [--export-ascii output.mdl] [--advanced-ascii] [--explicit-normals|--smoothing-groups] [--refine-tangent-rounding] [--refine-normal-rounding] [--export-packed output.mdl] <model.mdl> [model.mdx]\n"
+        std::cout << "Usage: neomdl-cli [--game=k1|--game=k2] [--geometry-only] [--export-ascii output.mdl] [--advanced-ascii] [--explicit-normals|--smoothing-groups] [--refine-tangent-rounding] [--refine-normal-rounding] [--export-packed output.mdl] <model.mdl> [model.mdx]\n"
                      "ASCII models use the shared x86-layout builder and require an explicit target game.\n"
                      "ASCII export writes one model asset and its own animations to a separate file.\n"
                      "Standard ASCII is the default. --advanced-ascii exports stored-data preservation fields.\n"
@@ -35,10 +35,15 @@ int main(int argc, char** argv) {
                      "auto detects the input format and writes its opposite. Outputs default beside each input.\n"
                      "--ascii-names=dash|dot|suffix selects name-ascii.mdl, name.ascii.mdl or name.mdl.ascii.\n"
                      "Every conversion saves OUTPUT.report.txt with timing, options, warnings and errors.\n"
+                     "--help shows usage; --version shows the application version.\n"
                      "Batch files run in order; failed conversions are reported and remaining inputs continue.\n";
     };
     if (argc == 2 && (std::string_view(argv[1]) == "--help" || std::string_view(argv[1]) == "-h")) {
         printUsage();
+        return 0;
+    }
+    if (argc == 2 && std::string_view(argv[1]) == "--version") {
+        std::cout << "NeoMDL " << NEOMDL_VERSION << '\n';
         return 0;
     }
     neomdl::ConversionOptions options;
@@ -114,25 +119,42 @@ int main(int argc, char** argv) {
             }
             return request;
         };
-        std::vector<neomdl::ConversionRequest> requests;
-        if (mode) {
-            for (const auto& path : paths) {
-                const auto input=modelInput(path);
-                auto request=neomdl::planConversion(input.input,*mode,directory,naming);request.mdx=input.mdx;
+        struct Conversion {
+            neomdl::ConversionRequest request;
+            neomdl::ConversionReport result;
+            std::filesystem::path reportPath;
+            std::vector<std::filesystem::path> outputs;
+        };
+        std::vector<Conversion> conversions;
+        std::vector<std::filesystem::path> inputs=paths;
+        const auto count=mode?paths.size():1u;
+        for (std::size_t i=0;i<count;++i) {
+            const auto& path=paths[i];
+            Conversion conversion;
+            conversion.result.source=neoshared::pathToUtf8(path);
+            conversion.result.game=options.game;
+            try {
+                auto request=modelInput(path);
+                inputs.push_back(request.input);
+                if(mode) {
+                    auto planned=neomdl::planConversion(request.input,*mode,directory,naming);
+                    planned.mdx=request.mdx; request=std::move(planned);
+                } else if(paths.size()==2)request.mdx=paths[1];
                 if(asciiOutput)request.asciiOutput=asciiOutput;
                 if(packedOutput)request.packedOutput=packedOutput;
-                requests.push_back(std::move(request));
+                auto files=neomdl::conversionInputs(request); inputs.insert(inputs.end(),files.begin(),files.end());
+                conversion.outputs=neomdl::conversionOutputs(request,options);
+                if(request.asciiOutput||request.packedOutput)conversion.reportPath=neomdl::conversionReportPath(request);
+                conversion.request=std::move(request);
+            } catch(const std::exception& error) {
+                conversion.result.error=error.what();
+                if(mode||asciiOutput||packedOutput) {
+                    conversion.reportPath=directory.empty()?path:directory/path.filename();
+                    conversion.reportPath+=".report.txt";
+                    conversion.outputs={conversion.reportPath};
+                }
             }
-            if (!directory.empty()) std::filesystem::create_directories(directory);
-        } else {
-            auto request=modelInput(paths[0]);
-            if(paths.size()==2)request.mdx=paths[1];
-            request.asciiOutput=asciiOutput; request.packedOutput=packedOutput;
-            requests.push_back(std::move(request));
-        }
-        std::vector<std::filesystem::path> inputs;
-        for (const auto& request : requests) {
-            auto files=neomdl::conversionInputs(request); inputs.insert(inputs.end(),files.begin(),files.end());
+            conversions.push_back(std::move(conversion));
         }
         for (const auto& replacement:options.replacements) {
             neomdl::ConversionRequest donor; donor.input=replacement.donor;
@@ -140,19 +162,28 @@ int main(int argc, char** argv) {
         }
         if(options.layout)inputs.push_back(*options.layout);
         auto destinations=inputs;
-        for(const auto& request:requests)
-            for(const auto& output:neomdl::conversionOutputs(request,options)) {
+        for(const auto& conversion:conversions)
+            for(const auto& output:conversion.outputs) {
                 neoshared::checkResourceOutput(output,destinations); destinations.push_back(output);
             }
+        if (mode&&!directory.empty()) std::filesystem::create_directories(directory);
         int failures=0;
-        for(const auto& request:requests) {
-            const auto result=neomdl::convertFile(request,options,inputs);
+        for(auto& conversion:conversions) {
+            auto& result=conversion.result;
+            try {
+                if(result.error.empty())result=neomdl::convertFile(conversion.request,options,inputs);
+                else if(!conversion.reportPath.empty())neomdl::writeConversionReport(conversion.reportPath,result,options);
+            } catch(const std::exception& error) {
+                if(!result.error.empty())result.error+='\n';
+                result.error+=error.what();
+                conversion.reportPath.clear();
+            }
             std::cout<<result.source<<'\n'<<result.summary<<'\n';
             for(const auto& warning:result.warnings)std::cout<<"warning: "<<warning<<'\n';
             for(const auto& output:result.outputs)std::cout<<"Exported: "<<neoshared::pathToUtf8(output)<<'\n';
             if(!result.error.empty()) {std::cerr<<"NeoMDL: "<<result.error<<'\n';++failures;}
-            if(request.asciiOutput||request.packedOutput)
-                std::cout<<"Report: "<<neoshared::pathToUtf8(neomdl::conversionReportPath(request))<<'\n';
+            if(!conversion.reportPath.empty())
+                std::cout<<"Report: "<<neoshared::pathToUtf8(conversion.reportPath)<<'\n';
         }
         return failures?1:0;
     } catch(const std::exception& error) {

@@ -4853,7 +4853,7 @@ std::string modelSummary(const Model& model) {
         vertices += mesh.vertices.size();
         triangles += mesh.animated ? mesh.faces.size() : mesh.indices.size() / 3u;
         if (mesh.animated) ++animmeshes;
-        if (!mesh.texture0.empty()) ++textured;
+        if (!normalizedResourceName(mesh.texture0).empty()) ++textured;
         if (mesh.skinned) {
             ++skinned;
             if (mesh.hasSkinChannels &&

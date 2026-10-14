@@ -142,17 +142,21 @@ else()
     target_compile_options(neomdl_render PRIVATE -Wall -Wextra -Wpedantic -ffp-contract=off -fno-fast-math)
 endif()
 
-option(NEOMDL_BUILD_CLI "Build the NeoMDL information utility" ON)
+option(NEOMDL_BUILD_CLI "Build the NeoMDL command-line converter" ON)
 if(NEOMDL_BUILD_CLI)
-    add_executable(neomdl-info src/cli/main.cpp)
-    target_link_libraries(neomdl-info PRIVATE neomdl_core neoshared::game neoshared::texture)
-    target_compile_features(neomdl-info PRIVATE cxx_std_17)
-    neo_add_windows_version_resource(neomdl-info
+    add_executable(neomdl-cli src/cli/main.cpp)
+    target_link_libraries(neomdl-cli PRIVATE neomdl_core neoshared::game neoshared::texture)
+    target_compile_features(neomdl-cli PRIVATE cxx_std_17)
+    neo_add_windows_version_resource(neomdl-cli
         VERSION "${PROJECT_VERSION}"
         PRODUCT_NAME "NeoMDL"
-        FILE_DESCRIPTION "NeoMDL model information utility"
-        INTERNAL_NAME "neomdl-info"
-        ORIGINAL_FILENAME "neomdl-info.exe")
+        FILE_DESCRIPTION "NeoMDL command-line model converter"
+        INTERNAL_NAME "neomdl-cli"
+        ORIGINAL_FILENAME "neomdl-cli.exe")
+endif()
+
+option(NEOMDL_BUILD_AREA_CLI "Build the developer area diagnostic utility" OFF)
+if(NEOMDL_BUILD_AREA_CLI)
     add_executable(neomdl-area-info src/cli/area.cpp)
     target_link_libraries(neomdl-area-info PRIVATE neomdl::core neomdl::game_resources)
     target_compile_features(neomdl-area-info PRIVATE cxx_std_17)
@@ -160,7 +164,7 @@ if(NEOMDL_BUILD_CLI)
         VERSION "${PROJECT_VERSION}" PRODUCT_NAME "NeoMDL"
         FILE_DESCRIPTION "NeoMDL module-scoped area load utility"
         INTERNAL_NAME "neomdl-area-info" ORIGINAL_FILENAME "neomdl-area-info.exe")
-    install(TARGETS neomdl-info neomdl-area-info RUNTIME DESTINATION ${CMAKE_INSTALL_BINDIR})
+    install(TARGETS neomdl-area-info RUNTIME DESTINATION ${CMAKE_INSTALL_BINDIR})
 endif()
 
 option(NEOMDL_BUILD_WX_GUI "Build the wxWidgets NeoMDL desktop renderer when wxWidgets is available" ON)
@@ -285,6 +289,14 @@ if(NEOMDL_BUILD_WX_GUI OR NEOMDL_BUILD_WX_MODULE)
         message(FATAL_ERROR "NeoMDL wx targets require wxWidgets core/base/adv/aui/gl/stc and OpenGL.")
     else()
         message(STATUS "wxWidgets/OpenGL not found; NeoMDL GUI/module targets are omitted.")
+    endif()
+endif()
+
+if(TARGET neomdl-cli)
+    if(APPLE AND TARGET NeoMDL)
+        install(TARGETS neomdl-cli RUNTIME DESTINATION "NeoMDL.app/Contents/MacOS")
+    else()
+        install(TARGETS neomdl-cli RUNTIME DESTINATION ${CMAKE_INSTALL_BINDIR})
     endif()
 endif()
 

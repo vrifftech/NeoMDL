@@ -12,6 +12,7 @@ void usage() {
     std::cout << "Usage: neomdl-area-info <installation> [module [area]] [--game=k1|k2] [--allow-partial] [--no-grass]\n"
                  "Lists discovered module scopes, lists scoped AREs, or loads a visual area.\n"
                  "The default game is K2; K1 area playback uses the Desktop runtime profile.\n"
+                 "--help shows usage; --version shows the application version.\n"
                  "No resource extraction or game/save modification is performed.\n";
 }
 std::string hex(std::uint32_t value) {
@@ -102,6 +103,9 @@ void printEffective(const neomdl::AreaObject& object) {
 }
 int main(int argc,char** argv) {
     if(argc==2&&(std::string_view(argv[1])=="--help"||std::string_view(argv[1])=="-h")){usage();return 0;}
+    if(argc==2&&std::string_view(argv[1])=="--version") {
+        std::cout<<"NeoMDL "<<NEOMDL_VERSION<<'\n';return 0;
+    }
     try {
         neomdl::AreaLoadOptions options;neomdl::AreaRuntimeServices services;std::vector<std::string> args;
         for(int i=1;i<argc;++i) {
