@@ -20,8 +20,8 @@ bool confirmCompanionOverwrite(wxWindow* parent,const std::vector<std::filesyste
     wxString existing;
     for(const auto& path:paths) if(std::filesystem::exists(path))
         existing+="\n"+wxui::toWx(neoshared::texture::pathToUtf8(path));
-    return existing.empty() || wxMessageBox("Replace these companion files?\n"+existing,
-        "Save Model and Companions",wxYES_NO|wxNO_DEFAULT|wxICON_QUESTION,parent)==wxYES;
+    return existing.empty() || wxMessageBox("Replace these output files?\n"+existing,
+        "Save Model Outputs",wxYES_NO|wxNO_DEFAULT|wxICON_QUESTION,parent)==wxYES;
 }
 
 void AsciiEditor::editCollisions(const model::Model& asset) {

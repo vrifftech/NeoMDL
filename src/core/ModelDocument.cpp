@@ -2,6 +2,8 @@
 #include <material/ProceduralTexture.hpp>
 #include <material/Runtime.hpp>
 #include "core/ModelDocument.hpp"
+#include "core/AsciiMaterials.hpp"
+#include "core/ModelFilenames.hpp"
 #include <model/AsciiModel.hpp>
 
 #include <neoshared/PathUtf8.hpp>
@@ -207,15 +209,15 @@ bool ModelDocument::openFile(const std::filesystem::path& requestedPath,
             "Opening an MDX requires a unique same-name MDL companion.");
         mdlPath = *sibling;
     }
-    if (lower(neoshared::pathToUtf8(mdlPath.extension())) != ".mdl") {
+    if (lower(neoshared::pathToUtf8(mdlPath.extension())) != ".mdl" && !asciiModelSuffix(mdlPath)) {
         throw neomdl::model::ModelError(
-            "NeoMDL opens .mdl models and their .mdx companions.");
+            "NeoMDL opens .mdl and .mdl.ascii models and their .mdx companions.");
     }
 
     const auto directory = mdlPath.parent_path().empty()
         ? std::filesystem::path{"."} : mdlPath.parent_path();
-    const auto localResources = directoryResourceResolver(directory);
-    const ResourceResolver localResolver = [localResources, mdxPath, stem = resourceStem(neoshared::pathToUtf8(mdlPath))]
+    const auto localResources = collisionResources(mdlPath, directoryResourceResolver(directory));
+    const ResourceResolver localResolver = [localResources, mdxPath, stem = modelFileStem(mdlPath)]
         (const std::string& name, std::uint16_t type) -> std::optional<neoshared::ResourceDocument> {
         if (mdxPath && type == kMdxResourceType && lower(name) == lower(stem))
             return readLocalResource(*mdxPath, kMdxResourceType);
@@ -243,9 +245,9 @@ bool ModelDocument::openResource(neoshared::ResourceDocument resource,
     const ResourceLoadScope loading(job);
     job.update(0u, 0u, "Resolving model companions: " + resource.fileName);
     auto trace=std::make_shared<ResourceTrace>();
-    trace->record(resource.identity,resourceStem(resource.fileName),resource.type,&resource);
+    trace->record(resource.identity,modelFileStem(std::filesystem::u8path(resource.fileName)),resource.type,&resource);
     const auto resolver=traceResources(suppliedResolver,trace,resource.identity);
-    const auto stem = resourceStem(resource.fileName);
+    const auto stem = modelFileStem(std::filesystem::u8path(resource.fileName));
     if (stem.empty()) {
         throw neomdl::model::ModelError("The selected resource has no usable model ResRef.");
     }
@@ -336,75 +338,8 @@ bool ModelDocument::openResource(neoshared::ResourceDocument resource,
     rebuildMaterials();
     const auto auxiliary=auxiliaryTextures();
     if(!auxiliary.empty()) { loadTexturesFromResolver(resolver,auxiliary); rebuildMaterials(); }
-    // Compile against a fresh engine texture cache. InitializeTextures creates
-    // pending texture references and reads TXI before any image load;
-    // HasBumpMap accepts a named pending bump without inspecting its pixels or
-    // bump kind. The decoded materials above remain the runtime render view.
-    std::unordered_map<std::string,bool> compilerBumpMaps;
-    const auto compilerHasBumpMap=[&](const std::string& primary,model::GameVersion game) {
-        const auto key=neoshared::material::textureResourceKey(primary);
-        if(key.empty() || !resolver)return false;
-        const auto cacheKey=std::to_string(static_cast<int>(game))+":"+key;
-        const auto found=compilerBumpMaps.find(cacheKey);
-        if(found!=compilerBumpMaps.end())return found->second;
-        job.check();
-        std::string source;
-        if(const auto sidecar=resolver(key,kTxiResourceType)) {
-            source=bytesToText(sidecar->bytes);
-        } else if(const auto processed=resolver(key,kTpcResourceType)) {
-            // GetResource resolves missing TXI through the processed texture
-            // (K1 0x377e6c, K2 0x133640), without decoding its pixels.
-            source=neoshared::texture::readTpcTxiBytes(processed->bytes);
-        }
-        const auto txi=neoshared::material::parseAsciiMaterialTxi(source,
-            game==model::GameVersion::Kotor1);
-        const bool hasBump=txi.engineTextureNames &&
-            !neoshared::material::textureResourceKey(txi.engineTextureNames->bumpMap).empty();
-        compilerBumpMaps.emplace(cacheKey,hasBump);
-        return hasBump;
-    };
-    const auto finalizeAscii=[&](model::Model& model) {
-        if(!model.asciiBuilt||model.asciiMaterialsFinalized)return;
-        for(auto& allocation:model.asciiMdxAllocations) {
-
-
-
-
-            if(allocation.materialTangents && !(allocation.source->mdxBitmap&0x80u) &&
-               (allocation.source->asciiTangents?*allocation.source->asciiTangents:
-                    compilerHasBumpMap(allocation.primaryTexture,model.game))) {
-                // Cached reference assets copy the Model while retaining its
-                // source snapshots. Finalize this copy's deferred producer
-                // once, without changing another copy's completed stride.
-                // Contained model-owned normal/UV pools keep their identity.
-                allocation.source=std::make_shared<model::Mesh>(*allocation.source);
-                model::rebuildAsciiTangentBasis(*allocation.source,job);
-                allocation.rowSize=allocation.source->mdxRowSize;
-            }
-        }
-        for(std::size_t i=0;i<model.meshes.size();++i) {
-            auto& mesh=model.meshes[i];
-            if(mesh.asciiTangentSource && !(mesh.mdxBitmap&0x80u) &&
-               (mesh.asciiTangents?*mesh.asciiTangents:compilerHasBumpMap(mesh.texture0,model.game)))
-                model::rebuildAsciiTangentBasis(mesh,job);
-            if(mesh.asciiMdxAllocation) {
-                auto& allocation=model.asciiMdxAllocations[*mesh.asciiMdxAllocation];
-                allocation.rowSize=mesh.mdxRowSize;
-                allocation.source=std::make_shared<model::Mesh>(mesh);
-            }
-        }
-        for(auto& animation:model.animations)
-            for(auto& node:animation.nodes)
-                if(node.animmesh && node.animmesh->authoringMesh &&
-                   node.animmesh->authoringMesh->asciiMdxAllocation)
-                    node.animmesh->authoringMesh=model.asciiMdxAllocations[
-                        *node.animmesh->authoringMesh->asciiMdxAllocation].source;
-        model::initializeProceduralUvPools(model);
-        model.asciiMaterialsFinalized=true;
-    };
-    finalizeAscii(model_);
-    for(std::size_t i=0;i<references_.size();++i)
-        finalizeAscii(references_[i].model);
+    finalizeAsciiMaterials(model_, resolver, job);
+    for (auto& reference : references_) finalizeAsciiMaterials(reference.model, resolver, job);
     instantiateParts();
     job.update(1u, 1u, "Loaded model: " + stem);
     open_ = true;

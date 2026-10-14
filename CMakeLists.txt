@@ -37,6 +37,9 @@ if(NOT TARGET neoshared::bif)
 endif()
 
 add_library(neomdl_core
+    src/core/AsciiMaterials.cpp
+    src/core/ModelFilenames.cpp
+    src/core/Conversion.cpp
     src/core/CollisionAssets.cpp
     src/core/ActivePauseClock.cpp
     src/core/Engine2DA.cpp
@@ -226,6 +229,7 @@ if(NEOMDL_BUILD_WX_GUI OR NEOMDL_BUILD_WX_MODULE)
             src/wx/AsciiDataProperties.cpp
             src/wx/CollisionEditor.cpp
             src/wx/MeshReplacementEditor.cpp
+            src/wx/BatchConversion.cpp
             src/wx/ModelCanvas.cpp
             src/wx/SceneAudioPlayback.cpp
             src/wx/SceneAudioDevice.cpp

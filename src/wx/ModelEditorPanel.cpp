@@ -5,6 +5,8 @@
 
 #include "wx/ModelCanvas.hpp"
 #include "wx/AsciiEditor.hpp"
+#include "wx/BatchConversion.hpp"
+#include "wx/ConversionSettings.hpp"
 #include "wx/TrapRuntimeCapture.hpp"
 #include "core/GameResourceSession.hpp"
 #include "core/CreatureAppearance.hpp"
@@ -92,6 +94,10 @@ enum CommandId {
     ID_AsciiEditor,
     ID_ExportAscii,
     ID_ExportPacked,
+    ID_BatchDecompile,
+    ID_BatchCompile,
+    ID_QuickConvert,
+    ID_ConversionNaming,
     ID_NodeProperties,
     ID_VertexProperties,
     ID_ReplaceMesh,
@@ -3589,7 +3595,7 @@ private:
         wxFileDialog dialog(
             this, "Open Odyssey model", neosettings::pathToWx(initialDirectory),
             wxEmptyString,
-            "Odyssey models (*.mdl;*.mdx)|*.mdl;*.MDL;*.mdx;*.MDX|All files (*.*)|*.*",
+            "Odyssey models (*.mdl;*.mdx;*.mdl.ascii)|*.mdl;*.MDL;*.mdx;*.MDX;*.mdl.ascii;*.MDL.ASCII|All files (*.*)|*.*",
             wxFD_OPEN | wxFD_FILE_MUST_EXIST);
         if (dialog.ShowModal() == wxID_OK)
             openFile(neosettings::pathFromWx(dialog.GetPath()));
@@ -3599,16 +3605,15 @@ private:
         auto* page=activePage();
         const auto& document=page->document();
         auto protectedInputs=document.openPaths();
-        auto stem=document.path().stem();
-        if(stem.empty()) stem=std::filesystem::u8path(document.model().name);
-        const auto filename=neoshared::pathToUtf8(stem)+"-ascii.mdl";
+        const auto stem=document.path().empty()?document.model().name:conversionFileStem(document.path());
+        const auto filename=asciiModelFilename(stem,asciiNamingPreference());
         const auto* editor = page->asciiEditor();
         protectedInputs.insert(protectedInputs.end(), editor->replacementInputs().begin(), editor->replacementInputs().end());
         for(const auto& [kind,asset]:editor->collisions())
             protectedInputs.insert(protectedInputs.end(),asset.inputs.begin(),asset.inputs.end());
         AsciiExportControls controls(asciiNormalMode_, editor->advanced());
         wxFileDialog file(this,"Export ASCII Model and Companions",neosettings::pathToWx(document.path().parent_path()),
-            wxui::toWx(filename),"ASCII models (*.mdl)|*.mdl|All files (*.*)|*.*",
+            wxui::toWx(filename),"ASCII models (*.mdl;*.mdl.ascii)|*.mdl;*.mdl.ascii|All files (*.*)|*.*",
             wxFD_SAVE|wxFD_OVERWRITE_PROMPT);
         file.SetCustomizeHook(controls);
         if(file.ShowModal()!=wxID_OK) return;
@@ -3623,31 +3628,45 @@ private:
             const auto output=neosettings::pathFromWx(file.GetPath());
             neoshared::checkResourceOutput(output,protectedInputs);
             protectedInputs.push_back(output);
+            auto reportPath=output;reportPath+=".report.txt";
+            neoshared::checkResourceOutput(reportPath,protectedInputs);protectedInputs.push_back(reportPath);
             const auto collisions=collisionOutputs(editor->collisions(),output,false);
-            std::vector<std::filesystem::path> companionPaths;
+            std::vector<std::filesystem::path> companionPaths{reportPath};
             for(const auto& collision:collisions) {
                 neoshared::checkResourceOutput(collision.path,protectedInputs);
                 protectedInputs.push_back(collision.path);
                 companionPaths.push_back(collision.path);
             }
             model::AsciiExportResult exported;
+            ConversionReport report;report.source=document.sourceDescription();report.game=document.model().game;
             std::vector<std::uint8_t> bytes;
             const auto text = editor->text();
             const bool original = !editor->edited();
             if(!runJob("Exporting ASCII model",[&](const neoshared::bif::JobControl& job) {
                 // runJob keeps documents alive and suspends scene updates.
                 job.check();
-                if(original) exported=model::exportAsciiModel(editor->source()->sourceModel(),job,options);
+                const auto started=std::chrono::steady_clock::now();
+                if(original) {
+                    exported=model::exportAsciiModel(editor->source()->sourceModel(),job,options);
+                    report.summary=model::modelSummary(editor->source()->sourceModel());
+                }
                 else {
                     const auto edited = editor->source()->rebuildAscii(text, job, std::nullopt, options.includeAnimations);
                     exported=model::exportAsciiModel(edited->sourceModel(),job,options);
+                    report.summary=model::modelSummary(edited->sourceModel());
                 }
                 bytes.assign(exported.text.begin(),exported.text.end());
+                report.seconds=std::chrono::duration<double>(std::chrono::steady_clock::now()-started).count();
                 job.check();
             })) return;
             if(!confirmCompanionOverwrite(this,companionPaths)) return;
             neoshared::texture::writeFileBytes(output,bytes);
             for(const auto& collision:collisions) neoshared::texture::writeFileBytes(collision.path,collision.bytes);
+            report.outputs.push_back(output);
+            for(const auto& collision:collisions)report.outputs.push_back(collision.path);
+            report.warnings=exported.warnings;
+            ConversionOptions reportOptions;reportOptions.ascii=options;
+            writeConversionReport(reportPath,report,reportOptions);
             setModuleStatusText("ASCII model and companions exported to "+wxui::toWx(neoshared::pathToUtf8(output)),0);
             if(!exported.warnings.empty()) {
                 std::ostringstream message;
@@ -3683,17 +3702,23 @@ private:
             protectedInputs.push_back(output);
             neoshared::checkResourceOutput(companion,protectedInputs);
             protectedInputs.push_back(companion);
+            auto reportPath=output;reportPath+=".report.txt";
+            neoshared::checkResourceOutput(reportPath,protectedInputs);protectedInputs.push_back(reportPath);
             model::PackedExportResult exported;
+            ConversionReport report;report.source=document.sourceDescription();report.game=controls.game;
             std::vector<CollisionOutput> collisions;
             const auto text = editor->text();
             if(!runJob("Compiling packed model",[&](const neoshared::bif::JobControl& job) {
                 job.check();
+                const auto started=std::chrono::steady_clock::now();
                 const auto edited = editor->source()->rebuildAscii(text, job, controls.game, controls.includeAnimations);
                 exported=model::exportPackedModel(edited->sourceModel(),job);
                 collisions=collisionOutputs(editor->collisions(),output,true,job);
+                report.summary=model::modelSummary(edited->sourceModel());report.warnings=edited->sourceModel().warnings;
+                report.seconds=std::chrono::duration<double>(std::chrono::steady_clock::now()-started).count();
                 job.check();
             })) return;
-            std::vector<std::filesystem::path> companionPaths{companion};
+            std::vector<std::filesystem::path> companionPaths{companion,reportPath};
             for(const auto& collision:collisions) {
                 neoshared::checkResourceOutput(collision.path,protectedInputs);
                 protectedInputs.push_back(collision.path);
@@ -3703,6 +3728,10 @@ private:
             neoshared::texture::writeFileBytes(companion,exported.mdx);
             neoshared::texture::writeFileBytes(output,exported.mdl);
             for(const auto& collision:collisions) neoshared::texture::writeFileBytes(collision.path,collision.bytes);
+            report.outputs={output,companion};
+            for(const auto& collision:collisions)report.outputs.push_back(collision.path);
+            ConversionOptions reportOptions;reportOptions.ascii.advanced=editor->advanced();reportOptions.ascii.includeAnimations=controls.includeAnimations;
+            writeConversionReport(reportPath,report,reportOptions);
             setModuleStatusText("Binary model and companions exported to "+wxui::toWx(neoshared::pathToUtf8(output)),0);
         } catch(const std::exception& error) {
             wxMessageBox(wxui::toWx(error.what()),"Binary model not exported",wxOK|wxICON_ERROR,this);
@@ -3846,6 +3875,10 @@ private:
                      "Compile the text in the ASCII editor to MDL/MDX.");
         file->Append(ID_ExportTextures, "Export Texture List...", "Save the model's directly referenced texture names.");
         file->AppendSeparator();
+        file->Append(ID_QuickConvert, "Quick Convert Files...", "Read model files and write their opposite format.");
+        file->Append(ID_BatchDecompile, "Batch Decompile...", "Convert selected model files to ASCII.");
+        file->Append(ID_BatchCompile, "Batch Compile...", "Compile selected model files to binary MDL/MDX.");
+        file->AppendSeparator();
         file->Append(ID_CloseModel, "&Close Model\tCtrl+W");
         file->Append(ID_CloseAll, "Close &All");
         file->AppendSeparator();
@@ -3872,6 +3905,7 @@ private:
         tools->Append(ID_ModelResources, "Model Resource Installation...",
                       "Choose the game installation supplying textures and supermodels for this model.");
         tools->Append(ID_ResourceProvenance, "Resource Scope and Load Report...");
+        tools->Append(ID_ConversionNaming, "Default ASCII Filename...", "Choose the filename convention for new ASCII saves and conversions.");
         bar->Append(tools, "&Tools");
 
         developerMenu_ = new wxMenu;
@@ -5320,6 +5354,11 @@ private:
             case ID_AsciiEditor: activePage()->showAscii(event.IsChecked()); updateState(); return;
             case ID_ExportAscii: exportAsciiModel(); return;
             case ID_ExportPacked: exportPackedModel(); return;
+            case ID_BatchDecompile: case ID_BatchCompile: case ID_QuickConvert:
+                showBatchConversion(this,event.GetId()==ID_BatchDecompile?ConversionMode::Ascii:
+                    event.GetId()==ID_BatchCompile?ConversionMode::Binary:ConversionMode::Opposite,
+                    [this](const wxString& title,const auto& work){return runJob(title,work);});return;
+            case ID_ConversionNaming: chooseConversionNaming(this);return;
             case ID_NodeProperties: activePage()->editSelectedNode(); return;
             case ID_VertexProperties: activePage()->editSelectedVertices(); return;
             case ID_ReplaceMesh:

@@ -23,6 +23,7 @@ struct CollisionOutput {std::filesystem::path path;std::vector<std::uint8_t> byt
 
 const char* collisionLabel(CollisionKind kind);
 std::filesystem::path collisionPath(const std::filesystem::path& model,CollisionKind kind);
+ResourceResolver collisionResources(const std::filesystem::path& model, ResourceResolver resolver);
 CollisionMesh readCollisionAscii(const std::string& text,CollisionKind kind);
 std::string writeCollisionAscii(const CollisionMesh& mesh,CollisionKind kind);
 CollisionAsset readCollision(const neoshared::ResourceDocument& resource,CollisionKind kind,

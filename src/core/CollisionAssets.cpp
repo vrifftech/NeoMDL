@@ -1,4 +1,5 @@
 #include "core/CollisionAssets.hpp"
+#include "core/ModelFilenames.hpp"
 #include <model/AsciiModelInternal.hpp>
 #include <neoshared/texture/FileUtil.hpp>
 
@@ -23,9 +24,29 @@ const char* collisionLabel(CollisionKind kind) {
 
 std::filesystem::path collisionPath(const std::filesystem::path& model,CollisionKind kind) {
     auto result=model;
-    if(kind==CollisionKind::Room) return result.replace_extension(".wok");
-    if(kind==CollisionKind::Placeable) return result.replace_extension(".pwk");
-    result.replace_extension();result+="_dwk"+std::to_string(static_cast<int>(kind)-1)+".dwk";return result;
+    const bool suffix = asciiModelSuffix(model);
+    if (suffix) result.replace_extension();
+    if(kind==CollisionKind::Room) result.replace_extension(".wok");
+    else if(kind==CollisionKind::Placeable) result.replace_extension(".pwk");
+    else {result.replace_extension();result+="_dwk"+std::to_string(static_cast<int>(kind)-1)+".dwk";}
+    if (suffix) result += ".ascii";
+    return result;
+}
+
+ResourceResolver collisionResources(const std::filesystem::path& model, ResourceResolver resolver) {
+    if (!asciiModelSuffix(model)) return resolver;
+    const auto directory = std::filesystem::absolute(model).parent_path();
+    return [directory, resolver = std::move(resolver)](const std::string& name, std::uint16_t type)
+        -> std::optional<neoshared::ResourceDocument> {
+        if (type != 0x7e0 && type != 0x804 && type != 0x805) return resolver(name, type);
+        const auto file = uniqueResourceFile(directory, name + "." + resourceExtension(type) + ".ascii");
+        if (!file) return {};
+        neoshared::ResourceDocument resource;
+        resource.type = type; resource.fileName = neoshared::texture::pathToUtf8(file->filename());
+        resource.identity = resourceFileIdentity(*file); resource.sourceDescription = neoshared::texture::pathToUtf8(*file);
+        resource.bytes = readResourceFile(*file); resource.protectedInputs = {*file};
+        return resource;
+    };
 }
 
 CollisionMesh readCollisionAscii(const std::string& text,CollisionKind kind) {

@@ -86,7 +86,7 @@ void AsciiEditor::editMeshReplacements(const model::Model& asset, std::size_t no
         controls();
     };
     browse->Bind(wxEVT_BUTTON, [&](wxCommandEvent&) {
-        wxFileDialog file(&dialog, "Open Donor Model", {}, {}, "Models (*.mdl)|*.mdl", wxFD_OPEN | wxFD_FILE_MUST_EXIST);
+        wxFileDialog file(&dialog, "Open Donor Model", {}, {}, "Models (*.mdl;*.mdl.ascii)|*.mdl;*.mdl.ascii", wxFD_OPEN | wxFD_FILE_MUST_EXIST);
         if (file.ShowModal() != wxID_OK) return;
         try {
             const auto path = neosettings::pathFromWx(file.GetPath());

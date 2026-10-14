@@ -1,4 +1,5 @@
 #include "wx/AsciiEditor.hpp"
+#include "wx/ConversionSettings.hpp"
 
 #include <model/AsciiExport.hpp>
 #include <neoshared/PathUtf8.hpp>
@@ -257,10 +258,10 @@ void AsciiEditor::setAppearance(bool dark) {
 bool AsciiEditor::save(bool choosePath) {
     auto path = savePath_;
     if (choosePath || path.empty()) {
-        const auto name = path.empty() ? source_->sourceModel().name + "-ascii.mdl"
+        const auto name = path.empty() ? asciiModelFilename(source_->sourceModel().name,asciiNamingPreference())
                                        : neoshared::pathToUtf8(path.filename());
         wxFileDialog dialog(this, "Save ASCII Model and Companions", neosettings::pathToWx(source_->path().parent_path()),
-            wxui::toWx(name), "ASCII models (*.mdl)|*.mdl", wxFD_SAVE | wxFD_OVERWRITE_PROMPT);
+            wxui::toWx(name), "ASCII models (*.mdl;*.mdl.ascii)|*.mdl;*.mdl.ascii", wxFD_SAVE | wxFD_OVERWRITE_PROMPT);
         if (dialog.ShowModal() != wxID_OK) return false;
         path = neosettings::pathFromWx(dialog.GetPath());
     }
