@@ -47,6 +47,7 @@ public:
                          const CollisionMesh& collision,model::Vec3 placement);
     void editNode(const model::Model& model, std::size_t nodeIndex);
     void editVertices(const model::Model& model, std::size_t nodeIndex);
+    void convertMesh(const model::Model& model, std::size_t nodeIndex, const AuthoringJob& runJob);
     void editMeshReplacements(const model::Model& model, std::size_t nodeIndex, const AuthoringJob& runJob);
     const std::vector<std::filesystem::path>& replacementInputs() const noexcept { return replacementInputs_; }
     void editControllers(const model::Model& model, std::size_t nodeIndex);

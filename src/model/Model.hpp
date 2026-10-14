@@ -560,6 +560,8 @@ struct AnimMeshState {
 };
 
 struct Node {
+    // Absolute offset in the original packed MDL, including its wrapper.
+    std::optional<std::size_t> packedOffset;
     std::uint16_t flags{};
     std::uint16_t id{};
     std::uint32_t engineNameIndex{};
@@ -806,6 +808,10 @@ public:
 };
 
 bool isAsciiModelInput(const std::vector<std::uint8_t>& mdlBytes) noexcept;
+
+Model decodePackedModelBytes(const std::vector<std::uint8_t>& mdlBytes,
+    const std::vector<std::uint8_t>& mdxBytes, const std::string& sourceLabel,
+    const neoshared::bif::JobControl& job = {}, bool includeAnimations = true);
 
 using AsciiResourceResolver = std::function<std::optional<std::vector<std::uint8_t>>(
     const std::string& resourceName, const std::string& extension)>;

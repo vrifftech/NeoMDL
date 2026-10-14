@@ -6,6 +6,7 @@
 #include "wx/ModelCanvas.hpp"
 #include "wx/AsciiEditor.hpp"
 #include "wx/BatchConversion.hpp"
+#include "wx/BinaryTools.hpp"
 #include "wx/ConversionSettings.hpp"
 #include "wx/TrapRuntimeCapture.hpp"
 #include "core/GameResourceSession.hpp"
@@ -101,6 +102,9 @@ enum CommandId {
     ID_NodeProperties,
     ID_VertexProperties,
     ID_ReplaceMesh,
+    ID_ConvertMesh,
+    ID_BinaryMeshFields,
+    ID_CompareBinaries,
     ID_ControllerProperties,
     ID_CollisionCompanions,
     ID_ModelProperties,
@@ -573,6 +577,15 @@ public:
     void replaceSelectedMesh(const AuthoringJob& runJob) {
         const auto sourceIndex = document_->model().partSourceNodes[*selectedNode_];
         asciiEditor_->editMeshReplacements(document_->sourceModel(), sourceIndex, runJob);
+    }
+    bool canConvertMesh() const {
+        if (!canEditVertices()) return false;
+        const auto& asset = document_->sourceModel();
+        const auto& node = asset.nodes[document_->model().partSourceNodes[*selectedNode_]];
+        return asset.meshes[*node.mesh].skinned || node.lightsaber.has_value();
+    }
+    void convertSelectedMesh(const AuthoringJob& runJob) {
+        asciiEditor_->convertMesh(document_->sourceModel(),document_->model().partSourceNodes[*selectedNode_],runJob);
     }
     void editSelectedControllers() {
         const auto sourceIndex = document_->model().partSourceNodes[*selectedNode_];
@@ -3878,6 +3891,7 @@ private:
         file->Append(ID_QuickConvert, "Quick Convert Files...", "Read model files and write their opposite format.");
         file->Append(ID_BatchDecompile, "Batch Decompile...", "Convert selected model files to ASCII.");
         file->Append(ID_BatchCompile, "Batch Compile...", "Compile selected model files to binary MDL/MDX.");
+        file->Append(ID_BinaryMeshFields, "Edit Binary Mesh Fields...", "Save fixed-size texture and flag edits to a binary copy without rebuilding geometry.");
         file->AppendSeparator();
         file->Append(ID_CloseModel, "&Close Model\tCtrl+W");
         file->Append(ID_CloseAll, "Close &All");
@@ -3889,6 +3903,7 @@ private:
         edit->Append(ID_NodeProperties, "Selected Node Properties...", "Edit the selected node through its ASCII source.");
         edit->Append(ID_VertexProperties, "Selected Mesh Vertex Properties...", "Edit vertex values and corner assignments in source-index tables.");
         edit->Append(ID_ReplaceMesh, "Replace Selected Mesh...", "Queue mesh replacements from donor models.");
+        edit->Append(ID_ConvertMesh, "Convert Selected Mesh to Trimesh", "Bake a skin at its constructed bind pose, or retain a lightsaber's stationary blade pieces. Undoable ASCII edit.");
         edit->Append(ID_ControllerProperties, "Selected Node Controller Properties...", "Edit base controllers and animation keys for the selected node.");
         edit->Append(ID_CollisionCompanions, "Collision Companions...", "Edit PWK, door DWK states and room WOK geometry, hooks and links.");
         edit->Append(ID_ModelProperties, "Model Properties...", "Choose the animation root and head link.");
@@ -3912,6 +3927,7 @@ private:
         developerMenu_->Append(ID_EngineGraphics, "Hardware Emulation...");
         developerMenu_->Append(ID_DeveloperSettings, "Rendering Diagnostics...");
         developerMenu_->Append(ID_EngineReport, "Save Rendering Report...");
+        developerMenu_->Append(ID_CompareBinaries, "Compare Binary Files...", "Highlight differences between two files at their stored byte offsets.");
         bar->Append(developerMenu_, "&Developer");
 
         helpMenu_ = new wxMenu;
@@ -5366,6 +5382,12 @@ private:
                     return runJob(title, work);
                 }); return;
             case ID_ControllerProperties: activePage()->editSelectedControllers(); return;
+            case ID_ConvertMesh:
+                activePage()->convertSelectedMesh([this](const wxString& title,const auto& work) {return runJob(title,work);});return;
+            case ID_BinaryMeshFields:
+                editBinaryMeshFields(this,[this](const wxString& title,const auto& work) {return runJob(title,work);});return;
+            case ID_CompareBinaries:
+                compareBinaryFiles(this,[this](const wxString& title,const auto& work) {return runJob(title,work);});return;
             case ID_CollisionCompanions: activePage()->asciiEditor()->editCollisions(activePage()->document().sourceModel()); return;
             case ID_ModelProperties: activePage()->asciiEditor()->editModel(activePage()->document().sourceModel()); return;
             case ID_RenameTexture: activePage()->asciiEditor()->renameTexture(); return;
@@ -5525,6 +5547,7 @@ private:
         enableModuleCommand(ID_NodeProperties,active&&active->canEditNode());
         enableModuleCommand(ID_VertexProperties,active&&active->canEditVertices());
         enableModuleCommand(ID_ReplaceMesh,active&&active->canEditVertices());
+        enableModuleCommand(ID_ConvertMesh,active&&active->canConvertMesh());
         enableModuleCommand(ID_ControllerProperties,active&&active->canEditNode());
         enableModuleCommand(ID_CollisionCompanions,editor&&editor->previewCurrent()&&!area);
         enableModuleCommand(ID_ModelProperties,editor&&editor->previewCurrent()&&!area);

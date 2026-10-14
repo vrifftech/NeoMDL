@@ -58,6 +58,8 @@ add_library(neomdl_core
     src/core/ResourceContext.cpp
     src/core/ModelDocument.cpp
     src/core/MeshReplacement.cpp
+    src/core/MeshConversion.cpp
+    src/core/BinaryEditing.cpp
     src/core/SceneEffects.cpp
     src/core/VideoEffects.cpp
     src/core/ObjectVisualState.cpp
@@ -230,6 +232,7 @@ if(NEOMDL_BUILD_WX_GUI OR NEOMDL_BUILD_WX_MODULE)
             src/wx/CollisionEditor.cpp
             src/wx/MeshReplacementEditor.cpp
             src/wx/BatchConversion.cpp
+            src/wx/BinaryTools.cpp
             src/wx/ModelCanvas.cpp
             src/wx/SceneAudioPlayback.cpp
             src/wx/SceneAudioDevice.cpp

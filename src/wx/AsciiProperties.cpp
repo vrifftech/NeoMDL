@@ -1,5 +1,6 @@
 #include "wx/AsciiEditor.hpp"
 #include "wx/AsciiSource.hpp"
+#include "core/MeshConversion.hpp"
 #include <model/AsciiModelInternal.hpp>
 #include <model/AsciiControllerFields.hpp>
 #include <neoshared/texture/FileUtil.hpp>
@@ -155,6 +156,14 @@ void AsciiEditor::editNode(const model::Model& asset, std::size_t nodeIndex) {
     }
     source.editNode(node.name, edits);
     replaceText(source.text());
+}
+
+void AsciiEditor::convertMesh(const model::Model& asset, std::size_t nodeIndex, const AuthoringJob& runJob) {
+    const auto current = text();
+    std::string converted;
+    if (runJob("Converting mesh to trimesh",[&](const auto& job) {
+        converted = convertMeshToTrimesh(current,asset,nodeIndex,advanced_,job);
+    })) replaceText(converted);
 }
 
 void AsciiEditor::editModel(const model::Model& asset) {

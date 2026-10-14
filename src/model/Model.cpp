@@ -828,6 +828,7 @@ private:
             payload_->require(offset, kNodeHeaderSize, "node header");
 
             Node node;
+            node.packedOffset = payloadOffset_ + offset;
             node.flags = payload_->u16(offset, "node flags");
             // The synchronized short ID and the DWORD name-table index are
             // separate fields. ParseNode writes +2/+4 independently; engine
@@ -2901,6 +2902,12 @@ Model decodeModelBytes(const std::vector<std::uint8_t>& mdlBytes,
         if(!includeAnimations) model.animations.clear();
         return model;
     }
+    return decodePackedModelBytes(mdlBytes, mdxBytes, sourceLabel, job, includeAnimations);
+}
+
+Model decodePackedModelBytes(const std::vector<std::uint8_t>& mdlBytes,
+    const std::vector<std::uint8_t>& mdxBytes, const std::string& sourceLabel,
+    const neoshared::bif::JobControl& job, bool includeAnimations) {
     auto model=Parser(mdlBytes, mdxBytes, sourceLabel, job).parse(includeAnimations);
     initializeProceduralUvPools(model);
     return model;
