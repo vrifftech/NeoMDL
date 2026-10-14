@@ -20,6 +20,9 @@
 namespace neomdl {
 namespace {
 
+// Internal material binding; never written into authored texture names.
+constexpr const char* textureOverrideKey = "__neomdl_preview_texture__";
+
 std::string lower(std::string value) {
     std::transform(value.begin(), value.end(), value.begin(), [](unsigned char ch) {
         return static_cast<char>(ch >= 'A' && ch <= 'Z' ? ch + ('a' - 'A') : ch);
@@ -310,6 +313,8 @@ bool ModelDocument::openResource(neoshared::ResourceDocument resource,
     sourceModel_.reset();
     open_ = false;
     textures_.clear();
+    textureOverride_.reset();
+    textureOverrideMetadata_.reset();
     textureLoadOrder_.clear();
     textureMetadata_.clear();
     textureTxiAvailable_.clear();
@@ -554,6 +559,7 @@ void ModelDocument::appendDiagnostic(std::string message) {
 }
 
 const neoshared::texture::TextureData* ModelDocument::texture(const std::string& resref) const {
+    if (resref == textureOverrideKey) return textureOverride_.get();
     const auto found = textures_.find(lower(resourceStem(resref)));
     return found == textures_.end()
         ? (resourceParent_ ? resourceParent_->texture(resref) : nullptr) : &found->second;
@@ -561,6 +567,7 @@ const neoshared::texture::TextureData* ModelDocument::texture(const std::string&
 
 neoshared::material::TextureMetadataPtr ModelDocument::textureMetadata(
     const std::string& resref) const {
+    if (resref == textureOverrideKey) return textureOverrideMetadata_;
     const auto found = textureMetadata_.find(neoshared::material::textureResourceKey(resref));
     return found == textureMetadata_.end()
         ? (resourceParent_ ? resourceParent_->textureMetadata(resref) : nullptr) : found->second;
@@ -578,6 +585,14 @@ const neoshared::material::Material& ModelDocument::referenceMaterial(
         meshIndex >= referenceMaterials_[instanceIndex].size())
         throw neomdl::model::ModelError("Material index is outside the referenced model");
     return referenceMaterials_[instanceIndex][meshIndex];
+}
+
+void ModelDocument::setTextureOverride(std::shared_ptr<const neoshared::texture::TextureData> texture) {
+    auto metadata = texture ? std::make_shared<const neoshared::material::TextureMetadata>(
+        neoshared::material::makeTextureMetadata(*texture)) : nullptr;
+    textureOverride_ = std::move(texture);
+    textureOverrideMetadata_ = std::move(metadata);
+    rebuildMaterials();
 }
 
 void ModelDocument::rebuildMaterials() {
@@ -606,12 +621,13 @@ void ModelDocument::rebuildMaterials() {
     const neoshared::material::TextureMetadataLookup lookup = [this](const std::string& key) {
         return textureMetadata(key);
     };
-    const auto build = [&lookup](const neomdl::model::Model& model) {
+    const auto build = [this, &lookup](const neomdl::model::Model& model) {
         std::vector<neoshared::material::Material> result;
         result.reserve(model.meshes.size());
         for (const auto& mesh : model.meshes) {
             resourceLoadJob().check();
-            result.push_back(neoshared::material::makeMaterial(mesh.texture0, mesh.texture1, lookup));
+            result.push_back(neoshared::material::makeMaterial(
+                textureOverride_ ? textureOverrideKey : mesh.texture0, mesh.texture1, lookup));
         }
         return result;
     };

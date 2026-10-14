@@ -253,6 +253,7 @@ public:
     ~ModelCanvas() override;
 
     void setDocument(const ModelDocument* document, bool preserveCamera = false);
+    void refreshMaterials();
     void setLoading(bool loading);
     // Index 0 is the main Gob; reference index n is owner n+1. Runtime-only.
     const OwnerVisualEffects& ownerVisualEffects(std::size_t owner) const;

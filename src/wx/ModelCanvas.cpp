@@ -1815,6 +1815,12 @@ bool ModelCanvas::setTextureAngle(std::size_t owner,std::size_t node,float degre
     shaderErrorReported_=false;Refresh(false);return true;
 }
 
+void ModelCanvas::refreshMaterials() {
+    pendingGpuReset_ = true;
+    shaderErrorReported_ = false;
+    Refresh(false);
+}
+
 void ModelCanvas::setDocument(const ModelDocument* document, bool preserveCamera) {
     if (preserveCamera && authoredCameraActive()) useViewerCamera(false);
     stopDialogue();

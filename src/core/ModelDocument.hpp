@@ -180,6 +180,11 @@ public:
     const std::vector<std::string>& messages() const noexcept { return messages_; }
     void appendDiagnostic(std::string message);
     const neoshared::texture::TextureData* texture(const std::string& resref) const;
+    // Preview-only diffuse replacement; authored models and export resources stay intact.
+    void setTextureOverride(std::shared_ptr<const neoshared::texture::TextureData> texture);
+    const std::shared_ptr<const neoshared::texture::TextureData>& textureOverride() const noexcept {
+        return textureOverride_;
+    }
     std::size_t loadedTextureCount() const noexcept {
         return textures_.size() + (resourceParent_ ? resourceParent_->loadedTextureCount() : 0u);
     }
@@ -246,6 +251,8 @@ private:
     std::vector<ReferenceInstance> references_;
     std::vector<neomdl::model::AnimationReference> animations_;
     std::unordered_map<std::string, neoshared::texture::TextureData> textures_;
+    std::shared_ptr<const neoshared::texture::TextureData> textureOverride_;
+    neoshared::material::TextureMetadataPtr textureOverrideMetadata_;
     std::vector<std::string> textureLoadOrder_;
     std::unordered_map<std::string, neoshared::material::TextureMetadataPtr> textureMetadata_;
     std::unordered_map<std::string, bool> textureTxiAvailable_;

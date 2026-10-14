@@ -20,6 +20,7 @@
 
 #include <neoshared/PathUtf8.hpp>
 #include <neoshared/ResourceDocument.hpp>
+#include <neoshared/texture/Error.hpp>
 #include <neoshared/texture/FileUtil.hpp>
 #include "NeoSettings.hpp"
 #include "NeoGameDirectoryMenu.hpp"
@@ -38,6 +39,7 @@
 #include <wx/choicdlg.h>
 #include <wx/filedlg.h>
 #include <wx/filedlgcustomize.h>
+#include <wx/image.h>
 #include <wx/menu.h>
 #include <wx/msgdlg.h>
 #include <wx/notebook.h>
@@ -137,6 +139,8 @@ enum CommandId {
     ID_CloseAll,
     ID_FrameModel,
     ID_Textures,
+    ID_LoadTextureOverride,
+    ID_ClearTextureOverride,
     ID_Lightmaps,
     ID_Wireframe,
     ID_Lighting,
@@ -178,6 +182,41 @@ enum PreviewFeature : unsigned {
     PreviewReferences = 32u,
     PreviewLights = 64u,
 };
+
+neoshared::texture::TextureData readPreviewTexture(const std::filesystem::path& path) {
+    using namespace neoshared::texture;
+    const auto kind = kindForExtension(path);
+    if (kind != TextureFileKind::Png && kind != TextureFileKind::Jpeg && kind != TextureFileKind::Bmp) {
+        auto texture = readTextureFile(path);
+        if (texture.cubeMap || !texture.hasPixels())
+            throw TextureError("Choose a 2D image for the model's texture override.");
+        return texture;
+    }
+    wxImage image;
+    if (!image.LoadFile(neosettings::pathToWx(path)))
+        throw TextureError("Could not decode the selected image.");
+    TextureData texture;
+    texture.hasAlpha = image.HasAlpha() || image.HasMask();
+    if (!image.HasAlpha()) image.InitAlpha();
+    texture.kind = kind;
+    texture.sourcePath = path;
+    texture.sourceEncoding = "raw RGBA";
+    texture.canvasWidth = static_cast<std::uint32_t>(image.GetWidth());
+    texture.canvasHeight = static_cast<std::uint32_t>(image.GetHeight());
+    TextureLayer layer;
+    layer.width = texture.canvasWidth;
+    layer.height = texture.canvasHeight;
+    const auto pixels = static_cast<std::size_t>(layer.width) * layer.height;
+    layer.rgba.resize(pixels * 4u);
+    const auto* rgb = image.GetData();
+    const auto* alpha = image.GetAlpha();
+    for (std::size_t i = 0; i < pixels; ++i) {
+        std::copy_n(rgb + i * 3u, 3u, layer.rgba.data() + i * 4u);
+        layer.rgba[i * 4u + 3u] = alpha[i];
+    }
+    texture.layers.push_back(std::move(layer));
+    return texture;
+}
 
 class AsciiExportControls final : public wxFileDialogCustomizeHook {
 public:
@@ -556,6 +595,11 @@ public:
     const RenderOptions& options() const noexcept { return canvas_->options(); }
     unsigned previewFeatures() const noexcept { return previewFeatures_; }
     ModelDocument& document() noexcept { return *document_; }
+    void setTextureOverride(std::shared_ptr<const neoshared::texture::TextureData> texture) {
+        document_->setTextureOverride(std::move(texture));
+        canvas_->refreshMaterials();
+        updateDetails(selectedNode_);
+    }
     AsciiEditor* asciiEditor() const noexcept { return asciiEditor_; }
     model::GameVersion outputGame() const noexcept { return outputGame_; }
     void setOutputGame(model::GameVersion game) noexcept { outputGame_ = game; }
@@ -847,6 +891,7 @@ private:
     }
 
     void applyAsciiPreview(std::unique_ptr<ModelDocument> document) {
+        if (document_->textureOverride()) document->setTextureOverride(document_->textureOverride());
         const auto selection = selectedNode_ ? document_->model().nodes[*selectedNode_].name : std::string{};
         std::optional<std::uint32_t> selectionIdentity;
         if (selectedNode_ && document->sourceModel().nodes.front().asciiIdentity)
@@ -3636,6 +3681,31 @@ private:
             openFile(neosettings::pathFromWx(dialog.GetPath()));
     }
 
+    void chooseTextureOverride() {
+        auto* page = activePage();
+        const auto& current = page->document().textureOverride();
+        const auto directory = current ? current->sourcePath.parent_path() : page->document().path().parent_path();
+        wxFileDialog dialog(this, "Preview Texture Override", neosettings::pathToWx(directory), wxEmptyString,
+            "Texture images (*.tga;*.tpc;*.txb;*.dds;*.png;*.jpg;*.jpeg;*.bmp)|"
+            "*.tga;*.TGA;*.tpc;*.TPC;*.txb;*.TXB;*.dds;*.DDS;*.png;*.PNG;*.jpg;*.JPG;*.jpeg;*.JPEG;*.bmp;*.BMP",
+            wxFD_OPEN | wxFD_FILE_MUST_EXIST);
+        if (dialog.ShowModal() != wxID_OK) return;
+        const auto path = neosettings::pathFromWx(dialog.GetPath());
+        try {
+            std::shared_ptr<const neoshared::texture::TextureData> texture;
+            if (!runJob("Loading Texture Override", [&](const neoshared::bif::JobControl& job) {
+                job.update(0u, 0u, "Reading " + neoshared::pathToUtf8(path.filename()));
+                texture = std::make_shared<const neoshared::texture::TextureData>(readPreviewTexture(path));
+            })) return;
+            page->setTextureOverride(std::move(texture));
+            options_.textures = true;
+            applyDisplayOptions();
+            updateState();
+        } catch (const std::exception& error) {
+            wxMessageBox(wxui::toWx(error.what()), "Unable to Load Texture Override", wxOK | wxICON_ERROR, this);
+        }
+    }
+
     void exportAsciiModel() {
         auto* page=activePage();
         const auto& document=page->document();
@@ -3987,6 +4057,14 @@ private:
         view->AppendSubMenu(camera, "&Camera");
         view->AppendSeparator();
         view->AppendCheckItem(ID_Textures, "Show &Textures");
+        if (!area) {
+            auto* textureOverride = new wxMenu;
+            textureOverride->Append(ID_LoadTextureOverride, "Load from File...",
+                "Preview an image on all meshes in this model tab using their existing UVs.");
+            textureOverride->Append(ID_ClearTextureOverride, "Clear Override",
+                "Restore the model's authored textures.");
+            view->AppendSubMenu(textureOverride, "Texture Override");
+        }
         view->AppendCheckItem(ID_Lightmaps, "Show &Lightmaps");
         view->AppendCheckItem(ID_Wireframe, "&Wireframe");
         view->AppendCheckItem(ID_CullBackfaces, "Cull &Backfaces");
@@ -5430,7 +5508,9 @@ private:
             case ID_AreaReplay: chooseAreaReplay(); return;
             case ID_ResetView:
                 activePage()->clearAreaEnvironmentReplay();
+                activePage()->setTextureOverride({});
                 applyPreviewOptions(options_);
+                updateState();
                 return;
             case ID_ResetDisplay: copyDisplayOptions(options_,RenderOptions{});applyDisplayOptions();return;
             case ID_LoadArea: chooseArea(); return;
@@ -5456,6 +5536,8 @@ private:
                 updateState();
                 return;
             case ID_Textures: options_.textures = event.IsChecked(); applyDisplayOptions(); return;
+            case ID_LoadTextureOverride: chooseTextureOverride(); return;
+            case ID_ClearTextureOverride: activePage()->setTextureOverride({}); updateState(); return;
             case ID_Lightmaps: options_.lightmaps = event.IsChecked(); applyDisplayOptions(); return;
             case ID_Wireframe: options_.wireframe = event.IsChecked(); applyDisplayOptions(); return;
             case ID_Lighting: options_.lighting = event.IsChecked(); applyDisplayOptions(); return;
@@ -5585,6 +5667,9 @@ private:
         enableModuleCommand(ID_ModelProperties,editor&&editor->previewCurrent()&&!area);
         enableModuleCommand(ID_RenameTexture,editor&&editor->previewCurrent()&&!area);
         enableModuleCommand(ID_ExportTextures,editor&&editor->previewCurrent()&&!area);
+        const bool modelPreview = active && active->document().hasModelOwner() && !area;
+        enableModuleCommand(ID_LoadTextureOverride, modelPreview);
+        enableModuleCommand(ID_ClearTextureOverride, modelPreview && active->document().textureOverride());
         enableModuleCommand(ID_ResourceProvenance,hasDocument);
         const bool looseModel = active && !active->document().path().empty() && !area;
         enableModuleCommand(ID_Reload, looseModel);
@@ -5630,6 +5715,8 @@ private:
             setModuleStatusText(std::string(page->sourceFormat()) + " | " + neomdl::model::modelSummary(document.model()), 0);
             std::ostringstream right;
             right << document.loadedTextureCount() << " texture(s)";
+            if (document.textureOverride())
+                right << " | Texture override: " << neoshared::pathToUtf8(document.textureOverride()->sourcePath.filename());
             if (document.supermodelCount() != 0u)
                 right << " | " << document.supermodelCount() << " supermodel(s)";
             if (!document.references().empty())
