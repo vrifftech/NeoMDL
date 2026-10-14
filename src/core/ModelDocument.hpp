@@ -75,7 +75,8 @@ public:
                   const ResourceResolver& fallbackResolver = {},
                   const neoshared::bif::JobControl& job = resourceLoadJob(),
                   std::optional<model::GameVersion> asciiGame = std::nullopt,
-                  bool includeAnimations = true);
+                  bool includeAnimations = true,
+                  const std::optional<std::filesystem::path>& mdxPath = {});
     bool openResource(neoshared::ResourceDocument resource, const ResourceResolver& resolver,
                       const neoshared::bif::JobControl& job = resourceLoadJob(),
                       std::optional<model::GameVersion> asciiGame = std::nullopt,

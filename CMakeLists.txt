@@ -54,6 +54,7 @@ add_library(neomdl_core
     src/core/SceneAudioVoices.cpp
     src/core/ResourceContext.cpp
     src/core/ModelDocument.cpp
+    src/core/MeshReplacement.cpp
     src/core/SceneEffects.cpp
     src/core/VideoEffects.cpp
     src/core/ObjectVisualState.cpp
@@ -224,6 +225,7 @@ if(NEOMDL_BUILD_WX_GUI OR NEOMDL_BUILD_WX_MODULE)
             src/wx/AsciiProperties.cpp
             src/wx/AsciiDataProperties.cpp
             src/wx/CollisionEditor.cpp
+            src/wx/MeshReplacementEditor.cpp
             src/wx/ModelCanvas.cpp
             src/wx/SceneAudioPlayback.cpp
             src/wx/SceneAudioDevice.cpp

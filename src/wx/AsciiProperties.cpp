@@ -202,7 +202,7 @@ void AsciiEditor::renameTexture() {
     SourceText source(text());
     wxDialog dialog(this, wxID_ANY, "Rename Texture Throughout Model");
     auto* layout = new wxBoxSizer(wxVERTICAL);
-    auto* from = new wxChoice(&dialog, wxID_ANY, wxDefaultPosition, wxDefaultSize, source.textureNames());
+    auto* from = new wxChoice(&dialog, wxID_ANY, wxDefaultPosition, wxDefaultSize, textureNames(source));
     if (from->GetCount()) from->SetSelection(0);
     layout->Add(new wxStaticText(&dialog, wxID_ANY, "Texture"), 0, wxALL, FromDIP(10));
     layout->Add(from, 0, wxEXPAND | wxLEFT | wxRIGHT, FromDIP(10));
@@ -233,7 +233,7 @@ void AsciiEditor::exportTextureList() {
         const auto path = neosettings::pathFromWx(file.GetPath());
         neoshared::checkResourceOutput(path, source_->openPaths());
         std::string list;
-        for (const auto& name : SourceText(text()).textureNames()) list += wxui::toStd(name) + '\n';
+        for (const auto& name : textureNames(SourceText(text()))) list += wxui::toStd(name) + '\n';
         neoshared::texture::writeFileBytes(path, {list.begin(), list.end()});
     } catch (const std::exception& error) { wxui::showError(this, error); }
 }

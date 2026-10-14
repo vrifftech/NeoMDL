@@ -194,7 +194,8 @@ bool ModelDocument::openFile(const std::filesystem::path& requestedPath,
                              const ResourceResolver& fallbackResolver,
                              const neoshared::bif::JobControl& job,
                              std::optional<model::GameVersion> asciiGame,
-                             bool includeAnimations) {
+                             bool includeAnimations,
+                             const std::optional<std::filesystem::path>& mdxPath) {
     const ResourceLoadScope loading(job);
     job.update(0u, 0u, "Opening model: " + neoshared::pathToUtf8(requestedPath.filename()));
     auto mdlPath = requestedPath;
@@ -213,7 +214,13 @@ bool ModelDocument::openFile(const std::filesystem::path& requestedPath,
 
     const auto directory = mdlPath.parent_path().empty()
         ? std::filesystem::path{"."} : mdlPath.parent_path();
-    const auto localResolver = directoryResourceResolver(directory);
+    const auto localResources = directoryResourceResolver(directory);
+    const ResourceResolver localResolver = [localResources, mdxPath, stem = resourceStem(neoshared::pathToUtf8(mdlPath))]
+        (const std::string& name, std::uint16_t type) -> std::optional<neoshared::ResourceDocument> {
+        if (mdxPath && type == kMdxResourceType && lower(name) == lower(stem))
+            return readLocalResource(*mdxPath, kMdxResourceType);
+        return localResources(name, type);
+    };
     auto primary = readLocalResource(mdlPath, kMdlResourceType);
 
     const auto resolver = overlayResolver(localResolver, fallbackResolver);

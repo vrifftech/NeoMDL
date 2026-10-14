@@ -94,6 +94,7 @@ enum CommandId {
     ID_ExportPacked,
     ID_NodeProperties,
     ID_VertexProperties,
+    ID_ReplaceMesh,
     ID_ControllerProperties,
     ID_CollisionCompanions,
     ID_ModelProperties,
@@ -562,6 +563,10 @@ public:
     void editSelectedVertices() {
         const auto sourceIndex = document_->model().partSourceNodes[*selectedNode_];
         asciiEditor_->editVertices(document_->sourceModel(), sourceIndex);
+    }
+    void replaceSelectedMesh(const AuthoringJob& runJob) {
+        const auto sourceIndex = document_->model().partSourceNodes[*selectedNode_];
+        asciiEditor_->editMeshReplacements(document_->sourceModel(), sourceIndex, runJob);
     }
     void editSelectedControllers() {
         const auto sourceIndex = document_->model().partSourceNodes[*selectedNode_];
@@ -3598,6 +3603,7 @@ private:
         if(stem.empty()) stem=std::filesystem::u8path(document.model().name);
         const auto filename=neoshared::pathToUtf8(stem)+"-ascii.mdl";
         const auto* editor = page->asciiEditor();
+        protectedInputs.insert(protectedInputs.end(), editor->replacementInputs().begin(), editor->replacementInputs().end());
         for(const auto& [kind,asset]:editor->collisions())
             protectedInputs.insert(protectedInputs.end(),asset.inputs.begin(),asset.inputs.end());
         AsciiExportControls controls(asciiNormalMode_, editor->advanced());
@@ -3659,6 +3665,7 @@ private:
         const auto& document=page->document();
         auto protectedInputs=document.openPaths();
         const auto* editor = page->asciiEditor();
+        protectedInputs.insert(protectedInputs.end(), editor->replacementInputs().begin(), editor->replacementInputs().end());
         for(const auto& [kind,asset]:editor->collisions())
             protectedInputs.insert(protectedInputs.end(),asset.inputs.begin(),asset.inputs.end());
         const auto filename=document.model().name+"-packed.mdl";
@@ -3848,6 +3855,7 @@ private:
         auto* edit = new wxMenu;
         edit->Append(ID_NodeProperties, "Selected Node Properties...", "Edit the selected node through its ASCII source.");
         edit->Append(ID_VertexProperties, "Selected Mesh Vertex Properties...", "Edit vertex values and corner assignments in source-index tables.");
+        edit->Append(ID_ReplaceMesh, "Replace Selected Mesh...", "Queue mesh replacements from donor models.");
         edit->Append(ID_ControllerProperties, "Selected Node Controller Properties...", "Edit base controllers and animation keys for the selected node.");
         edit->Append(ID_CollisionCompanions, "Collision Companions...", "Edit PWK, door DWK states and room WOK geometry, hooks and links.");
         edit->Append(ID_ModelProperties, "Model Properties...", "Choose the animation root and head link.");
@@ -5314,6 +5322,10 @@ private:
             case ID_ExportPacked: exportPackedModel(); return;
             case ID_NodeProperties: activePage()->editSelectedNode(); return;
             case ID_VertexProperties: activePage()->editSelectedVertices(); return;
+            case ID_ReplaceMesh:
+                activePage()->replaceSelectedMesh([this](const wxString& title, const auto& work) {
+                    return runJob(title, work);
+                }); return;
             case ID_ControllerProperties: activePage()->editSelectedControllers(); return;
             case ID_CollisionCompanions: activePage()->asciiEditor()->editCollisions(activePage()->document().sourceModel()); return;
             case ID_ModelProperties: activePage()->asciiEditor()->editModel(activePage()->document().sourceModel()); return;
@@ -5473,6 +5485,7 @@ private:
         enableModuleCommand(ID_ExportPacked,editor&&editor->ready());
         enableModuleCommand(ID_NodeProperties,active&&active->canEditNode());
         enableModuleCommand(ID_VertexProperties,active&&active->canEditVertices());
+        enableModuleCommand(ID_ReplaceMesh,active&&active->canEditVertices());
         enableModuleCommand(ID_ControllerProperties,active&&active->canEditNode());
         enableModuleCommand(ID_CollisionCompanions,editor&&editor->previewCurrent()&&!area);
         enableModuleCommand(ID_ModelProperties,editor&&editor->previewCurrent()&&!area);

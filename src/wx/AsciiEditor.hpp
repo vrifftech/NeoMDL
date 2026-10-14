@@ -19,6 +19,8 @@ class wxTextCtrl;
 namespace neomdl::ui {
 
 bool confirmCompanionOverwrite(wxWindow* parent,const std::vector<std::filesystem::path>& paths);
+using AuthoringJob = std::function<bool(const wxString&,
+    const std::function<void(const neoshared::bif::JobControl&)>&)>;
 
 class AsciiEditor final : public wxPanel {
 public:
@@ -45,6 +47,8 @@ public:
                          const CollisionMesh& collision,model::Vec3 placement);
     void editNode(const model::Model& model, std::size_t nodeIndex);
     void editVertices(const model::Model& model, std::size_t nodeIndex);
+    void editMeshReplacements(const model::Model& model, std::size_t nodeIndex, const AuthoringJob& runJob);
+    const std::vector<std::filesystem::path>& replacementInputs() const noexcept { return replacementInputs_; }
     void editControllers(const model::Model& model, std::size_t nodeIndex);
     void editModel(const model::Model& model);
     void renameTexture();
@@ -82,6 +86,7 @@ private:
     std::filesystem::path savePath_;
     CollisionSet collisions_;
     bool collisionsModified_{};
+    std::vector<std::filesystem::path> replacementInputs_;
 };
 
 } // namespace neomdl::ui

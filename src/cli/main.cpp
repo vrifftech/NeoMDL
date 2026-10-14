@@ -3,6 +3,7 @@
 #include <model/AsciiModel.hpp>
 #include <model/PackedExport.hpp>
 #include <core/ModelDocument.hpp>
+#include <core/MeshReplacement.hpp>
 #include <neoshared/ResourceDocument.hpp>
 #include <neoshared/game/Installation.hpp>
 #include <neoshared/texture/FileUtil.hpp>
@@ -31,6 +32,11 @@ int main(int argc, char** argv) {
                      "--layout=area.lyt or --placement=X,Y,Z supplies room placement for --collision-from=wok:NODE.\n"
                      "--rebuild-aabb regenerates every MDL AABB tree from its collision faces.\n"
                      "A standalone .wok, .pwk or .dwk input also supports --export-ascii and --export-packed.\n";
+        std::cout << "--donor=donor.mdl --replace=TARGET:DONOR_MESH replaces a uniquely named mesh of the same type.\n"
+                     "Repeat --replace to queue mappings; --donor selects the file for subsequent mappings.\n"
+                     "The last mapping for a target wins. Names are case-insensitive. Donor animations are not loaded.\n"
+                     "Geometry, normals, UVs, materials and skin weights transfer; target transforms and controllers stay.\n"
+                     "Skin bones match by name in the target skeleton; texture files are not copied.\n";
     };
     if (argc == 2 && (std::string_view(argv[1]) == "--help" || std::string_view(argv[1]) == "-h")) {
         printUsage();
@@ -44,6 +50,9 @@ int main(int argc, char** argv) {
     std::optional<std::filesystem::path> layout;
     neomdl::model::Vec3 placement;
     std::vector<std::string> collisionSources;
+    struct NamedReplacement { std::filesystem::path donor; std::string mapping; };
+    std::filesystem::path donorPath;
+    std::vector<NamedReplacement> replacements;
     std::vector<std::filesystem::path> paths;
     for(int i=1;i<argc;++i) {
         const std::string_view argument(argv[i]);
@@ -52,6 +61,8 @@ int main(int argc, char** argv) {
         else if(argument=="--geometry-only")asciiOptions.includeAnimations=false;
         else if(argument=="--model-only")includeCollisions=false;
         else if(argument=="--rebuild-aabb")rebuildAabb=true;
+        else if(argument.substr(0,8)=="--donor=")donorPath=std::filesystem::u8path(std::string(argument.substr(8)));
+        else if(argument.substr(0,10)=="--replace=")replacements.push_back({donorPath,std::string(argument.substr(10))});
         else if(argument.substr(0,17)=="--collision-from=")collisionSources.emplace_back(argument.substr(17));
         else if(argument.substr(0,9)=="--layout=")layout=std::filesystem::u8path(std::string(argument.substr(9)));
         else if(argument.substr(0,12)=="--placement=") {
@@ -120,10 +131,11 @@ int main(int argc, char** argv) {
         if (paths.size() == 2u) mdx = paths[1];
         neomdl::ModelDocument document;
         neomdl::model::Model model;
-        if(packedOutput) {
+        const bool documentInput=packedOutput || !replacements.empty();
+        if(documentInput) {
             // Use the same resource-aware construction as the editor: TXI
             // bump materials change the authored MDX channel layout.
-            document.openFile(paths[0],{},{},game,asciiOptions.includeAnimations);
+            document.openFile(paths[0],{},{},game,asciiOptions.includeAnimations,mdx);
             // converttobinary spawns before Write (K2 0x72f2c9..0x72f34e).
             // NewCAurObject runs seams after Part::PostProcess (0x6ede8f).
             neomdl::model::processAsciiSkinSeams(document.model());
@@ -132,8 +144,40 @@ int main(int argc, char** argv) {
             model=neomdl::model::readModelFile(paths[0], mdx, {}, game, {},asciiOptions.includeAnimations);
             if(asciiOutput) neomdl::model::processAsciiSkinSeams(model);
         }
+        std::optional<neomdl::model::AsciiExportResult> replacedAscii;
+        std::vector<std::filesystem::path> donorInputs;
+        if(!replacements.empty()) {
+            std::map<std::string,std::shared_ptr<const neomdl::MeshDonor>> donors;
+            std::vector<neomdl::MeshReplacement> mappings;
+            for(const auto& replacement:replacements) {
+                const auto key=neomdl::resourceFileIdentity(replacement.donor);
+                auto found=donors.find(key);
+                if(found==donors.end()) {
+                    auto donor=std::make_shared<neomdl::MeshDonor>(neomdl::readMeshDonor(replacement.donor,model.game));
+                    donorInputs.insert(donorInputs.end(),donor->inputs.begin(),donor->inputs.end());
+                    found=donors.emplace(key,std::move(donor)).first;
+                }
+                const auto colon=replacement.mapping.find(':');
+                mappings.push_back({replacement.mapping.substr(0,colon),replacement.mapping.substr(colon).substr(1),found->second});
+            }
+            std::string source;
+            if(document.originalAscii() && model.advancedAscii==asciiOptions.advanced && asciiOptions.includeAnimations &&
+               !asciiOptions.explicitNormals && !asciiOptions.refineTangentRounding && !asciiOptions.refineNormalRounding) {
+                source=*document.originalAscii();
+            } else {
+                auto exported=neomdl::model::exportAsciiModel(model,{},asciiOptions);
+                for(const auto& warning:exported.warnings) std::cout<<"export warning: "<<warning<<'\n';
+                source=std::move(exported.text);
+            }
+            replacedAscii=neomdl::replaceMeshes(source,model,mappings,asciiOptions.advanced);
+            for(const auto& warning:replacedAscii->warnings) std::cout<<"replacement warning: "<<warning<<'\n';
+            replacedAscii->warnings.clear();
+            auto edited=document.rebuildAscii(replacedAscii->text,{},game,asciiOptions.includeAnimations);
+            document=std::move(*edited);
+            model=document.sourceModel();
+        }
         if(rebuildAabb) neomdl::model::rebuildAabbTrees(model);
-        auto collisions=packedOutput?document.collisions():neomdl::loadCollisions(
+        auto collisions=documentInput?document.collisions():neomdl::loadCollisions(
             neoshared::texture::pathToUtf8(paths[0].stem()),neomdl::directoryResources(std::filesystem::absolute(paths[0]).parent_path()));
         if(layout) {
             const auto bytes=neomdl::readResourceFile(*layout);
@@ -159,7 +203,8 @@ int main(int argc, char** argv) {
         }
         std::cout << neomdl::model::modelSummary(model) << '\n';
         for (const auto& warning : model.warnings) std::cout << "warning: " << warning << '\n';
-        auto protectedPaths=packedOutput?document.openPaths():paths;
+        auto protectedPaths=documentInput?document.openPaths():paths;
+        protectedPaths.insert(protectedPaths.end(),donorInputs.begin(),donorInputs.end());
         for(const auto& [kind,collision]:collisions)
             protectedPaths.insert(protectedPaths.end(),collision.inputs.begin(),collision.inputs.end());
         if(layout) protectedPaths.push_back(*layout);
@@ -191,7 +236,8 @@ int main(int argc, char** argv) {
             neoshared::checkResourceOutput(output.path,protectedPaths);protectedPaths.push_back(output.path);
         }
         if(asciiOutput) {
-            const auto exported=neomdl::model::exportAsciiModel(model,{},asciiOptions);
+            const auto exported=replacedAscii && !rebuildAabb?std::move(*replacedAscii):
+                neomdl::model::exportAsciiModel(model,{},asciiOptions);
             const std::vector<std::uint8_t> bytes(exported.text.begin(),exported.text.end());
             neoshared::texture::writeFileBytes(*asciiOutput,bytes);
             for(const auto& warning:exported.warnings) std::cout<<"export warning: "<<warning<<'\n';

@@ -66,6 +66,7 @@ void writeControllers(Writer&, const Node&, std::uint16_t fieldFlags);
 void writeNodeFields(Writer&, const Model&, const Node&);
 ReconstructedMesh writeMesh(Writer&, const Model&, const Node&, const Mesh&);
 void writeSkin(Writer&, const Model&, const Mesh&, const ReconstructedMesh&);
+void writeStandardSkin(Writer&, const Model&, const Mesh&, const ReconstructedMesh&);
 void writeLightsaber(Writer&, const Node&, bool explicitNormals);
 
 } // namespace neomdl::model::ascii_export

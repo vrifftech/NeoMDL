@@ -278,6 +278,7 @@ bool AsciiEditor::save(bool choosePath) {
                 return neoshared::sameResourcePath(input, source_->path());
             }), protectedInputs.end());
         }
+        protectedInputs.insert(protectedInputs.end(), replacementInputs_.begin(), replacementInputs_.end());
         neoshared::checkResourceOutput(path, protectedInputs);
         protectedInputs.push_back(path);
         auto outputs=collisionOutputs(collisions_,path,false);
