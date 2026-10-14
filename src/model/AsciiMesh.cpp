@@ -7,6 +7,7 @@
 #include <cstdio>
 #include <cstring>
 #include <map>
+#include <unordered_map>
 
 namespace neomdl::model::ascii {
 namespace {
@@ -300,6 +301,13 @@ struct GeneratedVertex {
     float constraint{};
     std::size_t source{},normalSource{};
 };
+struct PositionHash {
+    std::size_t operator()(const std::array<std::uint32_t,3>& key) const {
+        std::size_t value{};
+        for(const auto component:key) value^=component+0x9e3779b9u+(value<<6u)+(value>>2u);
+        return value;
+    }
+};
 bool same(const GeneratedVertex& a,const GeneratedVertex& b,bool dangly) {
     if(!same(a.position,b.position) || !same(a.normal,b.normal) || !same(a.color,b.color) ||
        a.alpha!=b.alpha || !same(a.cpuPosition,b.cpuPosition) ||
@@ -522,7 +530,8 @@ std::vector<GeneratedVertex> generateVertices(RawNode& raw,Mesh& mesh,
     // equal(Vector) 0x664744 compares all three components exactly, including
     // the third authoring UV coordinate that is omitted from final MDX rows.
     std::vector<GeneratedVertex> vertices;
-    std::map<std::array<std::uint32_t,3>,std::vector<std::size_t>> positions;
+    std::unordered_map<std::array<std::uint32_t,3>,std::vector<std::size_t>,PositionHash> positions;
+    positions.reserve(raw.vertices.size());
     mesh.faces.resize(raw.faces.size());
     raw.tangentFaceSources.resize(raw.faces.size());
     const bool dangly=raw.node.flags==0x121u;
@@ -1349,13 +1358,20 @@ void buildTangentBasis(Mesh& mesh,const neoshared::bif::JobControl& job) {
                                  source.generatedPositions.at(c)},{auv,buv,cuv}});
     }
     orientSingularTangentComponents(tangentFaces,faceBasis,job);
-    std::map<std::array<std::uint32_t,3>,std::vector<std::pair<std::size_t,std::int16_t>>> incident;
+    std::unordered_map<std::array<std::uint32_t,3>,
+        std::vector<std::pair<std::size_t,std::int16_t>>,PositionHash> incident;
+    incident.reserve(source.generatedPositions.size());
+    std::vector<std::size_t> writers(source.generatedPositions.size());
     for(std::size_t face=0;face<mesh.faces.size();++face)
-        for(const auto index:mesh.faces[face].indices)
+        for(const auto index:mesh.faces[face].indices) {
             incident[positionKey(source.generatedPositions.at(static_cast<std::size_t>(index)))].emplace_back(face,index);
+            writers[index]=face;
+        }
     for(std::size_t i=0;i<mesh.faces.size();++i) {
         job.check();
         for(const auto index:mesh.faces[i].indices) {
+            // Only the last face using a row publishes its final basis.
+            if(writers[index]!=i) continue;
             const auto position=source.generatedPositions.at(static_cast<std::size_t>(index));
             TangentBasis result;
             result.bitangent=add(faceBasis[i].bitangent,result.bitangent);

@@ -2493,6 +2493,16 @@ void reconstructSkinSeamSmoothing(Writer& out,const Model& model) {
         bestTangent=measureTangentBasis(current,model,rows,plans,out.job());
         processAsciiSkinSeams(current,out.job());
         best=measureSeamNormals(current,model,rows,plans);
+        std::vector<double> tangentErrors(model.meshes.size());
+        for(std::size_t index=0;index<model.meshes.size();++index) {
+            const auto& mesh=model.meshes[index];
+            const auto found=plans.find(&mesh);
+            if((mesh.mdxBitmap&0x80u) && !mesh.animated && !mesh.dangly && found!=plans.end())
+                tangentErrors[index]=measureMeshTangents(current.meshes[index],mesh,rows[index],found->second);
+        }
+        auto rebuilt=current;
+        auto generated=rows;
+        std::vector<std::size_t> previousMeshes;
         bool refitted=false;
         const auto considerRefit=[&](Plans trial) {
             Plans changed;
@@ -2500,20 +2510,36 @@ void reconstructSkinSeamSmoothing(Writer& out,const Model& model) {
                 if(entry.second.smoothing.masks!=plans.at(entry.first).smoothing.masks ||
                    entry.second.cornerRotations!=plans.at(entry.first).cornerRotations)
                     changed.emplace(entry);
-            auto rebuilt=current;
-            auto generated=rows;
+            // Reuse the trial model, restoring only meshes changed by the
+            // preceding proposal. Tangents are local to each changed mesh.
+            for(const auto index:previousMeshes) {
+                rebuilt.meshes[index]=current.meshes[index];
+                generated[index]=rows[index];
+            }
+            previousMeshes.clear();
             for(const auto& entry:changed) {
                 const auto index=static_cast<std::size_t>(entry.first-model.meshes.data());
                 rebuilt.meshes[index]=frames.meshes[index];
+                previousMeshes.push_back(index);
             }
-            const auto changedRows=generateGeometry(rebuilt,model,changed,false,out.advanced(),out.job());
+            const bool seamChanged=std::any_of(changed.begin(),changed.end(),
+                [](const auto& entry){return entry.first->render;});
+            const auto changedRows=generateGeometry(rebuilt,model,changed,false,out.advanced(),out.job(),seamChanged);
             for(const auto& entry:changed) {
                 const auto index=static_cast<std::size_t>(entry.first-model.meshes.data());
                 generated[index]=changedRows[index];
             }
             if(!preservesSkinChannels(model,generated)) return;
-            const auto tangentError=measureTangentBasis(rebuilt,model,generated,trial,out.job(),&changed);
-            if(std::any_of(changed.begin(),changed.end(),[](const auto& entry){return entry.first->render;}))
+            auto errors=tangentErrors;
+            for(const auto& entry:changed) {
+                const auto& mesh=*entry.first;
+                if(!(mesh.mdxBitmap&0x80u) || mesh.animated || mesh.dangly) continue;
+                const auto index=static_cast<std::size_t>(&mesh-model.meshes.data());
+                rebuildAsciiTangentBasis(rebuilt.meshes[index],out.job());
+                errors[index]=measureMeshTangents(rebuilt.meshes[index],mesh,generated[index],entry.second);
+            }
+            const auto tangentError=std::accumulate(errors.begin(),errors.end(),0.0);
+            if(seamChanged)
                 processAsciiSkinSeams(rebuilt,out.job());
             else
                 for(std::size_t index=0;index<model.meshes.size();++index)
@@ -2524,7 +2550,7 @@ void reconstructSkinSeamSmoothing(Writer& out,const Model& model) {
                (normalError<best || tangentError<bestTangent)) {
                 best=normalError;bestTangent=tangentError;
                 plans=std::move(trial);refitted=true;
-                current=std::move(rebuilt);rows=std::move(generated);
+                current=rebuilt;rows=generated;tangentErrors=std::move(errors);
             }
         };
         // Cyclic starts change the rounded contributions used to fit masks.
@@ -2597,10 +2623,33 @@ void reconstructSkinSeamSmoothing(Writer& out,const Model& model) {
                 }
                 std::set<std::vector<std::uint32_t>> masks;
                 for(const auto& candidate:candidates) masks.insert(candidate.masks);
+                // Different bit assignments can describe the same joins.
+                // Source-normal and tangent contributions only meet at
+                // equal positions, so score each resulting relation once.
+                std::map<std::array<std::uint32_t,3>,std::set<std::size_t>> incident;
+                const auto& plan=found->second;
+                for(std::size_t face=0;face<plan.topology.sourceFaces.size();++face)
+                    for(const auto source:plan.topology.sourceFaces[face]) {
+                        const auto p=plan.sourcePositions[source];
+                        incident[{bits(p.x),bits(p.y),bits(p.z)}].insert(face);
+                    }
+                std::set<std::pair<std::size_t,std::size_t>> relations;
+                for(const auto& entry:incident)
+                    for(auto first=entry.second.begin();first!=entry.second.end();++first)
+                        for(auto second=std::next(first);second!=entry.second.end();++second)
+                            relations.emplace(*first,*second);
+                std::set<std::vector<bool>> evaluated;
                 for(const auto& candidate:masks) {
+                    std::vector<bool> joined;
+                    joined.reserve(relations.size());
+                    for(const auto& relation:relations)
+                        joined.push_back((candidate[relation.first]&candidate[relation.second])!=0u);
+                    if(!evaluated.insert(std::move(joined)).second) continue;
+                    const auto previous=std::make_pair(best,bestTangent);
                     auto trial=plans;
                     trial.at(&mesh).smoothing.masks=candidate;
                     considerRefit(std::move(trial));
+                    if(previous!=std::make_pair(best,bestTangent)) evaluated.clear();
                 }
             }
             // Both sides of an ordered skin seam can need a join together;

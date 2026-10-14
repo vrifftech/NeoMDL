@@ -4,6 +4,7 @@
 #include <algorithm>
 #include <cmath>
 #include <limits>
+#include <iterator>
 #include <map>
 #include <set>
 #include <utility>
@@ -138,13 +139,13 @@ struct Smoothing {
         std::sort(pairs.begin(),pairs.end());
         pairs.erase(std::unique(pairs.begin(),pairs.end()),pairs.end());
         auto current=errors(joined);
+        std::vector<std::size_t> affected;
         for(const auto& pair:pairs) {
             job.check();
-            auto affected=relations[pair.first].corners;
+            const auto& first=relations[pair.first].corners;
             const auto& other=relations[pair.second].corners;
-            affected.insert(affected.end(),other.begin(),other.end());
-            std::sort(affected.begin(),affected.end());
-            affected.erase(std::unique(affected.begin(),affected.end()),affected.end());
+            affected.clear();
+            std::set_union(first.begin(),first.end(),other.begin(),other.end(),std::back_inserter(affected));
             double before{},after{};
             for(const auto corner:affected) before+=current[corner];
             joined[pair.first]^=1u;joined[pair.second]^=1u;
@@ -406,6 +407,7 @@ struct Smoothing {
                 if(!wanted[i] || joined[i]) continue;
                 const auto& pair=relations[i];
                 Choice best;
+                Choice choice;
                 bool unusedBitVisited=false;
                 std::set<std::vector<std::size_t>> visited;
                 for(unsigned index=0;index<32u;++index) {
@@ -415,7 +417,8 @@ struct Smoothing {
                         if(unusedBitVisited) continue;
                         unusedBitVisited=true;
                     }
-                    Choice choice;choice.bit=bit;choice.compatible=true;
+                    choice.bit=bit;choice.compatible=true;choice.improvement=0.0;
+                    choice.relations.clear();choice.corners.clear();
                     for(const auto face:{pair.first,pair.second})
                         for(const auto relation:faceRelations[face]) {
                             if(joined[relation]) continue;
@@ -441,7 +444,7 @@ struct Smoothing {
                     for(const auto relation:choice.relations) joined[relation]=0u;
                     if(!best.bit || (choice.compatible && !best.compatible) ||
                        (choice.compatible==best.compatible && choice.improvement>best.improvement))
-                        best=std::move(choice);
+                        std::swap(best,choice);
                 }
                 // Prefer an exact encoding of the fitted intersections.
                 // At the format's 32-bit limit, retain only an improvement
@@ -1455,7 +1458,7 @@ ReconstructedSmoothing reconstructSmoothing(
     // Two intersecting relations can improve together even when either
     // change alone increases error. Refit the encoded intersections until
     // the actual representable result stops improving.
-    while(refine) {
+    while(refine && best>0.0) {
         const auto previous=best;
         consider(work.fit(joined,false));
         consider(work.fit(joined,true));
