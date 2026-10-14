@@ -1,6 +1,5 @@
 #include "model/Shadow.hpp"
 #include "wx/ModelCanvas.hpp"
-#include "wx/OpenALProvider.hpp"
 #include <gff/GFFFile.hpp>
 #include "render/LightSubmission.hpp"
 #include <model/SceneOrdering.hpp>
@@ -628,8 +627,8 @@ void ModelCanvas::stopSceneAudio() {
 }
 void ModelCanvas::ensureSceneAudioProvider() {
     if(sceneAudioProvider_)return;
-    auto device=SceneAudioDevice::create();
-    auto buffers=prepareSceneAudioDeviceSounds(*device,sceneAudioAssets_,{},{});
+    auto device=std::make_unique<SceneAudioDevice>();
+    auto buffers=prepareSceneAudioBuffers(sceneAudioAssets_,{},{});
     sceneAudioProvider_=std::move(device);sceneAudioBuffers_=std::move(buffers);
     sceneAudioVoices_.reset(sceneAudioAssets_.priorities,
         engineSceneAudioDefaultVoiceLimits(document_->model().game),
@@ -659,7 +658,7 @@ void ModelCanvas::configureSceneAudio(std::optional<ExoRandom::State> capturedSt
 void ModelCanvas::mergeSceneAudioAssets(PreparedSceneAudioPlayback prepared) {
     if(!prepared.priorities.empty())sceneAudioAssets_.priorities=std::move(prepared.priorities);
     if(sceneAudioProvider_) {
-        auto buffers=prepareSceneAudioDeviceSounds(*sceneAudioProvider_,prepared,sceneAudioBuffers_,{});
+        auto buffers=prepareSceneAudioBuffers(prepared,sceneAudioBuffers_,{});
         sceneAudioBuffers_.insert(buffers.begin(),buffers.end());
     }
     for(auto& entry:prepared.sounds)sceneAudioAssets_.sounds.emplace(entry.first,std::move(entry.second));

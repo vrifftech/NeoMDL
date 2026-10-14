@@ -69,7 +69,7 @@ struct SceneAudioListener {
     model::Vec3 position{},forward{0,0,-1},up{0,1,0};
 };
 struct SceneAudioStreamMix {float gain{},pan{};bool writePan{true};};
-// Engine world coordinates, before the ordinary OpenAL Z conversion. A missing
+// Engine world coordinates, before the playback Z conversion. A missing
 // result means Update3DStream leaves the provider's retained gain untouched.
 std::optional<SceneAudioStreamMix> engineStreamingAudioMix(const SceneAudioPlay&,
     const SceneAudioListener&,float baseGain,int engineSoundMode,model::GameVersion,

@@ -13,7 +13,7 @@ namespace neomdl::ui {
 using SceneAudioResourceKey=std::tuple<std::string,std::uint16_t,bool>;
 using SceneAudioBufferKey=SceneAudioResourceKey;
 struct SceneAudioPreparedSound {
-    std::uint64_t buffer{};
+    std::shared_ptr<const neoshared::audio::PcmData> pcm;
     std::uint32_t durationMilliseconds{},sampleRate{};
 };
 using SceneAudioPreparedBuffers=std::map<SceneAudioBufferKey,SceneAudioPreparedSound>;

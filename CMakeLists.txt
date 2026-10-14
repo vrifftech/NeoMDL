@@ -238,7 +238,6 @@ if(NEOMDL_BUILD_WX_GUI OR NEOMDL_BUILD_WX_MODULE)
             src/wx/ModelCanvas.cpp
             src/wx/SceneAudioPlayback.cpp
             src/wx/SceneAudioDevice.cpp
-            src/wx/OpenALProvider.cpp
             src/wx/ModelEditorPanel.cpp)
         add_library(neomdl::wx ALIAS neomdl_wx)
         target_include_directories(neomdl_wx PUBLIC
@@ -293,5 +292,7 @@ set(NEOMDL_DOC_DESTINATION "${CMAKE_INSTALL_DOCDIR}")
 if(APPLE AND TARGET NeoMDL)
     set(NEOMDL_DOC_DESTINATION "NeoMDL.app/Contents/Resources/docs")
 endif()
+install(FILES "${NEOSHARED_ROOT}/licenses/miniaudio.txt"
+    DESTINATION "${NEOMDL_DOC_DESTINATION}/licenses")
 
 neo_apply_minimal_release_to_directory_targets()
