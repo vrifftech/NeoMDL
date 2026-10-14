@@ -51,7 +51,7 @@ model::AsciiExportResult replaceMeshes(const std::string& text, const model::Mod
         "texture0", "texture1", "bitmap", "verts", "normalpositionprecision", "normals", "normalindices",
         "tangentuvprecision", "tverts", "tverts1", "tverts2", "tverts3", "texindices1", "texindices2", "texindices3",
         "colors", "colorsrgba", "colorindices", "hastangentbasis", "tangentbasis", "tangentindices",
-        "cpuverts", "cpuindices", "faceplanes", "spherecenter", "sphereradius", "faces",
+        "cpuverts", "cpuindices", "faceplanes", "spherecenter", "sphereradius", "totalarea", "faces",
         "vertexindicescount", "leftoverfaces", "vertexindices", "diffuse", "ambient", "shadow", "render",
         "beaming", "rotatetexture", "lightmapped", "m_bisbackgroundgeometry", "transparencyhint", "animateuv",
         "uvdirectionx", "uvdirectiony", "uvjitter", "uvjitterspeed", "bmin", "bmax",

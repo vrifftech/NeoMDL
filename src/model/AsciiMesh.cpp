@@ -700,6 +700,7 @@ static bool parseMeshValue(const Line& line,Reader& reader,RawNode& raw,GameVers
         },[](const std::uint8_t* p) {return std::array<float,4>{{real(p),real(p+4u),real(p+8u),real(p+12u)}};});
     else if(key=="spherecenter") {raw.sphereCenter.emplace();vector(line,*raw.sphereCenter);}
     else if(key=="sphereradius") {raw.sphereRadius.emplace();scalar(line,*raw.sphereRadius);}
+    else if(key=="totalarea") {scalar(line,mesh.totalArea);raw.retainedTotalArea=true;}
     else if(key=="faces") {
         // InternalParseField parses this list only while it is empty. A later
         // faces directive neither replaces the first nonempty list nor
@@ -802,7 +803,8 @@ bool parseMeshField(const Line& initial,Reader& reader,RawNode& raw,GameVersion 
         return parseMeshValue(initial,reader,raw,game);
     if(extension=="hastangentbasis" || extension=="tangentbasis" || extension=="tangentindices" ||
        extension=="colorsrgba" || extension=="colorindices" || extension=="cpuverts" ||
-       extension=="cpuindices" || extension=="faceplanes" || extension=="spherecenter" || extension=="sphereradius") {
+       extension=="cpuindices" || extension=="faceplanes" || extension=="spherecenter" || extension=="sphereradius" ||
+       extension=="totalarea") {
         raw.advancedAscii=true;
         return parseMeshValue(initial,reader,raw,game);
     }
@@ -1107,7 +1109,8 @@ void buildMesh(Model& model,RawNode& raw,std::size_t nodeIndex,
         mesh.vertices.push_back(sentinel);
     }
     // Dangly's distinct postprocess omits ComputeLocalSurfaceArea.
-    if(!mesh.dangly && !mesh.skinned && !animated)
+    // Advanced's stored total area remains independent of geometry rebuilding.
+    if(!raw.retainedTotalArea && !mesh.dangly && !mesh.skinned && !animated)
         for(const auto& face:mesh.faces) {
             const auto a=mesh.vertices.at(static_cast<std::uint16_t>(face.indices[0])).position;
             const auto b=mesh.vertices.at(static_cast<std::uint16_t>(face.indices[1])).position;

@@ -196,7 +196,7 @@ void AsciiEditor::useRoomCollision(const model::Model& asset,std::size_t index,
     Edits edits{{"verts",vertices.str()},{"faces",faces.str()},{"aabb",std::nullopt}};
     for(const auto* field:{"normals","normalindices","tverts","tverts1","tverts2","tverts3",
         "texindices1","texindices2","texindices3","tangentbasis","tangentindices","cpuverts","cpuindices",
-        "colors","colorsrgba","colorindices","faceplanes","spherecenter","sphereradius",
+        "colors","colorsrgba","colorindices","faceplanes","spherecenter","sphereradius","totalarea",
         "vertexindices","vertexindicescount","leftoverfaces"}) edits[field]=std::nullopt;
     SourceText source(text());source.editNode(asset.nodes[index],index,edits);replaceText(source.text());
 }

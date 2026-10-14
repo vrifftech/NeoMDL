@@ -2644,6 +2644,7 @@ void reconstructSkinSeamSmoothing(Writer& out,const Model& model) {
 
 ReconstructedMesh writeMesh(Writer& out,const Model& model,const Node& node,const Mesh& mesh) {
     materialFields(out,model,node,mesh);
+    if(out.advanced()) out.line("totalarea "+out.scalar(mesh.totalArea));
     if(out.advanced() && mesh.engineBounds) {
         out.line("spherecenter "+out.vector(mesh.engineBounds->sphereCenter));
         out.line("sphereradius "+out.scalar(mesh.engineBounds->sphereRadius));

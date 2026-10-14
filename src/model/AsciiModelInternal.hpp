@@ -145,6 +145,7 @@ struct RawFace {
 struct RawNode {
     bool advancedAscii{};
     bool retainedLightsaber{};
+    bool retainedTotalArea{};
     Node node;
     std::optional<Mesh> mesh;
     std::string parentName;

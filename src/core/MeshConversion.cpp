@@ -109,7 +109,7 @@ std::string convertMeshToTrimesh(const std::string& text, const model::Model& as
         "verts","normals","normalindices","normalpositionprecision","tangentuvprecision",
         "tverts","tverts1","tverts2","tverts3","texindices1","texindices2","texindices3",
         "colors","colorsrgba","colorindices","hastangentbasis","tangentbasis","tangentindices",
-        "cpuverts","cpuindices","faceplanes","faces","bmin","bmax","spherecenter","sphereradius",
+        "cpuverts","cpuindices","faceplanes","faces","bmin","bmax","spherecenter","sphereradius","totalarea",
         "vertexindicescount","leftoverfaces","vertexindices","weights","qbone_ref_inv","tbone_ref_inv",
         "boneconstantindices","skinbonemap","skinpalette","skinbindrotations","skinbindtranslations","skinweights",
         "saberverts","sabernormals","saberuvs","saberoriginalverts"};
