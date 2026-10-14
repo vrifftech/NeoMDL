@@ -237,7 +237,7 @@ void materialFields(Writer& out,const Model& model,const Node& node,const Mesh& 
 }
 
 MeshReconstruction reconstructMesh(Writer& out,const Node& node,const Mesh& mesh,
-                                   bool refine=true,bool finalNormals=true) {
+                                   bool refine=true,bool finalNormals=true,bool reconstructNormals=false) {
     auto vertices=sourceVertices(mesh,node,out);
     const auto* animation=node.animmesh?&*node.animmesh:nullptr;
     if(animation && (mesh.mdxBitmap&2u)==0u)
@@ -246,7 +246,7 @@ MeshReconstruction reconstructMesh(Writer& out,const Node& node,const Mesh& mesh
         throw ModelError("Cannot export skin mesh "+node.name+": engine float weight/index channels are unavailable");
     const auto skin=mesh.skinned?decodeEngineFloatSkinChannels(mesh):std::vector<EngineFloatSkinChannels>{};
     const bool hasNormals=!mesh.enginePrelightInput || (mesh.mdxBitmap&0x20u)!=0u;
-    const bool explicitNormals=!animation && hasNormals && out.explicitNormals(mesh);
+    const bool explicitNormals=!animation && hasNormals && out.explicitNormals(mesh) && !reconstructNormals;
     const bool hasColors=mesh.hasVertexColors || (mesh.enginePrelightInput && (mesh.mdxBitmap&0x40u)!=0u);
     std::vector<std::vector<std::uint32_t>> sourceAttributes(vertices.size());
     for(std::size_t index=0;index<vertices.size();++index) {
@@ -398,7 +398,8 @@ PreciseUvPool preciseUvPool(const Mesh& mesh,const MeshReconstruction& plan) {
 
 CornerRows generateGeometry(Model& rebuilt,const Model& source,
                            const std::map<const Mesh*,MeshReconstruction>& plans,
-                           bool smooth,bool advanced,const neoshared::bif::JobControl& job) {
+                           bool smooth,bool advanced,const neoshared::bif::JobControl& job,
+                           bool resetSeams=true) {
     rebuilt.partSourceModel.reset();
     rebuilt.asciiBuilt=true;
     CornerRows rows(source.meshes.size());
@@ -490,14 +491,14 @@ CornerRows generateGeometry(Model& rebuilt,const Model& source,
                 rows[index][face][plan.sourceCorner(face,corner)]=generated[output][corner];
         }
     }
-    initializeAsciiSkinSeamPools(rebuilt);
+    if(resetSeams) initializeAsciiSkinSeamPools(rebuilt);
     return rows;
 }
 
-bool preservesSkinChannels(const Model& model,const CornerRows& rows) {
+bool preservesSkinChannels(const Model& model,const CornerRows& rows,const Mesh* changed=nullptr) {
     for(std::size_t index=0;index<model.meshes.size();++index) {
         const auto& mesh=model.meshes[index];
-        if(!mesh.skinned) continue;
+        if(!mesh.skinned || (changed && &mesh!=changed)) continue;
         const auto channels=decodeEngineFloatSkinChannels(mesh);
         std::vector<std::size_t> first(mesh.faces.size()*3u,channels.size());
         for(std::size_t face=0;face<mesh.faces.size();++face)
@@ -553,28 +554,36 @@ double measureSeamNormals(const Model& rebuilt,const Model& source,const CornerR
     return error;
 }
 
-double measureTangentBasis(Model& rebuilt,const Model& source,const CornerRows& rows,
-                          const std::map<const Mesh*,MeshReconstruction>& plans,
-                          const neoshared::bif::JobControl& job,
-                          const std::map<const Mesh*,MeshReconstruction>* changed=nullptr) {
+double measureMeshTangents(const Mesh& rebuilt,const Mesh& source,
+                          const std::vector<std::array<std::int16_t,3>>& rows,
+                          const MeshReconstruction& plan) {
     double error{};
     const auto difference=[](Vec3 a,Vec3 b) {
         const double x=double(a.x)-b.x,y=double(a.y)-b.y,z=double(a.z)-b.z;
         return (x*x+y*y)+z*z;
     };
+    for(std::size_t face=0;face<source.faces.size();++face)
+        for(std::size_t corner=0;corner<3u;++corner) {
+            const auto& target=plan.vertices[source.faces[face].indices[corner]].tangentBasis;
+            const auto& actual=rebuilt.vertices[rows[face][corner]].tangentBasis;
+            error+=difference(actual.bitangent,target.bitangent)+difference(actual.tangent,target.tangent)+
+                difference(actual.normal,target.normal);
+        }
+    return error;
+}
+
+double measureTangentBasis(Model& rebuilt,const Model& source,const CornerRows& rows,
+                          const std::map<const Mesh*,MeshReconstruction>& plans,
+                          const neoshared::bif::JobControl& job,
+                          const std::map<const Mesh*,MeshReconstruction>* changed=nullptr) {
+    double error{};
     for(std::size_t index=0;index<source.meshes.size();++index) {
         const auto& mesh=source.meshes[index];
         const auto found=plans.find(&mesh);
         if(!(mesh.mdxBitmap&0x80u) || mesh.animated || mesh.dangly || found==plans.end()) continue;
         if(!changed || changed->find(&mesh)!=changed->end())
             rebuildAsciiTangentBasis(rebuilt.meshes[index],job);
-        for(std::size_t face=0;face<mesh.faces.size();++face)
-            for(std::size_t corner=0;corner<3u;++corner) {
-                const auto& target=found->second.vertices[mesh.faces[face].indices[corner]].tangentBasis;
-                const auto& actual=rebuilt.meshes[index].vertices[rows[index][face][corner]].tangentBasis;
-                error+=difference(actual.bitangent,target.bitangent)+difference(actual.tangent,target.tangent)+
-                    difference(actual.normal,target.normal);
-            }
+        error+=measureMeshTangents(rebuilt.meshes[index],mesh,rows[index],found->second);
     }
     return error;
 }
@@ -588,6 +597,13 @@ void reconstructCyclicCornerPass(Writer& out,const Model& model,const Model& fra
     auto current=frames;
     auto rows=generateGeometry(current,model,plans,false,out.advanced(),out.job());
     auto best=measureTangentBasis(current,model,rows,plans,out.job());
+    std::vector<double> tangentErrors(model.meshes.size());
+    for(std::size_t index=0;index<model.meshes.size();++index) {
+        const auto& mesh=model.meshes[index];
+        const auto found=plans.find(&mesh);
+        if((mesh.mdxBitmap&0x80u) && !mesh.animated && !mesh.dangly && found!=plans.end())
+            tangentErrors[index]=measureMeshTangents(current.meshes[index],mesh,rows[index],found->second);
+    }
     processAsciiSkinSeams(current,out.job());
     best+=measureSeamNormals(current,model,rows,plans);
     std::vector<std::pair<const Mesh*,std::size_t>> candidates;
@@ -709,6 +725,10 @@ void reconstructCyclicCornerPass(Writer& out,const Model& model,const Model& fra
             auto selected=plans;
             auto selectedGeometry=current;
             auto selectedRows=rows;
+            auto selectedTangentErrors=tangentErrors;
+            auto rebuilt=current;
+            auto generated=rows;
+            const Mesh* previousMesh=nullptr;
             const auto consider=[&](const Mesh* mesh,MeshReconstruction trial) {
                 const auto& retained=plans.at(mesh);
                 if(trial.faceOrder!=retained.faceOrder &&
@@ -716,14 +736,24 @@ void reconstructCyclicCornerPass(Writer& out,const Model& model,const Model& fra
                        retained.faceOrder,trial.faceOrder)) return;
                 std::map<const Mesh*,MeshReconstruction> changed;
                 changed.emplace(mesh,std::move(trial));
-                auto rebuilt=current;
-                auto generated=rows;
+                if(previousMesh && previousMesh!=mesh) {
+                    const auto previous=static_cast<std::size_t>(previousMesh-model.meshes.data());
+                    rebuilt.meshes[previous]=current.meshes[previous];
+                    generated[previous]=rows[previous];
+                }
+                previousMesh=mesh;
                 const auto index=static_cast<std::size_t>(mesh-model.meshes.data());
                 rebuilt.meshes[index]=frames.meshes[index];
-                auto changedRows=generateGeometry(rebuilt,model,changed,false,out.advanced(),out.job());
+                auto changedRows=generateGeometry(rebuilt,model,changed,false,out.advanced(),out.job(),mesh->render);
                 generated[index]=std::move(changedRows[index]);
-                if(!preservesSkinChannels(model,generated)) return;
-                auto error=measureTangentBasis(rebuilt,model,generated,plans,out.job(),&changed);
+                if(!preservesSkinChannels(model,generated,mesh)) return;
+                auto errors=tangentErrors;
+                if((mesh->mdxBitmap&0x80u) && !mesh->dangly) {
+                    rebuildAsciiTangentBasis(rebuilt.meshes[index],out.job());
+                    errors[index]=measureMeshTangents(rebuilt.meshes[index],*mesh,generated[index],retained);
+                }
+                double error{};
+                for(const auto value:errors) error+=value;
                 if(mesh->render)
                     processAsciiSkinSeams(rebuilt,out.job());
                 else {
@@ -736,7 +766,7 @@ void reconstructCyclicCornerPass(Writer& out,const Model& model,const Model& fra
                 error+=measureSeamNormals(rebuilt,model,generated,plans,mesh,false);
                 if(error<best) {
                     best=error;selected=plans;selected.at(mesh)=std::move(changed.at(mesh));improved=true;
-                    selectedGeometry=std::move(rebuilt);selectedRows=std::move(generated);
+                    selectedGeometry=rebuilt;selectedRows=generated;selectedTangentErrors=std::move(errors);
                 }
             };
             // Mirrored tangent sums can retain only rounding residue. Move
@@ -804,6 +834,7 @@ void reconstructCyclicCornerPass(Writer& out,const Model& model,const Model& fra
             }
             if(improved) {
                 plans=std::move(selected);current=std::move(selectedGeometry);rows=std::move(selectedRows);
+                tangentErrors=std::move(selectedTangentErrors);
                 measureSeamNormals(current,model,rows,plans);
             }
         } while(improved);
@@ -2226,15 +2257,21 @@ void reconstructTangentUvPrecision(Writer& out,const Model& model,const Model& f
 } // namespace
 
 void reconstructSkinSeamSmoothing(Writer& out,const Model& model) {
-    if(std::all_of(model.meshes.begin(),model.meshes.end(),
+    // Standard has no retained basis array. Its explicit final normals still
+    // need the geometric smoothing inputs used before the skin-seam pass.
+    const bool reconstructTangents=!out.advanced() && std::any_of(model.meshes.begin(),model.meshes.end(),
+        [&](const Mesh& mesh) {
+            return out.explicitNormals(mesh) && (mesh.mdxBitmap&0x80u) && !mesh.animated && !mesh.dangly;
+        });
+    if(!reconstructTangents && std::all_of(model.meshes.begin(),model.meshes.end(),
         [&](const Mesh& mesh) {return out.explicitNormals(mesh);})) return;
     if(std::none_of(model.meshes.begin(),model.meshes.end(),[](const Mesh& mesh){return mesh.skinned;})) {
-        if(!out.refineTangentRounding() && !out.refineNormalRounding() &&
+        if(!reconstructTangents && !out.refineTangentRounding() && !out.refineNormalRounding() &&
            std::none_of(model.meshes.begin(),model.meshes.end(),tangentPrecisionMesh) &&
            std::none_of(model.meshes.begin(),model.meshes.end(),normalPrecisionMesh)) return;
         for(const auto& mesh:model.meshes) {
             const auto& node=model.nodes[mesh.nodeIndex];
-            if(!node.lightsaber) out.meshReconstructions.emplace(&mesh,reconstructMesh(out,node,mesh));
+            if(!node.lightsaber) out.meshReconstructions.emplace(&mesh,reconstructMesh(out,node,mesh,true,true,reconstructTangents));
         }
         auto frames=model;
         frames.animations.clear();
@@ -2250,7 +2287,7 @@ void reconstructSkinSeamSmoothing(Writer& out,const Model& model) {
         Plans result;
         for(const auto& mesh:model.meshes) {
             const auto& node=model.nodes[mesh.nodeIndex];
-            if(!node.lightsaber) result.emplace(&mesh,reconstructMesh(out,node,mesh,refine,false));
+            if(!node.lightsaber) result.emplace(&mesh,reconstructMesh(out,node,mesh,refine,false,reconstructTangents));
         }
         return result;
     };
@@ -2661,6 +2698,9 @@ ReconstructedMesh writeMesh(Writer& out,const Model& model,const Node& node,cons
     const auto& reconstructed=reconstruction.smoothing;
     const auto* animation=node.animmesh?&*node.animmesh:nullptr;
     const bool hasNormals=reconstruction.hasNormals;
+    // Reconstruction may have solved the geometric tangent inputs; output
+    // normals remain the explicitly requested final values.
+    reconstruction.explicitNormals=!animation && hasNormals && out.explicitNormals(mesh);
     const bool hasColors=mesh.hasVertexColors || (mesh.enginePrelightInput && (mesh.mdxBitmap&0x40u)!=0u);
     if(reconstruction.changedAdjacency)
         out.warning("Mesh "+node.name+": source edge connectivity cannot reproduce "+

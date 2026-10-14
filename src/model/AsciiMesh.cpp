@@ -199,6 +199,50 @@ NormalFaceCross preciseNormalCross(const RawFace& face,const RawNode& raw) {
 // indices, not equal positions; contributions are unnormalized face crosses.
 // A previously processed corner with exactly the same smoothing mask reuses
 // its normal. Overlapping masks otherwise contribute in source face order.
+std::vector<std::array<std::size_t,3>> smoothNormals(const RawNode& raw,std::vector<Vec3>& normals,
+                                                   const neoshared::bif::JobControl& job) {
+    std::vector<std::array<std::size_t,3>> indices(raw.faces.size());
+    normals.clear();
+    std::vector<std::vector<std::pair<std::size_t,std::size_t>>> incident(raw.vertices.size());
+    std::vector<NormalFaceCross> crosses;
+    for(std::size_t face=0;face<raw.faces.size();++face) {
+        const auto& candidate=raw.faces[face];
+        const auto a=raw.vertices.at(candidate.vertices[0]),
+            b=raw.vertices.at(candidate.vertices[1]),c=raw.vertices.at(candidate.vertices[2]);
+        crosses.push_back(raw.normalPositionPrecision==64u?
+            preciseNormalCross(candidate,raw):normalFaceCross(a,b,c));
+        // The engine chooses the last matching corner of a repeated vertex.
+        for(std::size_t corner=0;corner<3u;++corner) {
+            auto& faces=incident.at(candidate.vertices[corner]);
+            if(!faces.empty() && faces.back().first==face) faces.back().second=corner;
+            else faces.emplace_back(face,corner);
+        }
+    }
+    for(std::size_t i=0;i<raw.faces.size();++i) {
+        job.check();
+        const auto& current=raw.faces[i];
+        for(std::size_t corner=0;corner<3u;++corner) {
+            Vec3 sum{}; bool reused=false;
+            for(const auto& entry:incident[current.vertices[corner]]) {
+                const auto j=entry.first;
+                const auto& candidate=raw.faces[j];
+                if(i!=j && !(current.smoothing&candidate.smoothing)) continue;
+                const auto weighted=crosses[j];
+                sum=weighted.accumulate(sum);
+                if(j<i && current.smoothing==candidate.smoothing) {
+                    indices[i][corner]=indices[j][entry.second];
+                    reused=true;break;
+                }
+            }
+            if(!reused) {
+                indices[i][corner]=normals.size();
+                normals.push_back(normalizeVertexNormal(sum));
+            }
+        }
+    }
+    return indices;
+}
+
 std::vector<std::array<std::size_t,3>> processVertices(RawNode& raw,Mesh& mesh,
                                                      const neoshared::bif::JobControl& job) {
     if(mesh.lightmapped && raw.textureIndices[0].empty())
@@ -227,44 +271,7 @@ std::vector<std::array<std::size_t,3>> processVertices(RawNode& raw,Mesh& mesh,
             for(std::size_t corner=0;corner<3u;++corner) indices[i][corner]=source[corner];
         }
     } else {
-        raw.normals.clear();
-        std::vector<std::vector<std::pair<std::size_t,std::size_t>>> incident(raw.vertices.size());
-        std::vector<NormalFaceCross> crosses;
-        for(std::size_t face=0;face<raw.faces.size();++face) {
-            const auto& candidate=raw.faces[face];
-            const auto a=raw.vertices.at(candidate.vertices[0]),
-                b=raw.vertices.at(candidate.vertices[1]),c=raw.vertices.at(candidate.vertices[2]);
-            crosses.push_back(raw.normalPositionPrecision==64u?
-                preciseNormalCross(candidate,raw):normalFaceCross(a,b,c));
-            // The engine chooses the last matching corner of a repeated vertex.
-            for(std::size_t corner=0;corner<3u;++corner) {
-                auto& faces=incident.at(candidate.vertices[corner]);
-                if(!faces.empty() && faces.back().first==face) faces.back().second=corner;
-                else faces.emplace_back(face,corner);
-            }
-        }
-        for(std::size_t i=0;i<raw.faces.size();++i) {
-            job.check();
-            const auto& current=raw.faces[i];
-            for(std::size_t corner=0;corner<3u;++corner) {
-                Vec3 sum{}; bool reused=false;
-                for(const auto& entry:incident[current.vertices[corner]]) {
-                    const auto j=entry.first;
-                    const auto& candidate=raw.faces[j];
-                    if(i!=j && !(current.smoothing&candidate.smoothing)) continue;
-                    const auto weighted=crosses[j];
-                    sum=weighted.accumulate(sum);
-                    if(j<i && current.smoothing==candidate.smoothing) {
-                        indices[i][corner]=indices[j][entry.second];
-                        reused=true;break;
-                    }
-                }
-                if(!reused) {
-                    indices[i][corner]=raw.normals.size();
-                    raw.normals.push_back(normalizeVertexNormal(sum));
-                }
-            }
-        }
+        indices=smoothNormals(raw,raw.normals,job);
     }
     auto& bounds=*mesh.engineBounds;
     Vec3 center{};
@@ -291,7 +298,7 @@ struct GeneratedVertex {
     TangentBasis tangentBasis;
     std::array<Vec3,4> texcoords{};
     float constraint{};
-    std::size_t source{};
+    std::size_t source{},normalSource{};
 };
 bool same(const GeneratedVertex& a,const GeneratedVertex& b,bool dangly) {
     if(!same(a.position,b.position) || !same(a.normal,b.normal) || !same(a.color,b.color) ||
@@ -529,6 +536,9 @@ std::vector<GeneratedVertex> generateVertices(RawNode& raw,Mesh& mesh,
             vertex.source=raw.faces[i].vertices[corner];
             vertex.position=raw.vertices.at(vertex.source);
             vertex.normal=raw.normals.at(normals[i][corner]);
+            // Distinct authored normal indices retain intentional vertex
+            // splits even when their final vectors became equal at a seam.
+            vertex.normalSource=normals[i][corner];
             vertex.color={1.0f,1.0f,1.0f};
             authoredVertexData(raw,mesh,i,corner,vertex);
             for(std::size_t channel=0;channel<4u;++channel)
@@ -538,6 +548,7 @@ std::vector<GeneratedVertex> generateVertices(RawNode& raw,Mesh& mesh,
             auto& candidates=positions[positionKey(vertex.position)];
             const auto found=std::find_if(candidates.begin(),candidates.end(),
                 [&](std::size_t index){return same(vertices[index],vertex,dangly) &&
+                    (!mesh.explicitNormals || vertices[index].normalSource==vertex.normalSource) &&
                     (!skin || (raw.skinData?
                         raw.skinChannels.at(vertices[index].source).weights==raw.skinChannels.at(vertex.source).weights &&
                         raw.skinChannels.at(vertices[index].source).indices==raw.skinChannels.at(vertex.source).indices:
@@ -883,16 +894,23 @@ void retainNormalPositionSource(const RawNode& raw,Mesh& mesh) {
 
 void retainTangentSource(const RawNode& raw,Mesh& mesh,
         const std::vector<std::array<std::size_t,3>>& normalIndices,
-        const std::vector<GeneratedVertex>& generated,bool animated) {
+        const std::vector<GeneratedVertex>& generated,bool animated,const neoshared::bif::JobControl& job) {
     // NW's authored tangent4 pool makes CalculateTangentSpaceBasis return
     // immediately (0x457710). Do not rebuild it as a KOTOR nine-float basis.
     if((mesh.dangly && !mesh.asciiTangents.value_or(false)) ||
        (animated && !raw.animTangents.empty())) return;
+    // Explicit normals describe the final shading channel. Tangent
+    // orientation uses geometric normals from before ProcessSkinSeams.
+    std::vector<Vec3> geometricNormals;
+    std::vector<std::array<std::size_t,3>> geometricIndices;
+    const bool finalNormals=mesh.explicitNormals && !animated;
+    if(finalNormals) geometricIndices=smoothNormals(raw,geometricNormals,job);
     auto source=std::make_shared<AsciiTangentSource>();
     source->authoredFaceIndices=raw.tangentFaceSources;
     for(std::size_t i=0;i<mesh.faces.size();++i) {
         source->faceSmoothing.push_back(raw.faces[i].smoothing);
-        source->firstCornerNormals.push_back(raw.normals.at(normalIndices[i][0]));
+        source->firstCornerNormals.push_back(finalNormals?geometricNormals.at(geometricIndices[i][0]):
+            raw.normals.at(normalIndices[i][0]));
         if(raw.tangentUvPrecision==64u) {
             const auto& uv=raw.faces[source->authoredFaceIndices[i]].texcoords[0];
             source->faceTexcoords64.push_back({raw.tangentTexcoords64.at(uv[0]),
@@ -915,7 +933,7 @@ std::vector<std::array<std::int16_t,3>> generateAsciiMeshGeometry(
     const auto generated=animated?generateAnimVertices(raw,mesh,normals,job):
         generateVertices(raw,mesh,normals,job,&corners);
     retainNormalPositionSource(raw,mesh);
-    retainTangentSource(raw,mesh,normals,generated,animated);
+    retainTangentSource(raw,mesh,normals,generated,animated,job);
     if(animated)
         for(const auto& face:mesh.faces) corners.push_back(face.indices);
     mesh.enginePrelightVertexCount=static_cast<std::uint16_t>(generated.size());
@@ -993,7 +1011,7 @@ void buildMesh(Model& model,RawNode& raw,std::size_t nodeIndex,
             mesh.faces[i].normal={plane[0],plane[1],plane[2]};
             mesh.faces[i].planeDistance=plane[3];
         }
-    retainTangentSource(raw,mesh,normalIndices,generated,animated);
+    retainTangentSource(raw,mesh,normalIndices,generated,animated,job);
     // InternalPostProcess narrows the generated count before allocating and
     // copying the MDX/CPU rows. The temporary NodeVertex list remains full
     // for tangent construction (K1 0x5c620c/0x5c6420, K2 0x6e499f/0x6e4c55).

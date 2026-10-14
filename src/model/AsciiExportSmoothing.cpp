@@ -1539,6 +1539,17 @@ std::vector<SeamSmoothingCandidate> sharedSeamSmoothingCandidates(
                                 unjoined[a].push_back(b);unjoined[b].push_back(a);
                             }
                         }
+                // Intersecting masks can still produce different normals:
+                // one face may admit an extra neighboring contributor. A
+                // shared seam row needs the same complete contributor set.
+                for(const auto& neighbor:source.second)
+                    for(const auto face:neighbor.faces) {
+                        const auto joins=[&](std::size_t other) {
+                            return face==other || (masks[face]&masks[other])!=0u;
+                        };
+                        for(const auto other:group.faces)
+                            missing|=joins(other)!=joins(group.faces.front());
+                    }
                 if(missing) {
                     propose(source.first,group.faces);
                     if(!missingComponents) continue;
