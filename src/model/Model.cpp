@@ -4014,6 +4014,9 @@ bool equalsIgnoreCase(const std::string& left,
 
 Pose engineAnimationBindPose(const Model& model,
                              const neoshared::bif::JobControl& job = {}) {
+    // Collapsed room Parts already contain their final transforms. Replaying
+    // the original local controllers would undo the hierarchy collapse.
+    if (model.collapsedRoomParts) return bindPose(model,job);
     job.check();
     Pose pose;
     pose.positions.resize(model.nodes.size());
