@@ -594,6 +594,7 @@ void reconstructCyclicCornerPass(Writer& out,const Model& model,const Model& fra
                                 std::map<const Mesh*,MeshReconstruction>& plans,
                                 const Mesh* changedMesh,CornerSearch search,bool neighbors) {
     const bool axisTangents=search!=CornerSearch::Cancellation;
+    AsciiSkinSeamCache seams;
     auto current=frames;
     auto rows=generateGeometry(current,model,plans,false,out.advanced(),out.job());
     auto best=measureTangentBasis(current,model,rows,plans,out.job());
@@ -604,7 +605,7 @@ void reconstructCyclicCornerPass(Writer& out,const Model& model,const Model& fra
         if((mesh.mdxBitmap&0x80u) && !mesh.animated && !mesh.dangly && found!=plans.end())
             tangentErrors[index]=measureMeshTangents(current.meshes[index],mesh,rows[index],found->second);
     }
-    processAsciiSkinSeams(current,out.job());
+    processAsciiSkinSeams(current,out.job(),seams);
     best+=measureSeamNormals(current,model,rows,plans);
     std::vector<std::pair<const Mesh*,std::size_t>> candidates;
     std::vector<std::array<std::size_t,2>> pairs;
@@ -754,8 +755,10 @@ void reconstructCyclicCornerPass(Writer& out,const Model& model,const Model& fra
                 }
                 double error{};
                 for(const auto value:errors) error+=value;
+                // Normal error is nonnegative, so this candidate cannot win.
+                if(error>=best) return;
                 if(mesh->render)
-                    processAsciiSkinSeams(rebuilt,out.job());
+                    processAsciiSkinSeams(rebuilt,out.job(),seams);
                 else {
                     // CreateSkinNodeList excludes non-rendered meshes. Changing
                     // only those leaves every ordered seam input unchanged.
@@ -2302,12 +2305,13 @@ void reconstructSkinSeamSmoothing(Writer& out,const Model& model) {
         return;
     }
     enum class PrecursorFit { Smooth,SplitOpposing,Unscored,RefineExisting,RetainedVertices };
+    AsciiSkinSeamCache seamCache;
     const auto precursor=[&](const Plans& source,bool refine,PrecursorFit fit=PrecursorFit::Smooth) {
         // Saved normals can be outputs of ProcessSkinSeams. Reconstruct
         // geometric precursors only where that producer changes a corner.
         auto smooth=frames;
         auto rows=generateGeometry(smooth,model,source,true,out.advanced(),out.job());
-        processAsciiSkinSeams(smooth,out.job());
+        processAsciiSkinSeams(smooth,out.job(),seamCache);
         if(fit==PrecursorFit::SplitOpposing) {
             auto flatPlans=source,hybrid=source;
             for(auto& entry:flatPlans) {
@@ -2343,7 +2347,7 @@ void reconstructSkinSeamSmoothing(Writer& out,const Model& model) {
             // the final masks below, including other joins on these faces.
             smooth=frames;
             rows=generateGeometry(smooth,model,hybrid,false,out.advanced(),out.job());
-            processAsciiSkinSeams(smooth,out.job());
+            processAsciiSkinSeams(smooth,out.job(),seamCache);
         }
         auto candidate=source;
         for(std::size_t index=0;index<model.meshes.size();++index) {
@@ -2393,12 +2397,12 @@ void reconstructSkinSeamSmoothing(Writer& out,const Model& model) {
     alternatives.push_back(precursor(alternatives[2],true,PrecursorFit::RetainedVertices));
     auto baseline=frames;
     const auto baselineRows=generateGeometry(baseline,model,plans,false,out.advanced(),out.job());
-    processAsciiSkinSeams(baseline,out.job());
+    processAsciiSkinSeams(baseline,out.job(),seamCache);
     auto best=measureSeamNormals(baseline,model,baselineRows,plans);
     const auto consider=[&](Plans trial) {
         auto rebuilt=frames;
         const auto rows=generateGeometry(rebuilt,model,trial,false,out.advanced(),out.job());
-        processAsciiSkinSeams(rebuilt,out.job());
+        processAsciiSkinSeams(rebuilt,out.job(),seamCache);
         // NodeVertex equality excludes skin influences. Changed smoothing
         // may create new welds, which must still retain every corner's weights.
         if(!preservesSkinChannels(model,rows)) return;
@@ -2466,7 +2470,8 @@ void reconstructSkinSeamSmoothing(Writer& out,const Model& model) {
                     auto rebuilt=frames;
                     const auto rows=generateGeometry(rebuilt,model,trial,false,out.advanced(),out.job());
                     const auto tangentError=measureTangentBasis(rebuilt,model,rows,trial,out.job());
-                    processAsciiSkinSeams(rebuilt,out.job());
+                    if(tangentError>bestTangent) return;
+                    processAsciiSkinSeams(rebuilt,out.job(),seamCache);
                     if(!preservesSkinChannels(model,rows)) return;
                     const auto normalError=measureSeamNormals(rebuilt,model,rows,trial);
                     if(normalError<=best && tangentError<=bestTangent &&
@@ -2491,7 +2496,7 @@ void reconstructSkinSeamSmoothing(Writer& out,const Model& model) {
         auto current=frames;
         auto rows=generateGeometry(current,model,plans,false,out.advanced(),out.job());
         bestTangent=measureTangentBasis(current,model,rows,plans,out.job());
-        processAsciiSkinSeams(current,out.job());
+        processAsciiSkinSeams(current,out.job(),seamCache);
         best=measureSeamNormals(current,model,rows,plans);
         std::vector<double> tangentErrors(model.meshes.size());
         for(std::size_t index=0;index<model.meshes.size();++index) {
@@ -2539,8 +2544,9 @@ void reconstructSkinSeamSmoothing(Writer& out,const Model& model) {
                 errors[index]=measureMeshTangents(rebuilt.meshes[index],mesh,generated[index],entry.second);
             }
             const auto tangentError=std::accumulate(errors.begin(),errors.end(),0.0);
+            if(tangentError>bestTangent) return;
             if(seamChanged)
-                processAsciiSkinSeams(rebuilt,out.job());
+                processAsciiSkinSeams(rebuilt,out.job(),seamCache);
             else
                 for(std::size_t index=0;index<model.meshes.size();++index)
                     if(model.meshes[index].render)
@@ -2569,7 +2575,7 @@ void reconstructSkinSeamSmoothing(Writer& out,const Model& model) {
         const auto refineSeamJoins=[&](bool differentNormals) {
             auto seams=frames;
             const auto seamRows=generateGeometry(seams,model,plans,false,out.advanced(),out.job());
-            processAsciiSkinSeams(seams,out.job());
+            processAsciiSkinSeams(seams,out.job(),seamCache);
             struct Join {const Mesh* mesh;Vec3 point;std::vector<std::uint32_t> masks;};
             std::vector<Join> joins;
             const auto apply=[](Plans& trial,const Join& join) {

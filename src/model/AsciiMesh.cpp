@@ -312,7 +312,7 @@ struct GeneratedVertex {
     TangentBasis tangentBasis;
     std::array<Vec3,4> texcoords{};
     float constraint{};
-    std::size_t source{},normalSource{};
+    std::size_t source{},normalSource{},previousAtPosition{};
 };
 struct PositionHash {
     std::size_t operator()(const std::array<std::uint32_t,3>& key) const {
@@ -542,13 +542,15 @@ std::vector<GeneratedVertex> generateVertices(RawNode& raw,Mesh& mesh,
     // K1 0x5c358c, K2 0x6e1640; NodeVertex equality K1 0x5c8cac,
     // equal(Vector) 0x664744 compares all three components exactly, including
     // the third authoring UV coordinate that is omitted from final MDX rows.
+    const auto noVertex=raw.faces.size()*3u;
     std::vector<GeneratedVertex> vertices;
-    std::unordered_map<std::array<std::uint32_t,3>,std::vector<std::size_t>,PositionHash> positions;
+    vertices.reserve(noVertex);
+    std::unordered_map<std::array<std::uint32_t,3>,std::size_t,PositionHash> positions;
     positions.reserve(raw.vertices.size());
-    std::vector<std::vector<std::size_t>*> sourcePositions;
+    std::vector<std::size_t*> sourcePositions;
     sourcePositions.reserve(raw.vertices.size());
     for(const auto position:raw.vertices)
-        sourcePositions.push_back(&positions[positionKey(position)]);
+        sourcePositions.push_back(&positions.try_emplace(positionKey(position),noVertex).first->second);
     mesh.faces.resize(raw.faces.size());
     raw.tangentFaceSources.resize(raw.faces.size());
     const bool dangly=raw.node.flags==0x121u;
@@ -571,16 +573,20 @@ std::vector<GeneratedVertex> generateVertices(RawNode& raw,Mesh& mesh,
                 if(!raw.texcoords[channel].empty())
                     vertex.texcoords[channel]=raw.texcoords[channel].at(raw.faces[i].texcoords[channel][corner]);
             if(dangly) vertex.constraint=raw.constraints.at(vertex.source);
-            auto& candidates=*sourcePositions[vertex.source];
-            const auto found=std::find_if(candidates.begin(),candidates.end(),
-                [&](std::size_t index){return same(vertices[index],vertex,dangly) &&
+            auto& first=*sourcePositions[vertex.source];
+            const auto matches=[&](std::size_t index){return same(vertices[index],vertex,dangly) &&
                     (!mesh.explicitNormals || vertices[index].normalSource==vertex.normalSource) &&
                     (!skin || (raw.skinData?
                         raw.skinChannels.at(vertices[index].source).weights==raw.skinChannels.at(vertex.source).weights &&
                         raw.skinChannels.at(vertices[index].source).indices==raw.skinChannels.at(vertex.source).indices:
-                        raw.weights.at(vertices[index].source)==raw.weights.at(vertex.source)));});
-            const auto index=found==candidates.end()?vertices.size():*found;
-            if(found==candidates.end()) {candidates.push_back(index);vertices.push_back(vertex);}
+                        raw.weights.at(vertices[index].source)==raw.weights.at(vertex.source)));};
+            auto index=first;
+            // Equal records are already welded, so at most one row can match.
+            while(index!=noVertex && !matches(index)) index=vertices[index].previousAtPosition;
+            if(index==noVertex) {
+                index=vertices.size();vertex.previousAtPosition=first;first=index;
+                vertices.push_back(vertex);
+            }
             face.indices[corner]=static_cast<std::int16_t>(index);
         }
         if(authoredCorners) authoredCorners->push_back(face.indices);

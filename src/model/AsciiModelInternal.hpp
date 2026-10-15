@@ -258,3 +258,15 @@ void buildSkin(Model& model, RawNode& raw, Mesh& mesh,
                const neoshared::bif::JobControl& job);
 
 } // namespace neomdl::model::ascii
+
+namespace neomdl::model {
+
+struct AsciiSkinSeamCache {
+    struct Reference { std::size_t mesh,vertex; };
+    std::vector<std::vector<Vec3>> positions;
+    std::vector<std::vector<std::vector<Reference>>> matches;
+};
+void processAsciiSkinSeams(const Model& model,const neoshared::bif::JobControl& job,
+                          AsciiSkinSeamCache& cache);
+
+} // namespace neomdl::model

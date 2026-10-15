@@ -33,6 +33,52 @@ struct SeamMesh {
     Vec3 sentinel;
 };
 
+AsciiSkinSeamCache buildSeamCache(std::vector<std::vector<Vec3>> positions,
+                                 const neoshared::bif::JobControl& job) {
+    AsciiSkinSeamCache cache;
+    cache.positions=std::move(positions);
+    cache.matches.resize(cache.positions.size());
+    using Reference=AsciiSkinSeamCache::Reference;
+    std::vector<std::pair<std::uint32_t,Reference>> byX;
+    for(std::size_t mesh=0;mesh<cache.positions.size();++mesh)
+        for(std::size_t vertex=0;vertex<cache.positions[mesh].size();++vertex)
+            byX.emplace_back(positionKey(cache.positions[mesh][vertex].x),Reference{mesh,vertex});
+    std::sort(byX.begin(),byX.end(),[](const auto& a,const auto& b){return a.first<b.first;});
+    constexpr float tolerance=0.0010000000474974513f;
+    std::vector<Reference> matches;
+    for(std::size_t owner=0;owner+1u<cache.positions.size();++owner) {
+        cache.matches[owner].resize(cache.positions[owner].size());
+        for(std::size_t vertex=0;vertex+1u<cache.positions[owner].size();++vertex) {
+            job.check();
+            const auto point=cache.positions[owner][vertex];
+            const auto lower=positionKey(std::nextafter(point.x-tolerance,-std::numeric_limits<float>::infinity()));
+            const auto upper=positionKey(std::nextafter(point.x+tolerance,std::numeric_limits<float>::infinity()));
+            matches.clear();matches.push_back({owner,vertex});
+            const auto begin=std::lower_bound(byX.begin(),byX.end(),lower,
+                [](const auto& entry,std::uint32_t key){return entry.first<key;});
+            const auto end=std::upper_bound(begin,byX.end(),upper,
+                [](std::uint32_t key,const auto& entry){return key<entry.first;});
+            for(auto entry=begin;entry!=end;++entry) {
+                const auto ref=entry->second;
+                if(ref.mesh==owner) continue;
+                const auto candidatePoint=cache.positions[ref.mesh][ref.vertex];
+                // The comparison is strict; unordered values also fail.
+                if(!(std::abs(candidatePoint.x-point.x)<tolerance) ||
+                   !(std::abs(candidatePoint.y-point.y)<tolerance) ||
+                   !(std::abs(candidatePoint.z-point.z)<tolerance)) continue;
+                matches.push_back(ref);
+            }
+            if(matches.size()==1u) continue;
+            // Spatial lookup must not change the engine's accumulation order.
+            std::sort(matches.begin()+1,matches.end(),[](const auto& a,const auto& b) {
+                return a.mesh<b.mesh || (a.mesh==b.mesh && a.vertex<b.vertex);
+            });
+            cache.matches[owner][vertex]=matches;
+        }
+    }
+    return cache;
+}
+
 } // namespace
 
 void initializeAsciiSkinSeamPools(Model& model) {
@@ -50,11 +96,17 @@ void initializeAsciiSkinSeamPools(Model& model) {
 }
 
 void processAsciiSkinSeams(const Model& model,const neoshared::bif::JobControl& job) {
+    AsciiSkinSeamCache cache;
+    processAsciiSkinSeams(model,job,cache);
+}
+
+void processAsciiSkinSeams(const Model& model,const neoshared::bif::JobControl& job,
+                          AsciiSkinSeamCache& cache) {
     // This producer belongs to MdlNode, not Part. Its traversal and parent
     // walks use the canonical authored graph even when several Parts share a
     // node. Their meshes retain the same writable normal pools.
     if(model.partSourceModel) {
-        processAsciiSkinSeams(*model.partSourceModel,job);
+        processAsciiSkinSeams(*model.partSourceModel,job,cache);
         model.skinSeams=model.partSourceModel->skinSeams;
         return;
     }
@@ -103,10 +155,7 @@ void processAsciiSkinSeams(const Model& model,const neoshared::bif::JobControl& 
     result.processed=true;
 
     // Positions stay fixed while the ordered seam pass updates normal pools.
-    struct NormalReference { std::size_t mesh,vertex; };
     std::vector<std::vector<Vec3>> positions(meshes.size());
-    using PositionEntry=std::pair<std::uint32_t,NormalReference>;
-    std::vector<PositionEntry> byX;
     for(std::size_t index=0;index<meshes.size();++index) {
         const auto& entry=meshes[index];
         const auto& mesh=model.meshes[entry.mesh];
@@ -116,30 +165,30 @@ void processAsciiSkinSeams(const Model& model,const neoshared::bif::JobControl& 
                 ? entry.sentinel : mesh.vertices[vertex].position;
             positions[index].push_back(add(entry.position,
                 ascii::engineModelRotateVector(entry.orientation,local)));
-            byX.emplace_back(positionKey(positions[index].back().x),
-                NormalReference{index,static_cast<std::size_t>(vertex)});
         }
     }
-    std::sort(byX.begin(),byX.end(),[](const auto& a,const auto& b){return a.first<b.first;});
+    // Candidate normals change far more often than their vertex layout.
+    // Reuse only spatial matches; every ordered normal write still runs.
+    const auto samePositions=[](const auto& a,const auto& b) {
+        return std::equal(a.begin(),a.end(),b.begin(),b.end(),[](Vec3 p,Vec3 q) {
+            return p.x==q.x && p.y==q.y && p.z==q.z;
+        });
+    };
+    if(!std::equal(positions.begin(),positions.end(),cache.positions.begin(),cache.positions.end(),samePositions))
+        cache=buildSeamCache(std::move(positions),job);
 
-    const auto normal=[&](const NormalReference& ref) -> Vec3& {
+    const auto normal=[&](const AsciiSkinSeamCache::Reference& ref) -> Vec3& {
         const auto& mesh=model.meshes[meshes[ref.mesh].mesh];
         return ref.vertex==mesh.enginePrelightVertexCount ? mesh.asciiNormalPool->sentinel
                                                : mesh.asciiNormalPool->normals[ref.vertex];
     };
     std::vector<bool> written(meshes.size());
-    std::vector<NormalReference> matches;
-    constexpr float tolerance=0.0010000000474974513f;
     for(std::size_t owner=0;owner+1u<meshes.size();++owner) {
         job.update(owner,meshes.size(),"Processing ASCII model skin seams");
         auto& current=model.meshes[meshes[owner].mesh];
         const auto ownerCount=static_cast<std::int16_t>(current.enginePrelightVertexCount);
         for(std::int32_t vertex=0;vertex<ownerCount;++vertex) {
             job.check();
-            const auto point=positions[owner][vertex];
-            const auto lower=positionKey(std::nextafter(point.x-tolerance,-std::numeric_limits<float>::infinity()));
-            const auto upper=positionKey(std::nextafter(point.x+tolerance,std::numeric_limits<float>::infinity()));
-            matches.clear();matches.push_back({owner,static_cast<std::size_t>(vertex)});
             // K1 0x5c224c / K2 0x6e00dc visit every OTHER mesh, including
             // earlier ones. Their inclusive candidate loop reads row N.
             for(std::size_t candidate=0;candidate<meshes.size();++candidate) {
@@ -149,29 +198,12 @@ void processAsciiSkinSeams(const Model& model,const neoshared::bif::JobControl& 
                 // The inclusive engine traversal also reads the unpublished
                 // tail of a no-face animmesh (K1 0x5c25b0).
                 if(source.animated && !source.asciiMdxAllocation &&
-                   positions[candidate].size()==source.enginePrelightVertexCount+1u)
+                   cache.positions[candidate].size()==source.enginePrelightVertexCount+1u)
                     throw ModelError("ASCII skin seam processing reaches an animmesh without a published MDX pool");
-                result.candidateComparisons+=positions[candidate].size();
+                result.candidateComparisons+=cache.positions[candidate].size();
             }
-            const auto begin=std::lower_bound(byX.begin(),byX.end(),lower,
-                [](const auto& entry,std::uint32_t key){return entry.first<key;});
-            const auto end=std::upper_bound(begin,byX.end(),upper,
-                [](std::uint32_t key,const auto& entry){return key<entry.first;});
-            for(auto entry=begin;entry!=end;++entry) {
-                const auto ref=entry->second;
-                if(ref.mesh==owner) continue;
-                const auto candidatePoint=positions[ref.mesh][ref.vertex];
-                // The comparison is strict; unordered values also fail.
-                if(!(std::abs(candidatePoint.x-point.x)<tolerance) ||
-                   !(std::abs(candidatePoint.y-point.y)<tolerance) ||
-                   !(std::abs(candidatePoint.z-point.z)<tolerance)) continue;
-                matches.push_back(ref);
-            }
-            if(matches.size()==1u) continue;
-            // Spatial lookup must not change the engine's accumulation order.
-            std::sort(matches.begin()+1,matches.end(),[](const auto& a,const auto& b) {
-                return a.mesh<b.mesh || (a.mesh==b.mesh && a.vertex<b.vertex);
-            });
+            const auto& matches=cache.matches[owner][vertex];
+            if(matches.empty()) continue;
             auto sum=ascii::engineModelRotateVector(meshes[owner].orientation,current.normalAt(vertex));
             for(std::size_t match=1u;match<matches.size();++match) {
                 const auto& ref=matches[match];
