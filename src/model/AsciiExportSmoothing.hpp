@@ -29,7 +29,8 @@ ReconstructedSmoothing reconstructSmoothing(
     bool useStoredRows = false,
     const TangentSmoothingSource* tangents = nullptr,
     const std::vector<std::uint8_t>* cornerRotations = nullptr,
-    std::vector<std::vector<std::uint32_t>>* sharedCandidates = nullptr);
+    std::vector<std::vector<std::uint32_t>>* sharedCandidates = nullptr,
+    const std::vector<std::array<double,3>>* precisePositions = nullptr);
 
 struct SeamSmoothingCandidate {
     std::size_t source;

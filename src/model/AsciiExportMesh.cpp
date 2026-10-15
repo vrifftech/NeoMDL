@@ -219,10 +219,12 @@ void materialFields(Writer& out,const Model& model,const Node& node,const Mesh& 
     flag("m_bIsBackgroundGeometry",mesh.backgroundGeometry);
     out.line("transparencyhint "+std::to_string(static_cast<std::int32_t>(mesh.transparencyHint)));
     out.line("animateuv "+std::to_string(static_cast<std::int32_t>(mesh.uvAnimation.enabledRaw)));
-    out.line("uvdirectionx "+out.scalar(mesh.uvAnimation.direction.x));
-    out.line("uvdirectiony "+out.scalar(mesh.uvAnimation.direction.y));
-    out.line("uvjitter "+out.scalar(mesh.uvAnimation.jitter));
-    out.line("uvjitterspeed "+out.scalar(mesh.uvAnimation.jitterSpeed));
+    if(mesh.uvAnimation.enabledRaw) {
+        out.line("uvdirectionx "+out.scalar(mesh.uvAnimation.direction.x));
+        out.line("uvdirectiony "+out.scalar(mesh.uvAnimation.direction.y));
+        out.line("uvjitter "+out.scalar(mesh.uvAnimation.jitter));
+        out.line("uvjitterspeed "+out.scalar(mesh.uvAnimation.jitterSpeed));
+    }
     if(mesh.engineBounds) {
         out.line("bmin "+out.vector(mesh.engineBounds->box.minimum));
         out.line("bmax "+out.vector(mesh.engineBounds->box.maximum));
@@ -853,8 +855,10 @@ void reconstructCyclicCorners(Writer& out,const Model& model,const Model& frames
 bool improvesReconstructedShading(const Model& model,
         const std::map<const Mesh*,MeshReconstruction>& plans,
         const Model& current,const CornerRows& rows,
-        const Model& rebuilt,const CornerRows& generated,bool retainAngles=false) {
-    const auto difference=[](Vec3 a,Vec3 b) {
+        const Model& rebuilt,const CornerRows& generated,bool retainAngles=false,
+        double rounding=0.0) {
+    const auto difference=[&](Vec3 a,Vec3 b) {
+        if(rounding && (same(a,Vec3{}) || same(b,Vec3{}))) return same(a,b)?0.0:1.0;
         const double x=double(a.x)-b.x,y=double(a.y)-b.y,z=double(a.z)-b.z;
         return (x*x+y*y)+z*z;
     };
@@ -870,9 +874,9 @@ bool improvesReconstructedShading(const Model& model,
     bool retained=true,improved=false;
     const auto compare=[&](Vec3 before,Vec3 after,Vec3 target) {
         const auto oldError=difference(before,target),newError=difference(after,target);
-        retained=retained && newError<=oldError;
-        if(retainAngles) retained=retained && angle(after,target)<=angle(before,target);
-        improved=improved || newError<oldError;
+        retained=retained && newError<=std::max(oldError,rounding*rounding);
+        if(retainAngles) retained=retained && angle(after,target)<=std::max(angle(before,target),rounding);
+        improved=improved || (newError<oldError && oldError>rounding*rounding);
     };
     for(std::size_t index=0;index<model.meshes.size() && retained;++index) {
         const auto& source=model.meshes[index];
@@ -929,6 +933,70 @@ void reconstructFaceOrder(Writer& out,const Model& model,const Model& frames,
         }
     }
     measureSeamNormals(current,model,rows,plans);
+}
+
+// Retained tangent channels disambiguate smoothing even on coplanar faces.
+bool reconstructTangentSmoothing(Writer& out,const Model& model,const Model& frames,
+                                 std::map<const Mesh*,MeshReconstruction>& plans) {
+    using Plans=std::map<const Mesh*,MeshReconstruction>;
+    AsciiSkinSeamCache seamCache;
+    auto baseline=frames;
+    const auto baselineRows=generateGeometry(baseline,model,plans,false,out.advanced(),out.job());
+    processAsciiSkinSeams(baseline,out.job(),seamCache);
+    double best=measureSeamNormals(baseline,model,baselineRows,plans),bestTangent{};
+    bool refined=false;
+    bool tangentChanged=std::any_of(plans.begin(),plans.end(),[](const auto& entry) {
+        const auto& mesh=*entry.first;
+        return (mesh.mdxBitmap&0x80u) && !mesh.animated && !mesh.dangly && !entry.second.explicitNormals;
+    });
+    while(tangentChanged) {
+        tangentChanged=false;
+        // A corner-local proposal can split a row before its last writer
+        // becomes independently selectable in the next generated mapping.
+        for(const bool useGeneratedWriters:{false,true}) {
+            auto current=frames;
+            const auto currentRows=generateGeometry(current,model,plans,false,out.advanced(),out.job());
+            bestTangent=measureTangentBasis(current,model,currentRows,plans,out.job());
+            auto candidate=plans;
+            bool proposed=false;
+            for(std::size_t index=0;index<model.meshes.size();++index) {
+                const auto& mesh=model.meshes[index];
+                const auto found=candidate.find(&mesh);
+                if(!(mesh.mdxBitmap&0x80u) || mesh.animated || mesh.dangly || found==candidate.end() ||
+                   found->second.explicitNormals || mesh.asciiNormalPositionSource) continue;
+                auto& plan=found->second;
+                const TangentSmoothingSource tangents{
+                    current.meshes[index].asciiTangentSource->firstCornerNormals,currentRows[index],useGeneratedWriters};
+                const auto smoothing=reconstructSmoothing(mesh,plan.vertices,plan.topology.sourceVertices,
+                    plan.topology.sourceFaces,out.job(),nullptr,true,nullptr,&plan.smoothing.masks,false,
+                    &tangents,&plan.cornerRotations);
+                proposed|=smoothing.masks!=plan.smoothing.masks;
+                plan.smoothing=smoothing;
+            }
+            if(!proposed) continue;
+            const auto considerTangents=[&](Plans trial) {
+                auto rebuilt=frames;
+                const auto rows=generateGeometry(rebuilt,model,trial,false,out.advanced(),out.job());
+                const auto tangentError=measureTangentBasis(rebuilt,model,rows,trial,out.job());
+                if(tangentError>bestTangent) return;
+                processAsciiSkinSeams(rebuilt,out.job(),seamCache);
+                if(!preservesSkinChannels(model,rows)) return;
+                const auto normalError=measureSeamNormals(rebuilt,model,rows,trial);
+                if(normalError<=best && tangentError<=bestTangent &&
+                   (normalError<best || tangentError<bestTangent)) {
+                    best=normalError;bestTangent=tangentError;plans=std::move(trial);tangentChanged=true;refined=true;
+                }
+            };
+            considerTangents(candidate);
+            for(const auto& entry:candidate)
+                if(entry.second.smoothing.masks!=plans.at(entry.first).smoothing.masks) {
+                    auto trial=plans;
+                    trial.at(entry.first)=entry.second;
+                    considerTangents(std::move(trial));
+                }
+        }
+    }
+    return refined;
 }
 
 void reconstructTangentRounding(Writer& out,const Model& model,const Model& frames,
@@ -1223,9 +1291,14 @@ void reconstructNormalPositionPrecision(Writer& out,const Model& model,const Mod
     const auto component=[](Vec3 value,std::size_t axis) {
         return axis==0u?value.x:axis==1u?value.y:value.z;
     };
+    // Precision reconstruction may change the last few bits of an otherwise
+    // unchanged unit normal. Score those float-rounding differences equally.
+    constexpr double rounding=8.0*std::numeric_limits<float>::epsilon();
     const auto difference=[](Vec3 a,Vec3 b) {
+        if(same(a,Vec3{}) || same(b,Vec3{})) return same(a,b)?0.0:1.0;
         const double x=double(a.x)-b.x,y=double(a.y)-b.y,z=double(a.z)-b.z;
-        return (x*x+y*y)+z*z;
+        const double squared=(x*x+y*y)+z*z;
+        return squared<=rounding*rounding?0.0:squared;
     };
     const auto angle=[](Vec3 a,Vec3 b) {
         if(same(a,b)) return 0.0;
@@ -1233,8 +1306,9 @@ void reconstructNormalPositionPrecision(Writer& out,const Model& model,const Mod
         const double x=double(a.y)*b.z-double(a.z)*b.y;
         const double y=double(a.z)*b.x-double(a.x)*b.z;
         const double z=double(a.x)*b.y-double(a.y)*b.x;
-        return std::atan2(std::sqrt((x*x+y*y)+z*z),
+        const double value=std::atan2(std::sqrt((x*x+y*y)+z*z),
             (double(a.x)*b.x+double(a.y)*b.y)+double(a.z)*b.z);
+        return value<=rounding?0.0:value;
     };
     const auto normal=ascii::normalizeVertexNormal;
     struct Transform {Vec3 position;Quaternion orientation;};
@@ -1268,6 +1342,42 @@ void reconstructNormalPositionPrecision(Writer& out,const Model& model,const Mod
                 const auto low=component(plan.sourcePositions[source],axis);
                 if(rawBits(static_cast<float>(high[source][axis]))!=rawBits(low)) high[source][axis]=low;
             }
+        const auto accept=[&](MeshReconstruction candidate) {
+            std::map<const Mesh*,MeshReconstruction> changed;
+            changed.emplace(&mesh,std::move(candidate));
+            auto rebuilt=current;
+            rebuilt.meshes[index]=frames.meshes[index];
+            auto generated=rows;
+            auto changedRows=generateGeometry(rebuilt,model,changed,false,out.advanced(),out.job());
+            generated[index]=std::move(changedRows[index]);
+            if(!preservesSkinChannels(model,generated)) return false;
+            measureTangentBasis(rebuilt,model,generated,plans,out.job(),&changed);
+            processAsciiSkinSeams(rebuilt,out.job());
+            if(!improvesReconstructedShading(model,plans,current,rows,rebuilt,generated,true,rounding)) return false;
+            plan=std::move(changed.at(&mesh));
+            if(!plan.preciseSourcePositions.empty()) high=plan.preciseSourcePositions;
+            current=std::move(rebuilt);rows=std::move(generated);return true;
+        };
+        // Fit the smoothing links using the same rounded products as the
+        // precision producer before searching authored position residuals.
+        if(plan.preciseSourcePositions.empty()) for(const bool sourceOrder:{false,true}) {
+            auto trial=plan;
+            trial.preciseSourcePositions=high;
+            if(sourceOrder) {
+                std::fill(trial.cornerRotations.begin(),trial.cornerRotations.end(),0u);
+                std::iota(trial.faceOrder.begin(),trial.faceOrder.end(),std::size_t{});
+            }
+            trial.smoothing=reconstructSmoothing(mesh,plan.vertices,plan.topology.sourceVertices,
+                plan.topology.sourceFaces,out.job(),nullptr,true,nullptr,&plan.smoothing.masks,
+                false,nullptr,&trial.cornerRotations,nullptr,&high);
+            if(!model.nodes[mesh.nodeIndex].aabb) {
+                const auto stars=reconstructNormalCornerStars(mesh,plan.vertices,plan.topology.sourceVertices,
+                    plan.topology.sourceFaces,trial.smoothing.masks,trial.cornerRotations,trial.faceOrder,
+                    plan.sourcePositions,out.job(),&high);
+                trial.cornerRotations=stars.rotations;trial.faceOrder=stars.faceOrder;
+            }
+            accept(std::move(trial));
+        }
         struct Group {
             std::size_t source;
             std::vector<std::size_t> faces,corners;
@@ -1699,22 +1809,6 @@ void reconstructNormalPositionPrecision(Writer& out,const Model& model,const Mod
             };
             auto candidates=collectCandidates(selected,crosses,nullptr);
             sortCandidates(candidates);
-            const auto accept=[&](MeshReconstruction candidate) {
-                std::map<const Mesh*,MeshReconstruction> changed;
-                changed.emplace(&mesh,std::move(candidate));
-                auto rebuilt=current;
-                rebuilt.meshes[index]=frames.meshes[index];
-                auto generated=rows;
-                auto changedRows=generateGeometry(rebuilt,model,changed,false,out.advanced(),out.job());
-                generated[index]=std::move(changedRows[index]);
-                if(!preservesSkinChannels(model,generated)) return false;
-                measureTangentBasis(rebuilt,model,generated,plans,out.job(),&changed);
-                processAsciiSkinSeams(rebuilt,out.job());
-                if(!improvesReconstructedShading(model,plans,current,rows,rebuilt,generated,true)) return false;
-                plan=std::move(changed.at(&mesh));
-                if(!plan.preciseSourcePositions.empty()) high=plan.preciseSourcePositions;
-                current=std::move(rebuilt);rows=std::move(generated);return true;
-            };
             bool accepted=false;
             for(const auto& candidate:candidates) {
                 auto trial=plan;
@@ -2279,6 +2373,9 @@ void reconstructSkinSeamSmoothing(Writer& out,const Model& model) {
         auto frames=model;
         frames.animations.clear();
         if(!out.advanced()) reconstructExportedNodeFrames(frames,out.job());
+        reconstructTangentSmoothing(out,model,frames,out.meshReconstructions);
+        reconstructCyclicCornerPass(out,model,frames,out.meshReconstructions,nullptr,CornerSearch::Cancellation,true);
+        reconstructFaceOrder(out,model,frames,out.meshReconstructions);
         reconstructTangentRounding(out,model,frames,out.meshReconstructions);
         reconstructNormalRoundingPass(out,model,frames,out.meshReconstructions);
         reconstructTangentUvPrecision(out,model,frames,out.meshReconstructions);
@@ -2431,66 +2528,8 @@ void reconstructSkinSeamSmoothing(Writer& out,const Model& model) {
             }
     } while(best<previous);
 
-    // Retained tangent channels precede ProcessSkinSeams and disambiguate
-    // smoothing inputs whose final ordinary normals became equal. The local
-    // fit proposes intersections; the actual producers judge their effects.
     double bestTangent{};
-    const auto refineTangents=[&] {
-        bool refined=false;
-        bool tangentChanged=std::any_of(plans.begin(),plans.end(),[](const auto& entry) {
-            const auto& mesh=*entry.first;
-            return (mesh.mdxBitmap&0x80u) && !mesh.animated && !mesh.dangly && !entry.second.explicitNormals;
-        });
-        while(tangentChanged) {
-            tangentChanged=false;
-            // A corner-local proposal can split a row before its last writer
-            // becomes independently selectable in the next generated mapping.
-            for(const bool useGeneratedWriters:{false,true}) {
-                auto current=frames;
-                const auto currentRows=generateGeometry(current,model,plans,false,out.advanced(),out.job());
-                bestTangent=measureTangentBasis(current,model,currentRows,plans,out.job());
-                auto candidate=plans;
-                bool proposed=false;
-                for(std::size_t index=0;index<model.meshes.size();++index) {
-                    const auto& mesh=model.meshes[index];
-                    const auto found=candidate.find(&mesh);
-                    if(!(mesh.mdxBitmap&0x80u) || mesh.animated || mesh.dangly || found==candidate.end() ||
-                       found->second.explicitNormals || mesh.asciiNormalPositionSource) continue;
-                    auto& plan=found->second;
-                    const TangentSmoothingSource tangents{
-                        current.meshes[index].asciiTangentSource->firstCornerNormals,currentRows[index],useGeneratedWriters};
-                    const auto smoothing=reconstructSmoothing(mesh,plan.vertices,plan.topology.sourceVertices,
-                        plan.topology.sourceFaces,out.job(),nullptr,true,nullptr,&plan.smoothing.masks,false,
-                        &tangents,&plan.cornerRotations);
-                    proposed|=smoothing.masks!=plan.smoothing.masks;
-                    plan.smoothing=smoothing;
-                }
-                if(!proposed) continue;
-                const auto considerTangents=[&](Plans trial) {
-                    auto rebuilt=frames;
-                    const auto rows=generateGeometry(rebuilt,model,trial,false,out.advanced(),out.job());
-                    const auto tangentError=measureTangentBasis(rebuilt,model,rows,trial,out.job());
-                    if(tangentError>bestTangent) return;
-                    processAsciiSkinSeams(rebuilt,out.job(),seamCache);
-                    if(!preservesSkinChannels(model,rows)) return;
-                    const auto normalError=measureSeamNormals(rebuilt,model,rows,trial);
-                    if(normalError<=best && tangentError<=bestTangent &&
-                       (normalError<best || tangentError<bestTangent)) {
-                        best=normalError;bestTangent=tangentError;plans=std::move(trial);tangentChanged=true;refined=true;
-                    }
-                };
-                considerTangents(candidate);
-                for(const auto& entry:candidate)
-                    if(entry.second.smoothing.masks!=plans.at(entry.first).smoothing.masks) {
-                        auto trial=plans;
-                        trial.at(entry.first)=entry.second;
-                        considerTangents(std::move(trial));
-                    }
-            }
-        }
-        return refined;
-    };
-    refineTangents();
+    reconstructTangentSmoothing(out,model,frames,plans);
     for(;;) {
         reconstructCyclicCorners(out,model,frames,plans);
         auto current=frames;
@@ -2673,7 +2712,7 @@ void reconstructSkinSeamSmoothing(Writer& out,const Model& model) {
                 }
         };
         refineSeamJoins(false);
-        const bool tangentRefitted=refineTangents();
+        const bool tangentRefitted=reconstructTangentSmoothing(out,model,frames,plans);
         if(!refitted && !tangentRefitted) {
             refineSeamJoins(true);
             if(refitted) continue;

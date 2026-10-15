@@ -836,15 +836,22 @@ ReconstructedNormalStars reconstructNormalCornerStars(
     const SourceFaceNeighbors neighbors(mesh,sourceFaces,faceOrder);
     std::vector<ascii::NormalFaceCross> crosses(sourceFaces.size());
     for(std::size_t face=0;face<crosses.size();++face) crosses[face]=alternatives[face][current[face]];
-    const auto angle=[](Vec3 a,Vec3 b) {
+    const double rounding=precisePositions?8.0*std::numeric_limits<float>::epsilon():0.0;
+    const auto squaredError=[&](Vec3 a,Vec3 b) {
+        if(precisePositions && (same(a,Vec3{}) || same(b,Vec3{}))) return same(a,b)?0.0:1.0;
+        const double value=difference(a,b);
+        return value<=rounding*rounding?0.0:value;
+    };
+    const auto angle=[&](Vec3 a,Vec3 b) {
         if(a.x==b.x && a.y==b.y && a.z==b.z) return 0.0;
         if((a.x==0.0f && a.y==0.0f && a.z==0.0f) ||
            (b.x==0.0f && b.y==0.0f && b.z==0.0f)) return std::acos(-1.0);
         const double x=double(a.y)*b.z-double(a.z)*b.y;
         const double y=double(a.z)*b.x-double(a.x)*b.z;
         const double z=double(a.x)*b.y-double(a.y)*b.x;
-        return std::atan2(std::sqrt((x*x+y*y)+z*z),
+        const double value=std::atan2(std::sqrt((x*x+y*y)+z*z),
             (double(a.x)*b.x+double(a.y)*b.y)+double(a.z)*b.z);
+        return value<=rounding?0.0:value;
     };
     const bool compareAngles=precisePositions || baselineCornerNormals;
     struct Error {double squared,angle;};
@@ -862,7 +869,7 @@ ReconstructedNormalStars reconstructNormalCornerStars(
         for(const auto corner:groups[index].corners) {
             const auto target=vertices[static_cast<std::size_t>(
                 mesh.faces[corner/3u].indices[corner%3u])].normal;
-            result.push_back({difference(normal,target),compareAngles?angle(normal,target):0.0});
+            result.push_back({squaredError(normal,target),compareAngles?angle(normal,target):0.0});
         }
         return result;
     };
@@ -875,7 +882,7 @@ ReconstructedNormalStars reconstructNormalCornerStars(
                 const auto target=vertices[static_cast<std::size_t>(
                     mesh.faces[corner/3u].indices[corner%3u])].normal;
                 const auto normal=(*baselineCornerNormals)[corner];
-                limits.push_back({difference(normal,target),angle(normal,target)});
+                limits.push_back({squaredError(normal,target),angle(normal,target)});
             }
         }
     }
@@ -964,7 +971,7 @@ ReconstructedNormalStars reconstructNormalCornerStars(
                             const auto corner=corners[i];
                             const auto target=vertices[static_cast<std::size_t>(
                                 mesh.faces[corner/3u].indices[corner%3u])].normal;
-                            const auto squared=difference(normal,target);
+                            const auto squared=squaredError(normal,target);
                             if(squared>baseline[group][i].squared ||
                                (compareAngles && angle(normal,target)>baseline[group][i].angle)) {
                                 accepted=false;break;
@@ -1286,7 +1293,8 @@ ReconstructedSmoothing reconstructSmoothing(
     const std::vector<std::uint32_t>* seedMasks,bool useStoredRows,
     const TangentSmoothingSource* tangents,
     const std::vector<std::uint8_t>* cornerRotations,
-    std::vector<std::vector<std::uint32_t>>* sharedCandidates) {
+    std::vector<std::vector<std::uint32_t>>* sharedCandidates,
+    const std::vector<std::array<double,3>>* precisePositions) {
     Smoothing work{{},{},{},{},job,{}, {}};
     std::vector<ascii::TangentFace> tangentFaces;
     if(tangents) tangentFaces.reserve(sourceFaces.size());
@@ -1300,7 +1308,13 @@ ReconstructedSmoothing reconstructSmoothing(
         const auto a=vertices[sourceVertices[indices[rotation%3u]]].position;
         const auto b=vertices[sourceVertices[indices[(1u+rotation)%3u]]].position;
         const auto c=vertices[sourceVertices[indices[(2u+rotation)%3u]]].position;
-        work.crosses.push_back(ascii::normalFaceCross(a,b,c));
+        if(precisePositions) {
+            const auto value=ascii::normalPositionFaceCross({a,b,c},
+                {(*precisePositions)[indices[rotation%3u]],
+                 (*precisePositions)[indices[(1u+rotation)%3u]],
+                 (*precisePositions)[indices[(2u+rotation)%3u]]});
+            work.crosses.push_back({value.x,value.y,value.z});
+        } else work.crosses.push_back(ascii::normalFaceCross(a,b,c));
         for(const auto source:indices) {
             auto& faces=incident[source];
             if(faces.empty() || faces.back()!=face) faces.push_back(face);
