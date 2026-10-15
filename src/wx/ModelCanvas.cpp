@@ -462,6 +462,13 @@ ModelCanvas::ModelCanvas(wxWindow* parent)
     Bind(wxEVT_KEY_DOWN, &ModelCanvas::onKey, this);
     Bind(wxEVT_KEY_UP, &ModelCanvas::onKey, this);
     Bind(wxEVT_KILL_FOCUS, &ModelCanvas::onFocusLost, this);
+    Bind(wxEVT_IDLE, [this](wxIdleEvent& event) {
+        if (freeFlyCameraActive() && std::any_of(flyMovement_.begin(), flyMovement_.end(),
+                                               [](bool down) { return down; })) {
+            Refresh(false);
+            event.RequestMore();
+        }
+    });
 }
 
 ModelCanvas::~ModelCanvas() {
@@ -2996,7 +3003,6 @@ void ModelCanvas::updateAnimationVisibility() {
 void ModelCanvas::advance(float elapsedSeconds, bool advanceParticles,
                           bool advanceAnimations) {
     if (!std::isfinite(elapsedSeconds) || elapsedSeconds < 0.0f) elapsedSeconds = 0.0f;
-    advanceCamera(elapsedSeconds);
     synchronizeWorldClockCreatures();
     std::uint64_t snapshotMicroseconds=0u;
     // All four engine timers sample the same microsecond host snapshot. Only
@@ -3228,7 +3234,10 @@ model::Vec3 ModelCanvas::viewerCameraPosition() const {
     return {center_.x + offset.x, center_.y + offset.y, center_.z + offset.z};
 }
 
-void ModelCanvas::advanceCamera(float elapsedSeconds) {
+void ModelCanvas::advanceCamera() {
+    const auto now = std::chrono::steady_clock::now();
+    const auto elapsedSeconds = std::chrono::duration<float>(now - cameraTick_).count();
+    cameraTick_ = now;
     if (freeFlyCameraActive()) {
         auto direction = cameraOffset({float(flyMovement_[0]) - float(flyMovement_[1]),
                                       0.0f,
@@ -3240,7 +3249,6 @@ void ModelCanvas::advanceCamera(float elapsedSeconds) {
             flyPosition_.x += direction.x * step;
             flyPosition_.y += direction.y * step;
             flyPosition_.z += direction.z * step;
-            Refresh(false);
         }
     }
 }
@@ -3252,6 +3260,7 @@ void ModelCanvas::onPaint(wxPaintEvent&) {
     // procedural scene work until that snapshot is committed or discarded.
     if (loading_) return;
     if (!context_ || !SetCurrent(*context_)) return;
+    advanceCamera();
     initializeGl();
     textureCache_.flushRetiredTextures();
     meshRenderer_.flushRetiredGeometry();
@@ -3298,6 +3307,7 @@ void ModelCanvas::onSize(wxSizeEvent& event) {
 void ModelCanvas::onErase(wxEraseEvent&) {}
 
 void ModelCanvas::onMouse(wxMouseEvent& event) {
+    advanceCamera();
     if (event.ButtonDown()) SetFocus();
     if(event.LeftDown()&&event.ControlDown()&&pickingCamera_&&document_&&document_->isOpen()) {
         const auto scale=GetContentScaleFactor();
@@ -3379,6 +3389,7 @@ void ModelCanvas::onMouse(wxMouseEvent& event) {
 }
 
 void ModelCanvas::onKey(wxKeyEvent& event) {
+    advanceCamera();
     constexpr std::array<int, 6> keys{{'D', 'A', 'E', 'Q', 'S', 'W'}};
     const auto key = std::find(keys.begin(), keys.end(), event.GetKeyCode());
     if (event.ControlDown() || event.AltDown()) {
@@ -3389,9 +3400,10 @@ void ModelCanvas::onKey(wxKeyEvent& event) {
             if (event.ShiftDown()) useViewerCamera(!freeFlyCameraActive());
             else frameModel();
         }
-    } else if (freeFlyCameraActive() && key != keys.end())
+    } else if (freeFlyCameraActive() && key != keys.end()) {
         flyMovement_[key - keys.begin()] = event.GetEventType() == wxEVT_KEY_DOWN;
-    else
+        Refresh(false);
+    } else
         event.Skip();
 }
 
@@ -3405,6 +3417,7 @@ void ModelCanvas::onCaptureLost(wxMouseCaptureLostEvent&) {
 }
 
 void ModelCanvas::resetCameraInput() {
+    cameraTick_ = std::chrono::steady_clock::now();
     flyMovement_.fill(false);
     draggingRotate_ = false;
     draggingPan_ = false;

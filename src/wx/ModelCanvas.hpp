@@ -34,6 +34,7 @@
 #include <wx/glcanvas.h>
 
 #include <cstdint>
+#include <chrono>
 #include <memory>
 #include <map>
 #include <optional>
@@ -486,7 +487,7 @@ private:
     void onFocusLost(wxFocusEvent& event);
     void onCaptureLost(wxMouseCaptureLostEvent& event);
     void resetCameraInput();
-    void advanceCamera(float elapsedSeconds);
+    void advanceCamera();
     model::Vec3 cameraOffset(model::Vec3 local) const;
     model::Vec3 viewerCameraPosition() const;
     void initializeGl();
@@ -687,6 +688,7 @@ private:
     bool draggingPan_{};
     bool freeFly_{};
     std::array<bool, 6> flyMovement_{};
+    std::chrono::steady_clock::time_point cameraTick_{std::chrono::steady_clock::now()};
     model::Vec3 flyPosition_{};
     float flySpeed_{5.0f};
     wxPoint lastMouse_;
