@@ -349,15 +349,19 @@ struct Smoothing {
                     return total;
                 };
                 auto best=localScore();
-                bool changed;
-                do {
-                    changed=false;
+                // Compare every group change before committing: an earlier
+                // partial fit can exclude an exact overlapping contributor set.
+                for(;;) {
+                    auto selected=target;
                     for(std::size_t block=0;block<blocks.size();++block) if(block!=target) {
                         included[block]=!included[block];
                         const auto score=localScore();
-                        if(score<best) {best=score;changed=true;} else included[block]=!included[block];
+                        included[block]=!included[block];
+                        if(score<best) {best=score;selected=block;}
                     }
-                } while(changed);
+                    if(selected==target) break;
+                    included[selected]=!included[selected];
+                }
                 for(const auto corner:blocks[target])
                     for(const auto& entry:corners[corner].contributions) if(entry.relation!=ownFace) {
                         bool take=false;
