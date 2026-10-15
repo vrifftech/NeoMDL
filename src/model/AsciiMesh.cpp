@@ -7,6 +7,7 @@
 #include <cstdio>
 #include <cstring>
 #include <map>
+#include <numeric>
 #include <unordered_map>
 
 namespace neomdl::model::ascii {
@@ -204,7 +205,15 @@ std::vector<std::array<std::size_t,3>> smoothNormals(const RawNode& raw,std::vec
                                                    const neoshared::bif::JobControl& job) {
     std::vector<std::array<std::size_t,3>> indices(raw.faces.size());
     normals.clear();
-    std::vector<std::vector<std::pair<std::size_t,std::size_t>>> incident(raw.vertices.size());
+    std::vector<std::size_t> offsets(raw.vertices.size()+1u);
+    for(const auto& face:raw.faces)
+        for(std::size_t corner=0;corner<3u;++corner)
+            if(std::find(face.vertices.begin()+corner+1u,face.vertices.end(),
+                         face.vertices[corner])==face.vertices.end())
+                ++offsets.at(static_cast<std::size_t>(face.vertices[corner])+1u);
+    std::partial_sum(offsets.begin(),offsets.end(),offsets.begin());
+    auto next=offsets;
+    std::vector<std::pair<std::size_t,std::size_t>> incident(offsets.back());
     std::vector<NormalFaceCross> crosses;
     for(std::size_t face=0;face<raw.faces.size();++face) {
         const auto& candidate=raw.faces[face];
@@ -212,11 +221,13 @@ std::vector<std::array<std::size_t,3>> smoothNormals(const RawNode& raw,std::vec
             b=raw.vertices.at(candidate.vertices[1]),c=raw.vertices.at(candidate.vertices[2]);
         crosses.push_back(raw.normalPositionPrecision==64u?
             preciseNormalCross(candidate,raw):normalFaceCross(a,b,c));
-        // The engine chooses the last matching corner of a repeated vertex.
+        // Keep incident faces contiguous and in authored order. The engine
+        // chooses the last matching corner of a repeated source vertex.
         for(std::size_t corner=0;corner<3u;++corner) {
-            auto& faces=incident.at(candidate.vertices[corner]);
-            if(!faces.empty() && faces.back().first==face) faces.back().second=corner;
-            else faces.emplace_back(face,corner);
+            const auto vertex=candidate.vertices[corner];
+            if(std::find(candidate.vertices.begin()+corner+1u,candidate.vertices.end(),
+                         vertex)==candidate.vertices.end())
+                incident[next[vertex]++]={face,corner};
         }
     }
     for(std::size_t i=0;i<raw.faces.size();++i) {
@@ -224,7 +235,9 @@ std::vector<std::array<std::size_t,3>> smoothNormals(const RawNode& raw,std::vec
         const auto& current=raw.faces[i];
         for(std::size_t corner=0;corner<3u;++corner) {
             Vec3 sum{}; bool reused=false;
-            for(const auto& entry:incident[current.vertices[corner]]) {
+            const auto vertex=current.vertices[corner];
+            for(auto at=offsets[vertex];at<offsets[vertex+1u];++at) {
+                const auto& entry=incident[at];
                 const auto j=entry.first;
                 const auto& candidate=raw.faces[j];
                 if(i!=j && !(current.smoothing&candidate.smoothing)) continue;
@@ -532,6 +545,10 @@ std::vector<GeneratedVertex> generateVertices(RawNode& raw,Mesh& mesh,
     std::vector<GeneratedVertex> vertices;
     std::unordered_map<std::array<std::uint32_t,3>,std::vector<std::size_t>,PositionHash> positions;
     positions.reserve(raw.vertices.size());
+    std::vector<std::vector<std::size_t>*> sourcePositions;
+    sourcePositions.reserve(raw.vertices.size());
+    for(const auto position:raw.vertices)
+        sourcePositions.push_back(&positions[positionKey(position)]);
     mesh.faces.resize(raw.faces.size());
     raw.tangentFaceSources.resize(raw.faces.size());
     const bool dangly=raw.node.flags==0x121u;
@@ -554,7 +571,7 @@ std::vector<GeneratedVertex> generateVertices(RawNode& raw,Mesh& mesh,
                 if(!raw.texcoords[channel].empty())
                     vertex.texcoords[channel]=raw.texcoords[channel].at(raw.faces[i].texcoords[channel][corner]);
             if(dangly) vertex.constraint=raw.constraints.at(vertex.source);
-            auto& candidates=positions[positionKey(vertex.position)];
+            auto& candidates=*sourcePositions[vertex.source];
             const auto found=std::find_if(candidates.begin(),candidates.end(),
                 [&](std::size_t index){return same(vertices[index],vertex,dangly) &&
                     (!mesh.explicitNormals || vertices[index].normalSource==vertex.normalSource) &&
@@ -1223,7 +1240,9 @@ void orientSingularTangentComponents(const std::vector<TangentFace>& faces,
     using Endpoint=std::array<float,5>;
     using Edge=std::array<Endpoint,2>;
     std::map<Edge,std::vector<std::size_t>> edges;
-    for(std::size_t i=0;i<faces.size();++i) {
+    // Only edges touching singular faces participate in a component or its
+    // boundary. Index those first, then attach their nonsingular neighbors.
+    const auto visitEdges=[&](std::size_t i,const auto& visit) {
         job.check();
         std::array<Endpoint,3> endpoints;
         for(std::size_t corner=0;corner<3;++corner) {
@@ -1234,9 +1253,16 @@ void orientSingularTangentComponents(const std::vector<TangentFace>& faces,
         for(std::size_t corner=0;corner<3;++corner) {
             Edge edge{endpoints[corner],endpoints[(corner+1)%3]};
             if(edge[1]<edge[0]) std::swap(edge[0],edge[1]);
-            edges[edge].push_back(i);
+            visit(edge);
         }
-    }
+    };
+    for(std::size_t i=0;i<faces.size();++i)
+        if(singular[i]) visitEdges(i,[&](const Edge& edge){edges[edge].push_back(i);});
+    for(std::size_t i=0;i<faces.size();++i)
+        if(!singular[i]) visitEdges(i,[&](const Edge& edge) {
+            const auto found=edges.find(edge);
+            if(found!=edges.end()) found->second.push_back(i);
+        });
     std::vector<std::size_t> parents(faces.size());
     for(std::size_t i=0;i<faces.size();++i) parents[i]=i;
     const auto root=[&](std::size_t i) {
@@ -1358,13 +1384,25 @@ void buildTangentBasis(Mesh& mesh,const neoshared::bif::JobControl& job) {
                                  source.generatedPositions.at(c)},{auv,buv,cuv}});
     }
     orientSingularTangentComponents(tangentFaces,faceBasis,job);
-    std::unordered_map<std::array<std::uint32_t,3>,
-        std::vector<std::pair<std::size_t,std::int16_t>>,PositionHash> incident;
-    incident.reserve(source.generatedPositions.size());
+    std::unordered_map<std::array<std::uint32_t,3>,std::size_t,PositionHash> positions;
+    positions.reserve(source.generatedPositions.size());
+    std::vector<std::size_t> vertexPositions;
+    vertexPositions.reserve(source.generatedPositions.size());
+    for(const auto position:source.generatedPositions)
+        vertexPositions.push_back(positions.emplace(positionKey(position),positions.size()).first->second);
+    std::vector<std::size_t> offsets(positions.size()+1u);
+    for(const auto& face:mesh.faces)
+        for(const auto index:face.indices)
+            ++offsets[vertexPositions.at(static_cast<std::size_t>(index))+1u];
+    std::partial_sum(offsets.begin(),offsets.end(),offsets.begin());
+    auto next=offsets;
+    std::vector<std::pair<std::size_t,std::int16_t>> incident(offsets.back());
     std::vector<std::size_t> writers(source.generatedPositions.size());
+    // Store every contribution in face/corner order, including repeated
+    // positions, without allocating a separate vector for each position.
     for(std::size_t face=0;face<mesh.faces.size();++face)
         for(const auto index:mesh.faces[face].indices) {
-            incident[positionKey(source.generatedPositions.at(static_cast<std::size_t>(index)))].emplace_back(face,index);
+            incident[next[vertexPositions[index]]++]={face,index};
             writers[index]=face;
         }
     for(std::size_t i=0;i<mesh.faces.size();++i) {
@@ -1377,7 +1415,9 @@ void buildTangentBasis(Mesh& mesh,const neoshared::bif::JobControl& job) {
             result.bitangent=add(faceBasis[i].bitangent,result.bitangent);
             result.tangent=add(faceBasis[i].tangent,result.tangent);
             result.normal=add(faceBasis[i].normal,result.normal);
-            for(const auto& entry:incident.at(positionKey(position))) {
+            const auto group=vertexPositions[index];
+            for(auto at=offsets[group];at<offsets[group+1u];++at) {
+                const auto& entry=incident[at];
                 const auto other=entry.first;
                 if(other!=i && same(position,source.generatedPositions.at(static_cast<std::size_t>(entry.second))) &&
                    (source.faceSmoothing.at(i)&source.faceSmoothing.at(other))) {
