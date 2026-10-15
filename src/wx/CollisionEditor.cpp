@@ -111,7 +111,7 @@ void AsciiEditor::editCollisions(const model::Model& asset) {
     const auto show=[&] {
         text->SetReadOnly(false);
         text->SetText(pending.count(selected)?wxui::toWx(pending.at(selected).text):
-            "# No companion loaded. Import one or choose a model mesh and Use MDL Mesh.\n");
+            wxString("# No companion loaded. Import one or choose a model mesh and Use MDL Mesh.\n"));
         text->EmptyUndoBuffer();text->SetSavePoint();text->SetReadOnly(!pending.count(selected));controls();
     };
     show();

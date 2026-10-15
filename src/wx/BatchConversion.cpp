@@ -140,7 +140,7 @@ void showBatchConversion(wxWindow* parent, ConversionMode mode, const AuthoringJ
                 files->SetItem(i, 1, result.error.empty() ? wxString::Format("Converted (%.2f s)", result.seconds) : wxui::toWx("Failed: " + result.error));
             }
             for (std::size_t i = results.size(); i < paths.size(); ++i)
-                files->SetItem(i, 1, i == results.size() ? interrupted : "Not run");
+                files->SetItem(i, 1, i == results.size() ? interrupted : wxString("Not run"));
         } catch (const std::exception& error) { wxui::showError(&dialog, error); }
     });
     controls(); wxui::applyTheme(&dialog, wxui::currentDarkMode()); dialog.ShowModal();
