@@ -3360,7 +3360,7 @@ using TangentFitCache=std::map<std::vector<std::uint32_t>,std::optional<TangentF
 // directions hidden by cancellation of several incident face contributions.
 void reconstructTangentDirections(Writer& out,const Model& model,const Model& frames,
                                    std::map<const Mesh*,MeshReconstruction>& plans,const Mesh* selectedMesh,std::size_t selectedFace,
-                                   TangentFitCache& cache,bool independent=false,const TangentBasis* faceTarget=nullptr) {
+                                   TangentFitCache& cache,bool independent=false,const TangentBasis* faceTarget=nullptr,bool interior=false) {
     auto current=frames;
     const std::map<const Mesh*,MeshReconstruction> selectedPlans{{selectedMesh,plans.at(selectedMesh)}};
     const auto rows=generateGeometry(current,model,selectedPlans,false,out.advanced(),out.job(),false);
@@ -3480,9 +3480,23 @@ void reconstructTangentDirections(Writer& out,const Model& model,const Model& fr
         std::array<std::optional<std::vector<std::array<double,3>>>,2> productWitnesses;
         std::vector<std::uint32_t> cacheKey;
         std::vector<std::vector<std::uint32_t>> visitedFits;
+        std::vector<TangentBasis> rawBases(existing.faces.size());
+        for(std::size_t face=0;face<rawBases.size();++face) rawBases[face]=basisFor(face,source->faceTexcoords64[face]);
+        std::vector<ascii::TangentComponent> affectedComponents;
+        std::vector<bool> reoriented(rawBases.size());
+        reoriented[fittedFace]=true;
+        for(const auto& group:topology.singular)
+            if(std::find(group.faces.begin(),group.faces.end(),fittedFace)!=group.faces.end() ||
+               std::find(group.boundary.begin(),group.boundary.end(),fittedFace)!=group.boundary.end()) {
+                affectedComponents.push_back(group);
+                for(const auto face:group.faces) reoriented[face]=true;
+            }
+        std::vector<std::size_t> reorientedFaces;
+        for(std::size_t face=0;face<reoriented.size();++face)
+            if(reoriented[face]) reorientedFaces.push_back(face);
+        auto proposedBases=rawBases;
         for(;;) {
-            std::vector<TangentBasis> rawBases(existing.faces.size());
-            for(std::size_t face=0;face<rawBases.size();++face) rawBases[face]=basisFor(face,source->faceTexcoords64[face]);
+            double affectedError{};
             {
                 const auto face=fittedFace;
                 std::set<std::size_t> dependentFaces{face};
@@ -3501,9 +3515,14 @@ void reconstructTangentDirections(Writer& out,const Model& model,const Model& fr
                             dependentRows.insert(affectedByFace[f].begin(),affectedByFace[f].end());
                     }
                 }
-                for(const auto row:dependentRows)
+                for(const auto row:dependentRows) {
                     dependentFaces.insert(contributorsByRow[row].begin(),contributorsByRow[row].end());
-                cacheKey={static_cast<std::uint32_t>(index),static_cast<std::uint32_t>(selectedFace),independent?1u:0u,faceTarget?1u:0u};
+                    affectedError+=errors[row];
+                }
+                const bool coupled=std::any_of(dependentRows.begin(),dependentRows.end(),
+                    [&](std::size_t row){return contributorsByRow[row].size()!=1u;});
+                cacheKey={static_cast<std::uint32_t>(index),static_cast<std::uint32_t>(selectedFace),
+                    independent && coupled?1u:0u,faceTarget?1u:0u};
                 const auto vectorKey=[&](Vec3 value) {
                     cacheKey.insert(cacheKey.end(),{bits(value.x),bits(value.y),bits(value.z)});
                 };
@@ -3602,6 +3621,16 @@ void reconstructTangentDirections(Writer& out,const Model& model,const Model& fr
                     }
                 }
             }
+            // Repeated corners often request the same direction. Keep the
+            // original order while solving each exact float direction once.
+            const auto uniqueDirections=[&](std::vector<Vec3>& directions) {
+                std::set<std::array<std::uint32_t,3>> seen;
+                directions.erase(std::remove_if(directions.begin(),directions.end(),[&](Vec3 value) {
+                    return !seen.insert({rawBits(value.x),rawBits(value.y),rawBits(value.z)}).second;
+                }),directions.end());
+            };
+            for(auto& axis:hints[fittedFace]) uniqueDirections(axis);
+            uniqueDirections(normalHints[fittedFace]);
             bool accepted=false;
             for(std::size_t face=0;face<hints.size();++face) {
                 if(plan.faceOrder[source->authoredFaceIndices[face]]!=selectedFace ||
@@ -3650,7 +3679,34 @@ void reconstructTangentDirections(Writer& out,const Model& model,const Model& fr
                     for(const auto x:{initial[0],low[0],lower[0],upper[0]})
                         for(const auto y:{initial[1],low[1],lower[1],upper[1]})
                             for(const auto z:{initial[2],low[2],lower[2],upper[2]}) remember({x,y,z});
-                    if((!mesh.render || faceTarget || source->faceSmoothing[face]==0u) && low[1]==low[2] && low[0]!=low[1]) {
+                    // Interior UV residuals can cross several product cells
+                    // together even when every one-coordinate move is worse.
+                    // Seed those combinations before the directional refinement.
+                    const auto& faceUv=source->generatedTexcoords;
+                    const auto ua=faceUv[ids[0]],ub=faceUv[ids[1]],uc=faceUv[ids[2]];
+                    if(interior && (ub.x-ua.x)*(uc.y-ua.y)-(ub.y-ua.y)*(uc.x-ua.x)==0.0f) {
+                        // A fixed low-discrepancy sequence covers unequal
+                        // residuals without aligning all three coordinates on
+                        // the same rounding boundaries.
+                        static const auto seeds=[] {
+                            std::array<Coordinates,512u> result;
+                            const std::array<std::size_t,3> bases{2u,3u,5u};
+                            for(std::size_t i=0;i<result.size();++i)
+                                for(std::size_t c=0;c<3u;++c) {
+                                    double value{},scale=1.0;
+                                    for(auto digit=i+1u;digit;digit/=bases[c]) {
+                                        scale/=bases[c];value+=double(digit%bases[c])*scale;
+                                    }
+                                    result[i][c]=value;
+                                }
+                            return result;
+                        }();
+                        for(const auto& seed:seeds)
+                            remember({lower[0]+(upper[0]-lower[0])*seed[0],
+                                lower[1]+(upper[1]-lower[1])*seed[1],
+                                lower[2]+(upper[2]-lower[2])*seed[2]});
+                    }
+                    if(!interior && (!mesh.render || faceTarget || source->faceSmoothing[face]==0u) && low[1]==low[2] && low[0]!=low[1]) {
                         if(productWitnesses[axis]) {
                             for(const auto& witness:*productWitnesses[axis]) remember(witness);
                         } else {
@@ -3917,20 +3973,23 @@ void reconstructTangentDirections(Writer& out,const Model& model,const Model& fr
                         if(bound>=directError) return false;
                     }
                     const bool orientationChanged=changesBoundary || same(rawBases[face].normal,Vec3{}) || same(newRaw.normal,Vec3{});
-                    std::vector<TangentBasis> proposedBases;
                     auto affected=directRows;
                     if(orientationChanged) {
-                        proposedBases=rawBases;proposedBases[face]=newRaw;
-                        ascii::orientSingularTangentComponents(topology.singular,proposedBases,out.job());
+                        // Singular components are disjoint and their boundary
+                        // faces are nonsingular. Reset only the components
+                        // this face can reorient, retaining other row inputs.
+                        for(const auto f:reorientedFaces) proposedBases[f]=rawBases[f];
+                        proposedBases[face]=newRaw;
+                        ascii::orientSingularTangentComponents(affectedComponents,proposedBases,out.job());
                         affected.clear();
-                        for(std::size_t f=0;f<bases.size();++f)
+                        for(const auto f:reorientedFaces)
                             if(!same(bases[f].bitangent,proposedBases[f].bitangent) ||
                                !same(bases[f].tangent,proposedBases[f].tangent) || !same(bases[f].normal,proposedBases[f].normal))
                                 affected.insert(affected.end(),affectedByFace[f].begin(),affectedByFace[f].end());
                         std::sort(affected.begin(),affected.end());affected.erase(std::unique(affected.begin(),affected.end()),affected.end());
                     }
                     const auto contribution=[&](std::size_t f)->const TangentBasis& {
-                        return orientationChanged?proposedBases[f]:f==face?newRaw:bases[f];
+                        return orientationChanged?(reoriented[f]?proposedBases[f]:bases[f]):f==face?newRaw:bases[f];
                     };
                     std::vector<TangentBasis> changed;std::vector<double> changedErrors;double before{},after{};
                     for(const auto row:affected) {
@@ -3962,10 +4021,13 @@ void reconstructTangentDirections(Writer& out,const Model& model,const Model& fr
                     for(std::size_t i=0;i<affected.size();++i) {
                         existing.vertices[affected[i]].tangentBasis=changed[i];errors[affected[i]]=changedErrors[i];
                     }
+                    affectedError+=after-before;
                     directError=0.0;for(const auto row:directRows) directError+=errors[row];
                     if(faceTarget) directError=faceError(newRaw);
                     rawBases[face]=newRaw;
-                    if(orientationChanged) bases=std::move(proposedBases);else bases[face]=newRaw;
+                    if(orientationChanged) {
+                        for(const auto f:reorientedFaces) bases[f]=proposedBases[f];
+                    } else bases[face]=newRaw;
                     existing.asciiTangentSource=source;accepted=true;
                     return true;
                 };
@@ -3981,6 +4043,10 @@ void reconstructTangentDirections(Writer& out,const Model& model,const Model& fr
                         value=normalize(value);
                         for(const auto& target:targets[row]) fixedBitangentError+=difference(value,target.bitangent);
                     }
+                    // Singular orientation can flip tangent contributions,
+                    // but never bitangents. Their error alone bounds the full
+                    // affected component even when its raw normal is zero.
+                    if(!faceTarget && fixedBitangentError>=affectedError) continue;
                     const auto visit=[&](const auto& self,std::size_t id)->void {
                         const auto& node=ranges[id];
                         if(node.end-node.begin==1u) considerPair(ui,axisOrder[node.begin]);
@@ -3990,9 +4056,10 @@ void reconstructTangentDirections(Writer& out,const Model& model,const Model& fr
                 }
                 // Give coupled UV coordinates two settling passes per scalar
                 // before extending their residual direction. Independent rows
-                // can use the line search immediately; both searches converge.
+                // and the final interior pass start from settled contributions
+                // and can use the line search immediately.
                 const auto fitted=source->faceTexcoords64[face];
-                const bool settled=visitedFits.size()>=2u*originFit.size()*originFit[0].size();
+                const bool settled=interior || visitedFits.size()>=2u*originFit.size()*originFit[0].size();
                 if(mesh.render && fitted!=originFit && (settled ||
                     std::all_of(directRows.begin(),directRows.end(),
                         [&](std::size_t row){return contributorsByRow[row].size()==1u;}))) {
@@ -4021,7 +4088,7 @@ void reconstructTangentDirections(Writer& out,const Model& model,const Model& fr
 }
 
 void reconstructCyclicTangentDirections(Writer& out,const Model& model,const Model& frames,
-                                        std::map<const Mesh*,MeshReconstruction>& plans) {
+                                        std::map<const Mesh*,MeshReconstruction>& plans,bool interior=false) {
     auto current=frames;auto rows=generateGeometry(current,model,plans,false,out.advanced(),out.job());
     auto best=measureTangentBasis(current,model,rows,plans,out.job());
     processAsciiSkinSeams(current,out.job());
@@ -4031,24 +4098,45 @@ void reconstructCyclicTangentDirections(Writer& out,const Model& model,const Mod
     const auto difference=[](Vec3 a,Vec3 b) {
         const double x=double(a.x)-b.x,y=double(a.y)-b.y,z=double(a.z)-b.z;return (x*x+y*y)+z*z;
     };
+    const auto outsideTolerance=[](const TangentBasis& value,const TangentBasis& target) {
+        const auto outside=[](Vec3 a,Vec3 b) {
+            const bool zeroA=same(a,Vec3{}),zeroB=same(b,Vec3{});
+            const double x=double(a.y)*b.z-double(a.z)*b.y;
+            const double y=double(a.z)*b.x-double(a.x)*b.z;
+            const double z=double(a.x)*b.y-double(a.y)*b.x;
+            const double dot=(double(a.x)*b.x+double(a.y)*b.y)+double(a.z)*b.z;
+            return zeroA!=zeroB || std::atan2(std::sqrt((x*x+y*y)+z*z),dot)>0.017453292519943295;
+        };
+        return outside(value.bitangent,target.bitangent) || outside(value.tangent,target.tangent) ||
+            outside(value.normal,target.normal);
+    };
     for(std::size_t index=0;index<model.meshes.size();++index) {
         const auto& mesh=model.meshes[index];const auto found=plans.find(&mesh);
         if(found==plans.end() || !tangentPrecisionMesh(mesh)) continue;
         std::set<std::size_t> selected;
         const auto& existing=current.meshes[index];const auto& source=*existing.asciiTangentSource;
         const auto topology=ascii::prepareTangentBasis(existing,out.job());
+        std::vector<bool> collapsed(existing.faces.size());
+        for(const auto& component:topology.singular)
+            for(const auto face:component.faces) collapsed[face]=true;
+        const auto select=[&](std::size_t face) {
+            if(!interior || collapsed[face])
+                selected.insert(found->second.faceOrder[source.authoredFaceIndices[face]]);
+        };
         for(std::size_t f=0;f<mesh.faces.size();++f) for(std::size_t c=0;c<3u;++c) {
             const auto row=rows[index][f][c];
             const auto& value=existing.vertices[row].tangentBasis;
             const auto& target=found->second.vertices()[mesh.faces[f].indices[c]].tangentBasis;
-            if(difference(value.bitangent,target.bitangent)+difference(value.tangent,target.tangent)+
-               difference(value.normal,target.normal)<=rounding*rounding) continue;
+            const auto error=difference(value.bitangent,target.bitangent)+difference(value.tangent,target.tangent)+
+                difference(value.normal,target.normal);
+            // Spend the final interior search on unresolved one-degree corners.
+            if(interior?!outsideTolerance(value,target):error<=rounding*rounding) continue;
             const auto writer=topology.writers[row],group=topology.vertexPositions[row];
-            selected.insert(found->second.faceOrder[source.authoredFaceIndices[writer]]);
+            select(writer);
             for(auto at=topology.offsets[group];at<topology.offsets[group+1u];++at) {
                 const auto face=topology.incident[at].first;
                 if(face!=writer && (source.faceSmoothing[writer]&source.faceSmoothing[face]))
-                    selected.insert(found->second.faceOrder[source.authoredFaceIndices[face]]);
+                    select(face);
             }
         }
         const auto localError=[&](const auto& trial) {
@@ -4064,15 +4152,15 @@ void reconstructCyclicTangentDirections(Writer& out,const Model& model,const Mod
             for(std::size_t rotation=0;rotation<3u;++rotation) {
                 auto trial=plans;
                 trial.at(&mesh).cornerRotations[face]=static_cast<std::uint8_t>((original+rotation)%3u);
-                reconstructTangentDirections(out,model,frames,trial,&mesh,face,cache);
+                reconstructTangentDirections(out,model,frames,trial,&mesh,face,cache,false,nullptr,interior);
                 auto seeded=trial;
-                reconstructTangentDirections(out,model,frames,seeded,&mesh,face,cache,true);
+                reconstructTangentDirections(out,model,frames,seeded,&mesh,face,cache,true,nullptr,interior);
                 if(seeded.at(&mesh).preciseFaceTexcoords!=trial.at(&mesh).preciseFaceTexcoords) {
                     for(const auto neighbor:selected) if(neighbor!=face) {
                         bool shares=false;
                         for(const auto a:mesh.faces[face].indices) for(const auto b:mesh.faces[neighbor].indices)
                             shares=shares || same(mesh.vertices[a].position,mesh.vertices[b].position);
-                        if(shares) reconstructTangentDirections(out,model,frames,seeded,&mesh,neighbor,cache);
+                        if(shares) reconstructTangentDirections(out,model,frames,seeded,&mesh,neighbor,cache,false,nullptr,interior);
                     }
                     if(localError(seeded)<localError(trial)) trial=std::move(seeded);
                 }
@@ -4091,6 +4179,12 @@ void reconstructCyclicTangentDirections(Writer& out,const Model& model,const Mod
                         const auto before=current.meshes[i].normalAt(rows[i][f][c]);
                         const auto after=rebuilt.meshes[i].normalAt(generated[i][f][c]);
                         retained=retained && difference(after,target)<=std::max(difference(before,target),rounding*rounding);
+                        if(interior && (model.meshes[i].mdxBitmap&0x80u)) {
+                            const auto& wanted=entry->second.vertices()[model.meshes[i].faces[f].indices[c]].tangentBasis;
+                            const auto& oldBasis=current.meshes[i].vertices[rows[i][f][c]].tangentBasis;
+                            const auto& newBasis=rebuilt.meshes[i].vertices[generated[i][f][c]].tangentBasis;
+                            retained=retained && (!outsideTolerance(newBasis,wanted) || outsideTolerance(oldBasis,wanted));
+                        }
                     }
                 }
                 if(retained) {
@@ -4104,6 +4198,7 @@ void reconstructCyclicTangentDirections(Writer& out,const Model& model,const Mod
     // A collapsed UV pair can require two tangent orientations to change
     // together. Rank those moves using retained row sums, then recover actual
     // UV residuals and accept only their complete reconstructed result.
+    if(!interior) {
     auto bestNormal=measureSeamNormals(current,model,rows,plans);
     const auto normalize=[](Vec3 v) {
         const float length=std::sqrt((v.x*v.x+v.y*v.y)+v.z*v.z);
@@ -4184,6 +4279,7 @@ void reconstructCyclicTangentDirections(Writer& out,const Model& model,const Mod
                 best=error;bestNormal=normalError;
             }
         }
+    }
     }
     measureSeamNormals(current,model,rows,plans);
 }
@@ -4300,6 +4396,7 @@ void reconstructSkinSeamSmoothing(Writer& out,const Model& model) {
         reconstructSeamSmoothing(out,model,frames,out.meshReconstructions);
         reconstructCyclicTangentDirections(out,model,frames,out.meshReconstructions);
         reconstructTangentSmoothing(out,model,frames,out.meshReconstructions);
+        reconstructCyclicTangentDirections(out,model,frames,out.meshReconstructions,true);
         return;
     }
     using Plans=std::map<const Mesh*,MeshReconstruction>;
@@ -4738,6 +4835,7 @@ void reconstructSkinSeamSmoothing(Writer& out,const Model& model) {
     reconstructCyclicTangentDirections(out,model,frames,plans);
     reconstructTangentUvDomains(out,model,frames,plans);
     reconstructRetainedSeamRows(out,model,frames,plans);
+    reconstructCyclicTangentDirections(out,model,frames,plans,true);
 }
 
 ReconstructedMesh writeMesh(Writer& out,const Model& model,const Node& node,const Mesh& mesh) {
