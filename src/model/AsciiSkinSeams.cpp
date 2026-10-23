@@ -187,21 +187,23 @@ void processAsciiSkinSeams(const Model& model,const neoshared::bif::JobControl& 
         job.update(owner,meshes.size(),"Processing ASCII model skin seams");
         auto& current=model.meshes[meshes[owner].mesh];
         const auto ownerCount=static_cast<std::int16_t>(current.enginePrelightVertexCount);
+        // Candidate pool sizes and publication stay fixed across this owner's
+        // rows. Account for their visits once, before the ordered normal writes.
+        for(std::size_t candidate=0;candidate<meshes.size();++candidate) {
+            if(candidate==owner) continue;
+            job.check();
+            const auto& source=model.meshes[meshes[candidate].mesh];
+            // The inclusive engine traversal also reads the unpublished
+            // tail of a no-face animmesh (K1 0x5c25b0).
+            if(ownerCount>0 && source.animated && !source.asciiMdxAllocation &&
+               cache.positions[candidate].size()==source.enginePrelightVertexCount+1u)
+                throw ModelError("ASCII skin seam processing reaches an animmesh without a published MDX pool");
+            result.candidateComparisons+=cache.positions[candidate].size()*std::max<std::int32_t>(ownerCount,0);
+        }
         for(std::int32_t vertex=0;vertex<ownerCount;++vertex) {
             job.check();
             // K1 0x5c224c / K2 0x6e00dc visit every OTHER mesh, including
             // earlier ones. Their inclusive candidate loop reads row N.
-            for(std::size_t candidate=0;candidate<meshes.size();++candidate) {
-                if(candidate==owner) continue;
-                job.check();
-                const auto& source=model.meshes[meshes[candidate].mesh];
-                // The inclusive engine traversal also reads the unpublished
-                // tail of a no-face animmesh (K1 0x5c25b0).
-                if(source.animated && !source.asciiMdxAllocation &&
-                   cache.positions[candidate].size()==source.enginePrelightVertexCount+1u)
-                    throw ModelError("ASCII skin seam processing reaches an animmesh without a published MDX pool");
-                result.candidateComparisons+=cache.positions[candidate].size();
-            }
             const auto& matches=cache.matches[owner][vertex];
             if(matches.empty()) continue;
             auto sum=ascii::engineModelRotateVector(meshes[owner].orientation,current.normalAt(vertex));

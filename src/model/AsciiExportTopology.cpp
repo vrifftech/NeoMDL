@@ -48,7 +48,7 @@ Edge edge(std::uint32_t a,std::uint32_t b) {
     return {{std::min(a,b),std::max(a,b)}};
 }
 
-std::size_t changedAdjacency(const Mesh& mesh,
+std::vector<std::array<std::int16_t,3>> reconstructedAdjacency(const Mesh& mesh,
                             const std::vector<std::array<std::uint32_t,3>>& faces,
                             const neoshared::bif::JobControl& job) {
     std::map<Edge,std::vector<std::size_t>> incident;
@@ -59,7 +59,7 @@ std::size_t changedAdjacency(const Mesh& mesh,
             if(list.empty() || list.back()!=i) list.push_back(i);
         }
     }
-    std::size_t changed{};
+    std::vector<std::array<std::int16_t,3>> result(faces.size());
     for(std::size_t i=0;i<faces.size();++i) {
         job.check();
         for(std::size_t corner=0;corner<3u;++corner) {
@@ -80,9 +80,20 @@ std::size_t changedAdjacency(const Mesh& mesh,
                    (candidate+2u==faces.size() && i+1u==faces.size()))
                     neighbor=narrowed;
             }
-            changed+=neighbor!=mesh.faces[i].adjacentFaces[corner];
+            result[i][corner]=neighbor;
         }
     }
+    return result;
+}
+
+std::size_t changedAdjacency(const Mesh& mesh,
+                            const std::vector<std::array<std::uint32_t,3>>& faces,
+                            const neoshared::bif::JobControl& job) {
+    const auto neighbors=reconstructedAdjacency(mesh,faces,job);
+    std::size_t changed{};
+    for(std::size_t face=0;face<faces.size();++face)
+        for(std::size_t corner=0;corner<3u;++corner)
+            changed+=neighbors[face][corner]!=mesh.faces[face].adjacentFaces[corner];
     return changed;
 }
 
@@ -162,6 +173,7 @@ std::vector<ReconstructedTopology> reconstructTopologies(
         }
     };
     appendCandidate();
+    auto neighbors=reconstructedAdjacency(mesh,result.front().sourceFaces,job);
 
     std::vector<std::vector<std::size_t>> members(mesh.faces.size()*3u);
     std::vector<ascii::NormalFaceCross> crosses;
@@ -209,9 +221,10 @@ std::vector<ReconstructedTopology> reconstructTopologies(
             for(std::size_t j=i+1u;j<candidates.size();++j) {
                 if(groups.find(candidates[i])==groups.find(candidates[j])) continue;
                 if(improveNormals && !(normalJoinImprovement(candidates[i],candidates[j])>0.0)) continue;
-                // A point join is a reconstruction candidate, not proof of
-                // original source identity. Retain it only when every
-                // directed neighbor survives, including boundary entries.
+                // A point join must preserve existing directed neighbors,
+                // including boundaries. An already unreconstructable edge
+                // must not block unrelated joins; it may also recover its
+                // original neighbor when the joined endpoints identify it.
                 auto proposed=groups;
                 proposed.join(candidates[i],candidates[j]);
                 std::vector<std::array<std::uint32_t,3>> faces(mesh.faces.size());
@@ -220,12 +233,19 @@ std::vector<ReconstructedTopology> reconstructTopologies(
                     for(std::size_t corner=0;corner<3u;++corner)
                         faces[face][corner]=static_cast<std::uint32_t>(proposed.find(face*3u+corner));
                 }
-                if(changedAdjacency(mesh,faces,job)==0u) {
+                auto proposedNeighbors=reconstructedAdjacency(mesh,faces,job);
+                bool retained=true;
+                for(std::size_t face=0;face<faces.size() && retained;++face)
+                    for(std::size_t corner=0;corner<3u;++corner)
+                        if(proposedNeighbors[face][corner]!=neighbors[face][corner] &&
+                           proposedNeighbors[face][corner]!=mesh.faces[face].adjacentFaces[corner])
+                            retained=false;
+                if(retained) {
                     const auto first=groups.find(candidates[i]),second=groups.find(candidates[j]);
                     auto& merged=members[std::min(first,second)];auto& removed=members[std::max(first,second)];
                     merged.insert(merged.end(),removed.begin(),removed.end());
                     std::sort(merged.begin(),merged.end());removed.clear();
-                    groups=std::move(proposed);
+                    groups=std::move(proposed);neighbors=std::move(proposedNeighbors);
                 }
             }
     };

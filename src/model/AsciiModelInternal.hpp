@@ -245,8 +245,24 @@ struct TangentFace {
     std::array<Vec3,3> positions;
     std::array<Vec2,3> texcoords;
 };
+struct TangentComponent {
+    std::vector<std::size_t> faces,boundary;
+};
+struct TangentBasisTopology {
+    std::vector<TangentComponent> singular;
+    std::vector<std::size_t> vertexPositions,offsets,writers;
+    std::vector<std::pair<std::size_t,std::int16_t>> incident;
+};
 void orientSingularTangentComponents(const std::vector<TangentFace>& faces,
     std::vector<TangentBasis>& bases,const neoshared::bif::JobControl& job);
+void orientSingularTangentComponents(const std::vector<TangentComponent>& components,
+    std::vector<TangentBasis>& bases,const neoshared::bif::JobControl& job);
+// UV residual searches retain packed positions, UVs, faces and generated rows.
+// Prepare their incidence and singular components once for those candidates.
+TangentBasisTopology prepareTangentBasis(const Mesh& mesh,const neoshared::bif::JobControl& job);
+std::vector<TangentBasis> tangentFaceBases(const Mesh& mesh,const neoshared::bif::JobControl& job);
+void buildTangentBasis(Mesh& mesh,const TangentBasisTopology& topology,
+    const neoshared::bif::JobControl& job);
 // Reuse the mesh producers for exporter seam evaluation. Returns
 // authored face-corner rows before duplicate-index faces are removed.
 std::vector<std::array<std::int16_t,3>> generateAsciiMeshGeometry(

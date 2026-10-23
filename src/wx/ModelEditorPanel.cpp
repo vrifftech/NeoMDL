@@ -423,10 +423,8 @@ public:
         detailsLayout->Add(dataProperties, 0, wxEXPAND | wxLEFT | wxRIGHT | wxBOTTOM, FromDIP(5));
         detailsLayout->Add(details_, 1, wxEXPAND);
         detailsPanel->SetSizer(detailsLayout);
-        const neosettings::AppSettings layoutSettings("NeoMDL");
         inspector->SetMinimumPaneSize(FromDIP(80));
-        inspector->SplitHorizontally(tree_, detailsPanel,
-            FromDIP(static_cast<int>(layoutSettings.readDouble("Layout/TreeHeight", compact ? 220 : 320))));
+        inspector->SplitHorizontally(tree_, detailsPanel);
         inspector->SetSashGravity(0.6);
 
         sourceSplit_ = new wxSplitterWindow(splitter_, wxID_ANY, wxDefaultPosition, wxDefaultSize,
@@ -440,16 +438,13 @@ public:
             asciiEditor_ = new AsciiEditor(sourceSplit_, document_,
                 [this](std::unique_ptr<ModelDocument> document) { applyAsciiPreview(std::move(document)); },
                 [this] { updateEditingControls(); changed_(); });
-            sourceSplit_->SplitVertically(canvas_, asciiEditor_, FromDIP(static_cast<int>(
-                layoutSettings.readDouble("Layout/ModelPreviewWidth", compact ? 260 : 420))));
+            sourceSplit_->SplitVertically(canvas_, asciiEditor_);
         } else sourceSplit_->Initialize(canvas_);
         splitter_->SetMinimumPaneSize(FromDIP(160));
-        splitter_->SplitVertically(inspector, sourceSplit_,
-            FromDIP(static_cast<int>(layoutSettings.readDouble("Layout/InspectorWidth", compact ? 220 : 300))));
+        splitter_->SplitVertically(inspector, sourceSplit_);
         splitter_->SetSashGravity(0.0);
         preview->SetMinimumPaneSize(FromDIP(60));
-        preview->SplitHorizontally(playback, splitter_, FromDIP(static_cast<int>(
-            layoutSettings.readDouble("Layout/PlaybackHeight", ToDIP(playback->GetBestSize().y)))));
+        preview->SplitHorizontally(playback, splitter_);
         preview->SetSashGravity(0.0);
         const auto rememberPane = [this](wxSplitterWindow* pane, const char* key) {
             pane->Bind(wxEVT_SPLITTER_SASH_POS_CHANGED, [this, key](wxSplitterEvent& event) {
@@ -465,6 +460,24 @@ public:
         auto* layout = new wxBoxSizer(wxVERTICAL);
         layout->Add(preview, 1, wxEXPAND);
         SetSizer(layout);
+        // Notebook insertion gives the page its real size. Restore splitters
+        // afterwards so the placeholder size cannot shift or clamp the panes.
+        CallAfter([this, preview, playback, inspector, compact] {
+            const neosettings::AppSettings settings("NeoMDL");
+            Layout();
+            playback->Layout();
+            playback->InvalidateBestSize();
+            preview->SetSashPosition(FromDIP(static_cast<int>(settings.readDouble(
+                "Layout/PlaybackHeight", ToDIP(playback->GetSizer()->GetMinSize().y)))));
+            splitter_->SetSashPosition(FromDIP(static_cast<int>(settings.readDouble(
+                "Layout/InspectorWidth", compact ? 220 : 300))));
+            inspector->SetSashPosition(FromDIP(static_cast<int>(settings.readDouble(
+                "Layout/TreeHeight", compact ? 220 : 320))));
+            sourceSplit_->SetSashPosition(FromDIP(static_cast<int>(settings.readDouble(
+                "Layout/ModelPreviewWidth", compact ? 260 : 420))));
+            playback->FitInside();
+            playback->Scroll(0, 0);
+        });
 
         updatePreviewFeatures();
         populateTree();
@@ -479,7 +492,7 @@ public:
         advancedAnimation_->Bind(wxEVT_COLLAPSIBLEPANE_CHANGED,
             [this, playback, preview](wxCollapsiblePaneEvent&) {
                 playback->FitInside();
-                preview->SetSashPosition(playback->GetBestSize().y);
+                preview->SetSashPosition(playback->GetSizer()->GetMinSize().y);
                 updateAnimationControls();
             });
         tree_->Bind(wxEVT_TREE_SEL_CHANGED, [this](wxTreeEvent& event) {
@@ -1937,11 +1950,12 @@ public:
             }
             // Packed headers identify the game. ASCII construction uses the
             // explicitly selected engine rules before resolving dependencies.
+            const auto host = captureHostResolver();
             auto document = std::make_unique<ModelDocument>();
             std::optional<model::GameVersion> asciiGame;
             if (!loadModelWithGame("Loading model",asciiGame,
                 [&](const neoshared::bif::JobControl& job,std::optional<model::GameVersion> game) {
-                document->openFile(path, {}, job,game);
+                document->openFile(path, host, job,game);
             })) return false;
 
             std::shared_ptr<GameResourceSession> installationSession;
@@ -1949,9 +1963,8 @@ public:
             const auto installed = installedResourceResolver(
                 document->model().game, path, installationSession,
                 installationWarning, true);
-            const auto combined = installed
-                ? combineResolvers(captureHostResolver(), installed) : ResourceResolver{};
-            if (combined) {
+            const auto combined = combineResolvers(host, installed);
+            if (installed) {
                 auto enriched = std::make_unique<ModelDocument>();
                 asciiGame=document->model().game;
                 if (!loadModelWithGame("Loading model resources",asciiGame,

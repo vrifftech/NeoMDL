@@ -1,8 +1,27 @@
 #pragma once
 
 #include <model/Model.hpp>
+#include <map>
 
 namespace neomdl::model::ascii_export {
+
+
+struct SourceFaceNeighbors {
+    using Neighbor=std::pair<bool,std::size_t>;
+    struct EdgeNeighbors {
+        std::vector<std::size_t> faces;
+        std::vector<Neighbor> neighbors;
+    };
+    bool animated{};
+    std::map<std::pair<std::uint32_t,std::uint32_t>,std::vector<std::size_t>> edges;
+    std::vector<EdgeNeighbors> expected;
+    static std::vector<std::size_t> ranks(const std::vector<std::size_t>& order);
+    Neighbor neighbor(const std::vector<std::size_t>& incident,std::size_t face,
+        const std::vector<std::size_t>& order,const std::vector<std::size_t>& rank) const;
+    SourceFaceNeighbors(const Mesh& mesh,const std::vector<std::array<std::uint32_t,3>>& faces,
+        const std::vector<std::size_t>& order);
+    bool preserves(const std::vector<std::size_t>& order,const std::vector<std::size_t>& rank) const;
+};
 
 struct ReconstructedSmoothing {
     std::vector<std::uint32_t> masks;
@@ -12,7 +31,8 @@ struct ReconstructedSmoothing {
 };
 
 struct TangentSmoothingSource {
-    const std::vector<Vec3>& firstCornerNormals;
+    const std::vector<TangentBasis>& faceBases;
+    const std::vector<std::size_t>& faceOrder;
     const std::vector<std::array<std::int16_t,3>>& cornerRows;
     bool useGeneratedWriters{true};
 };
@@ -45,6 +65,13 @@ std::vector<SeamSmoothingCandidate> sharedSeamSmoothingCandidates(
     const neoshared::bif::JobControl&,
     bool differentNormals = false,
     bool missingComponents = false);
+
+std::vector<SeamSmoothingCandidate> retainedRowSmoothingCandidates(
+    const Mesh&, const std::vector<Vertex>& compiledVertices,
+    const std::vector<std::array<std::uint32_t,3>>& sourceFaces,
+    const std::vector<std::uint32_t>& masks,
+    const std::vector<bool>& seamCorners,
+    const neoshared::bif::JobControl&);
 
 bool preservesSourceFaceNeighbors(
     const Mesh&, const std::vector<std::array<std::uint32_t,3>>& sourceFaces,

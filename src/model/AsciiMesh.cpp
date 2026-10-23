@@ -1176,14 +1176,13 @@ void buildMesh(Model& model,RawNode& raw,std::size_t nodeIndex,
     }
 }
 
-Vec3 tangentBasisNormal(Vec3 bitangent,Vec3 tangent,Vec3 faceArea) {
-    if(faceArea.x==0.0f && faceArea.y==0.0f && faceArea.z==0.0f) {
-        return {
-            static_cast<float>(static_cast<double>(bitangent.y)*tangent.z-static_cast<double>(bitangent.z)*tangent.y),
-            static_cast<float>(static_cast<double>(bitangent.z)*tangent.x-static_cast<double>(bitangent.x)*tangent.z),
-            static_cast<float>(static_cast<double>(bitangent.x)*tangent.y-static_cast<double>(bitangent.y)*tangent.x)};
-    }
-    return cross(bitangent,tangent);
+Vec3 tangentBasisNormal(Vec3 bitangent,Vec3 tangent,Vec3) {
+    // Subtract the products before rounding. Collapsed UV derivatives can
+    // be almost parallel, so separately rounded products lose the basis axis.
+    return {
+        static_cast<float>(static_cast<double>(bitangent.y)*tangent.z-static_cast<double>(bitangent.z)*tangent.y),
+        static_cast<float>(static_cast<double>(bitangent.z)*tangent.x-static_cast<double>(bitangent.x)*tangent.z),
+        static_cast<float>(static_cast<double>(bitangent.x)*tangent.y-static_cast<double>(bitangent.y)*tangent.x)};
 }
 
 std::array<Vec3,2> normalPositionFaceProducts(const std::array<Vec3,3>& positions,
@@ -1231,8 +1230,8 @@ Vec3 tangentUvDerivative(Vec3 p,Vec3 q,const std::array<Vec2,3>& uv,
         static_cast<float>(q.z*first)-static_cast<float>(p.z*second)};
 }
 
-void orientSingularTangentComponents(const std::vector<TangentFace>& faces,
-        std::vector<TangentBasis>& bases,const neoshared::bif::JobControl& job) {
+std::vector<TangentComponent> singularTangentComponents(const std::vector<TangentFace>& faces,
+        const neoshared::bif::JobControl& job) {
     std::vector<bool> singular(faces.size());
     for(std::size_t i=0;i<faces.size();++i) {
         job.check();
@@ -1241,11 +1240,23 @@ void orientSingularTangentComponents(const std::vector<TangentFace>& faces,
         const float pv=uv[1].y-uv[0].y,qv=uv[2].y-uv[0].y;
         singular[i]=pu*qv-pv*qu==0.0f;
     }
-    if(std::none_of(singular.begin(),singular.end(),[](bool value){return value;})) return;
+    if(std::none_of(singular.begin(),singular.end(),[](bool value){return value;})) return {};
 
     using Endpoint=std::array<float,5>;
     using Edge=std::array<Endpoint,2>;
-    std::map<Edge,std::vector<std::size_t>> edges;
+    struct EdgeHash {
+        std::size_t operator()(const Edge& edge) const {
+            std::size_t result{};
+            for(const auto& endpoint:edge) for(const auto value:endpoint) {
+                std::uint32_t word{};
+                if(value!=0.0f) std::memcpy(&word,&value,sizeof(word));
+                result^=word+0x9e3779b9u+(result<<6u)+(result>>2u);
+            }
+            return result;
+        }
+    };
+    std::unordered_map<Edge,std::vector<std::size_t>,EdgeHash> edges;
+    edges.reserve(3u*static_cast<std::size_t>(std::count(singular.begin(),singular.end(),true)));
     // Only edges touching singular faces participate in a component or its
     // boundary. Index those first, then attach their nonsingular neighbors.
     const auto visitEdges=[&](std::size_t i,const auto& visit) {
@@ -1292,6 +1303,19 @@ void orientSingularTangentComponents(const std::vector<TangentFace>& faces,
         if(first!=incident.end())
             for(const auto face:incident) if(!singular[face]) boundaries[root(*first)].push_back(face);
     }
+    std::vector<TangentComponent> result;
+    for(std::size_t component=0;component<components.size();++component) {
+        if(components[component].empty()) continue;
+        auto& boundary=boundaries[component];
+        std::sort(boundary.begin(),boundary.end());
+        boundary.erase(std::unique(boundary.begin(),boundary.end()),boundary.end());
+        result.push_back({std::move(components[component]),std::move(boundary)});
+    }
+    return result;
+}
+
+void orientSingularTangentComponents(const std::vector<TangentComponent>& components,
+        std::vector<TangentBasis>& bases,const neoshared::bif::JobControl& job) {
     const auto dot=[](Vec3 a,Vec3 b) {
         return (static_cast<double>(a.x)*b.x+static_cast<double>(a.y)*b.y)+
                static_cast<double>(a.z)*b.z;
@@ -1301,10 +1325,9 @@ void orientSingularTangentComponents(const std::vector<TangentFace>& faces,
                static_cast<double>(a.z)*b.x-static_cast<double>(a.x)*b.z==0.0 &&
                static_cast<double>(a.x)*b.y-static_cast<double>(a.y)*b.x==0.0;
     };
-    for(std::size_t component=0;component<components.size();++component) {
+    for(const auto& component:components) {
         job.check();
-        const auto& members=components[component];
-        if(members.empty()) continue;
+        const auto& members=component.faces;
         const auto reference=bases[members.front()].tangent;
         if(same(reference,Vec3{})) continue;
         bool eligible=true,opposed=false;
@@ -1314,11 +1337,8 @@ void orientSingularTangentComponents(const std::vector<TangentFace>& faces,
             if(dot(reference,basis.tangent)<0.0) opposed=true;
         }
         if(!eligible || !opposed) continue;
-        auto& boundary=boundaries[component];
-        std::sort(boundary.begin(),boundary.end());
-        boundary.erase(std::unique(boundary.begin(),boundary.end()),boundary.end());
         int direction=0;
-        for(const auto face:boundary) {
+        for(const auto face:component.boundary) {
             const auto projection=dot(reference,bases[face].tangent);
             const int sign=projection>0.0?1:projection<0.0?-1:0;
             if(sign==0) continue;
@@ -1334,17 +1354,55 @@ void orientSingularTangentComponents(const std::vector<TangentFace>& faces,
     }
 }
 
+void orientSingularTangentComponents(const std::vector<TangentFace>& faces,
+        std::vector<TangentBasis>& bases,const neoshared::bif::JobControl& job) {
+    orientSingularTangentComponents(singularTangentComponents(faces,job),bases,job);
+}
+
+TangentBasisTopology prepareTangentBasis(const Mesh& mesh,const neoshared::bif::JobControl& job) {
+    const auto& source=*mesh.asciiTangentSource;
+    TangentBasisTopology result;
+    std::vector<TangentFace> faces;
+    faces.reserve(mesh.faces.size());
+    for(const auto& face:mesh.faces) {
+        job.check();
+        TangentFace value;
+        for(std::size_t corner=0;corner<3u;++corner) {
+            const auto row=face.indices[corner];
+            value.positions[corner]=source.generatedPositions.at(row);
+            value.texcoords[corner]=source.generatedTexcoords.at(row);
+        }
+        faces.push_back(value);
+    }
+    result.singular=singularTangentComponents(faces,job);
+    std::unordered_map<std::array<std::uint32_t,3>,std::size_t,PositionHash> positions;
+    positions.reserve(source.generatedPositions.size());
+    result.vertexPositions.reserve(source.generatedPositions.size());
+    for(const auto position:source.generatedPositions)
+        result.vertexPositions.push_back(positions.emplace(positionKey(position),positions.size()).first->second);
+    result.offsets.resize(positions.size()+1u);
+    for(const auto& face:mesh.faces)
+        for(const auto index:face.indices)
+            ++result.offsets[result.vertexPositions.at(static_cast<std::size_t>(index))+1u];
+    std::partial_sum(result.offsets.begin(),result.offsets.end(),result.offsets.begin());
+    auto next=result.offsets;
+    result.incident.resize(result.offsets.back());
+    result.writers.resize(source.generatedPositions.size());
+    // Keep repeated positions and the exact face/corner accumulation order.
+    for(std::size_t face=0;face<mesh.faces.size();++face)
+        for(const auto index:mesh.faces[face].indices) {
+            result.incident[next[result.vertexPositions[index]]++]={face,index};
+            result.writers[index]=face;
+        }
+    return result;
+}
+
 // CalculateTangentSpaceBasis K1 0x5c56b4/K2 0x6e3f40 is called only after
 // engine material initialization reports a bump map without a normal map.
 // The loader retains the full temporary vertex/face inputs until that
 // resource stage; they are distinct from the already published MDX rows.
-void buildTangentBasis(Mesh& mesh,const neoshared::bif::JobControl& job) {
+std::vector<TangentBasis> tangentFaceBases(const Mesh& mesh,const neoshared::bif::JobControl& job) {
     const auto& source=*mesh.asciiTangentSource;
-    // The extra MDX row was memset to zero, including its tangent channels.
-    // Preserve those defined zeros for engine skin-bump upload validation;
-    // unlike ordinary unused rows, this basis needs no unknown pool bytes.
-    if(mesh.vertices.size()>mesh.enginePrelightVertexCount)
-        mesh.vertices[mesh.enginePrelightVertexCount].tangentBasis.valid=true;
     const auto normalize=[](Vec3 v) {
         const auto length=magnitude(v);
         // normalize(Vector) and Vector::Normalize use a DOUBLE 1e-9 limit,
@@ -1353,12 +1411,9 @@ void buildTangentBasis(Mesh& mesh,const neoshared::bif::JobControl& job) {
         const auto reciprocal=1.0f/length;
         return Vec3{v.x*reciprocal,v.y*reciprocal,v.z*reciprocal};
     };
-    const auto add=[](Vec3 a,Vec3 b){return Vec3{a.x+b.x,a.y+b.y,a.z+b.z};};
     const auto negate=[](Vec3 v){return Vec3{-v.x,-v.y,-v.z};};
     std::vector<TangentBasis> faceBasis;
-    std::vector<TangentFace> tangentFaces;
     faceBasis.reserve(mesh.faces.size());
-    tangentFaces.reserve(mesh.faces.size());
     for(std::size_t i=0;i<mesh.faces.size();++i) {
         job.check();
         const auto& face=mesh.faces[i];
@@ -1386,44 +1441,40 @@ void buildTangentBasis(Mesh& mesh,const neoshared::bif::JobControl& job) {
         const auto alignment=(basis.normal.x*n.x+basis.normal.y*n.y)+basis.normal.z*n.z;
         if(alignment<0.0f) {basis.tangent=negate(basis.tangent);basis.normal=negate(basis.normal);}
         faceBasis.push_back(basis);
-        tangentFaces.push_back({{source.generatedPositions.at(a),source.generatedPositions.at(b),
-                                 source.generatedPositions.at(c)},{auv,buv,cuv}});
     }
-    orientSingularTangentComponents(tangentFaces,faceBasis,job);
-    std::unordered_map<std::array<std::uint32_t,3>,std::size_t,PositionHash> positions;
-    positions.reserve(source.generatedPositions.size());
-    std::vector<std::size_t> vertexPositions;
-    vertexPositions.reserve(source.generatedPositions.size());
-    for(const auto position:source.generatedPositions)
-        vertexPositions.push_back(positions.emplace(positionKey(position),positions.size()).first->second);
-    std::vector<std::size_t> offsets(positions.size()+1u);
-    for(const auto& face:mesh.faces)
-        for(const auto index:face.indices)
-            ++offsets[vertexPositions.at(static_cast<std::size_t>(index))+1u];
-    std::partial_sum(offsets.begin(),offsets.end(),offsets.begin());
-    auto next=offsets;
-    std::vector<std::pair<std::size_t,std::int16_t>> incident(offsets.back());
-    std::vector<std::size_t> writers(source.generatedPositions.size());
-    // Store every contribution in face/corner order, including repeated
-    // positions, without allocating a separate vector for each position.
-    for(std::size_t face=0;face<mesh.faces.size();++face)
-        for(const auto index:mesh.faces[face].indices) {
-            incident[next[vertexPositions[index]]++]={face,index};
-            writers[index]=face;
-        }
+    return faceBasis;
+}
+
+void buildTangentBasis(Mesh& mesh,const TangentBasisTopology& topology,
+        const neoshared::bif::JobControl& job) {
+    const auto& source=*mesh.asciiTangentSource;
+    // Preserve the extra MDX row's defined zero tangent channels.
+    if(mesh.vertices.size()>mesh.enginePrelightVertexCount)
+        mesh.vertices[mesh.enginePrelightVertexCount].tangentBasis.valid=true;
+    const auto normalize=[](Vec3 v) {
+        const auto length=magnitude(v);
+        // normalize(Vector) and Vector::Normalize use a DOUBLE 1e-9 limit,
+        // unlike NormalOf's zero test (K1 constant at 0x6c3530).
+        if(static_cast<double>(length)<1e-9) return Vec3{1.0f,0.0f,0.0f};
+        const auto reciprocal=1.0f/length;
+        return Vec3{v.x*reciprocal,v.y*reciprocal,v.z*reciprocal};
+    };
+    const auto add=[](Vec3 a,Vec3 b){return Vec3{a.x+b.x,a.y+b.y,a.z+b.z};};
+    auto faceBasis=tangentFaceBases(mesh,job);
+    orientSingularTangentComponents(topology.singular,faceBasis,job);
     for(std::size_t i=0;i<mesh.faces.size();++i) {
         job.check();
         for(const auto index:mesh.faces[i].indices) {
             // Only the last face using a row publishes its final basis.
-            if(writers[index]!=i) continue;
+            if(topology.writers[index]!=i) continue;
             const auto position=source.generatedPositions.at(static_cast<std::size_t>(index));
             TangentBasis result;
             result.bitangent=add(faceBasis[i].bitangent,result.bitangent);
             result.tangent=add(faceBasis[i].tangent,result.tangent);
             result.normal=add(faceBasis[i].normal,result.normal);
-            const auto group=vertexPositions[index];
-            for(auto at=offsets[group];at<offsets[group+1u];++at) {
-                const auto& entry=incident[at];
+            const auto group=topology.vertexPositions[index];
+            for(auto at=topology.offsets[group];at<topology.offsets[group+1u];++at) {
+                const auto& entry=topology.incident[at];
                 const auto other=entry.first;
                 if(other!=i && same(position,source.generatedPositions.at(static_cast<std::size_t>(entry.second))) &&
                    (source.faceSmoothing.at(i)&source.faceSmoothing.at(other))) {
@@ -1455,6 +1506,6 @@ void buildTangentBasis(Mesh& mesh,const neoshared::bif::JobControl& job) {
 
 namespace neomdl::model {
 void rebuildAsciiTangentBasis(Mesh& mesh,const neoshared::bif::JobControl& job) {
-    ascii::buildTangentBasis(mesh,job);
+    ascii::buildTangentBasis(mesh,ascii::prepareTangentBasis(mesh,job),job);
 }
 } // namespace neomdl::model

@@ -4,6 +4,7 @@
 #include <model/AsciiExportSmoothing.hpp>
 
 #include <map>
+#include <memory>
 
 namespace neomdl::model::ascii_export {
 
@@ -13,7 +14,9 @@ struct ReconstructedMesh {
 };
 
 struct MeshReconstruction {
-    std::vector<Vertex> vertices;
+    // Every reconstruction uses the same immutable compiled channels.
+    std::shared_ptr<const std::vector<Vertex>> vertexData;
+    const std::vector<Vertex>& vertices() const { return *vertexData; }
     ReconstructedMesh topology;
     ReconstructedSmoothing smoothing;
     std::size_t changedAdjacency{};
@@ -24,6 +27,7 @@ struct MeshReconstruction {
     std::vector<Vec3> sourcePositions;
     std::vector<std::array<std::array<double,2>,3>> preciseFaceTexcoords;
     std::vector<std::array<double,3>> preciseSourcePositions;
+    std::shared_ptr<const std::vector<EngineFloatSkinChannels>> skinChannels;
     std::size_t sourceCorner(std::size_t face,std::size_t corner) const {
         return (corner+cornerRotations[face])%3u;
     }
@@ -48,10 +52,27 @@ public:
     }
     bool refineTangentRounding() const noexcept { return options_.refineTangentRounding; }
     bool refineNormalRounding() const noexcept { return options_.refineNormalRounding; }
+    ReconstructedSmoothing smoothing(
+        const Mesh&,const std::vector<Vertex>&,
+        const std::vector<std::size_t>&,
+        const std::vector<std::array<std::uint32_t,3>>&,
+        const neoshared::bif::JobControl&,
+        const std::vector<Vec3>* = nullptr,bool = true,
+        const std::vector<bool>* = nullptr,
+        const std::vector<std::uint32_t>* = nullptr,bool = false,
+        const TangentSmoothingSource* = nullptr,
+        const std::vector<std::uint8_t>* = nullptr,
+        std::vector<std::vector<std::uint32_t>>* = nullptr,
+        const std::vector<std::array<double,3>>* = nullptr);
     void explicitNormalNote();
     AsciiExportResult finish();
     std::map<const Mesh*,MeshReconstruction> meshReconstructions;
 private:
+    struct SmoothingResult {
+        ReconstructedSmoothing smoothing;
+        std::vector<std::vector<std::uint32_t>> candidates;
+    };
+    std::map<std::pair<const Mesh*,std::vector<std::uint64_t>>,SmoothingResult> smoothingCache_;
     GameVersion game_;
     const neoshared::bif::JobControl& job_;
     AsciiExportOptions options_;

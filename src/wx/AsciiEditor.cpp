@@ -147,7 +147,7 @@ void AsciiEditor::poll() {
                 if (seconds != displayedSeconds_) {
                     displayedSeconds_ = static_cast<long>(seconds);
                     status_->ChangeValue(wxString(generationAdvanced_ ? "Generating Advanced ASCII" : "Generating Standard ASCII") +
-                        wxString::Format(" — %ld s. You can keep using the viewport.", displayedSeconds_));
+                        wxString::Format(wxS(" — %ld s. You can keep using the viewport."), displayedSeconds_));
                 }
             }
             return;

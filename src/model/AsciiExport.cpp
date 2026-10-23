@@ -17,6 +17,69 @@ namespace neomdl::model::ascii_export {
 Writer::Writer(GameVersion game,const neoshared::bif::JobControl& job,const AsciiExportOptions& options)
     :game_(game),job_(job),options_(options) {}
 
+ReconstructedSmoothing Writer::smoothing(
+    const Mesh& mesh,const std::vector<Vertex>& vertices,
+    const std::vector<std::size_t>& sourceVertices,
+    const std::vector<std::array<std::uint32_t,3>>& sourceFaces,
+    const neoshared::bif::JobControl& job,
+    const std::vector<Vec3>* targets,bool refine,const std::vector<bool>* ignored,
+    const std::vector<std::uint32_t>* masks,bool storedRows,
+    const TangentSmoothingSource* tangents,const std::vector<std::uint8_t>* rotations,
+    std::vector<std::vector<std::uint32_t>>* candidates,
+    const std::vector<std::array<double,3>>* precise) {
+    // The source mesh and its compiled vertex channels stay fixed during an
+    // export. Cache complete reconstruction inputs across seam iterations.
+    std::vector<std::uint64_t> key{refine,storedRows,candidates!=nullptr};
+    const auto sequence=[&](const auto& values) {
+        key.push_back(values.size());
+        for(const auto value:values) key.push_back(value);
+    };
+    const auto scalar=[&](float value) {
+        std::uint32_t bits;std::memcpy(&bits,&value,sizeof(bits));key.push_back(bits);
+    };
+    const auto vector=[&](Vec3 value) {scalar(value.x);scalar(value.y);scalar(value.z);};
+    sequence(sourceVertices);
+    key.push_back(sourceFaces.size());
+    for(const auto& face:sourceFaces) for(const auto index:face) key.push_back(index);
+    key.push_back(targets!=nullptr);
+    if(targets) {key.push_back(targets->size());for(const auto value:*targets) vector(value);}
+    key.push_back(ignored!=nullptr);if(ignored) sequence(*ignored);
+    key.push_back(masks!=nullptr);if(masks) sequence(*masks);
+    key.push_back(tangents!=nullptr);
+    if(tangents) {
+        key.push_back(tangents->useGeneratedWriters);
+        key.push_back(tangents->faceBases.size());
+        for(const auto& basis:tangents->faceBases) {
+            vector(basis.bitangent);vector(basis.tangent);vector(basis.normal);
+        }
+        sequence(tangents->faceOrder);
+        key.push_back(tangents->cornerRows.size());
+        for(const auto& face:tangents->cornerRows) for(const auto row:face) key.push_back(row);
+    }
+    key.push_back(rotations!=nullptr);if(rotations) sequence(*rotations);
+    key.push_back(precise!=nullptr);
+    if(precise) {
+        key.push_back(precise->size());
+        for(const auto& point:*precise) for(const auto value:point) {
+            std::uint64_t bits;std::memcpy(&bits,&value,sizeof(bits));key.push_back(bits);
+        }
+    }
+    auto identity=std::make_pair(&mesh,std::move(key));
+    const auto found=smoothingCache_.find(identity);
+    if(found!=smoothingCache_.end()) {
+        job.check();
+        if(candidates) *candidates=found->second.candidates;
+        return found->second.smoothing;
+    }
+    SmoothingResult result;
+    result.smoothing=reconstructSmoothing(mesh,vertices,sourceVertices,sourceFaces,job,
+        targets,refine,ignored,masks,storedRows,tangents,rotations,
+        candidates?&result.candidates:nullptr,precise);
+    if(candidates) *candidates=result.candidates;
+    const auto inserted=smoothingCache_.emplace(std::move(identity),std::move(result));
+    return inserted.first->second.smoothing;
+}
+
 void Writer::explicitNormalNote() {
     warning("Explicit final normals are a NeoMDL ASCII extension. Remove normals and normalindices to recalculate from geometry and smoothing groups.");
 }

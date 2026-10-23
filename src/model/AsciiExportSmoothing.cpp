@@ -4,6 +4,7 @@
 #include <algorithm>
 #include <cmath>
 #include <limits>
+#include <numeric>
 #include <iterator>
 #include <map>
 #include <set>
@@ -23,6 +24,7 @@ struct Corner {
     TangentBasis basisTarget;
     std::vector<Contribution> basisContributions;
     std::size_t basisWriter{};
+    std::array<float,3> position{};
 };
 struct Relation { std::size_t first,second; std::vector<std::size_t> corners; };
 
@@ -51,6 +53,7 @@ struct Smoothing {
     const neoshared::bif::JobControl& job;
     std::vector<TangentBasis> faceBases;
     mutable std::map<std::pair<std::vector<std::uint8_t>,bool>,std::vector<std::uint8_t>> fitted;
+    std::vector<double> normalLimits;
 
     Vec3 normal(std::size_t corner,const std::vector<std::uint8_t>& joined) const {
         Vec3 sum{};
@@ -63,6 +66,12 @@ struct Smoothing {
                 sum=weighted.accumulate(sum);
             }
         return ascii::normalizeVertexNormal(sum);
+    }
+    bool preservesNormals(const std::vector<std::uint8_t>& joined,
+                          const std::vector<std::size_t>& affected) const {
+        return normalLimits.empty() || std::all_of(affected.begin(),affected.end(),[&](std::size_t corner) {
+            return difference(normal(corner,joined),corners[corner].target)<=normalLimits[corner];
+        });
     }
     double error(std::size_t corner,const std::vector<std::uint8_t>& joined) const {
         if(!faceBases.empty()) {
@@ -95,6 +104,12 @@ struct Smoothing {
         for(std::size_t i=0;i<corners.size();++i) result+=error(i,joined);
         return result;
     }
+    double normalScore(const std::vector<std::uint8_t>& joined) const {
+        double result{};
+        for(std::size_t i=0;i<corners.size();++i)
+            result+=difference(normal(i,joined),corners[i].target);
+        return result;
+    }
     std::vector<std::uint8_t> fit(std::vector<std::uint8_t> joined,bool remove) const {
         auto key=std::make_pair(joined,remove);
         const auto found=fitted.find(key);
@@ -112,7 +127,7 @@ struct Smoothing {
                 for(const auto corner:relations[i].corners) before+=current[corner];
                 joined[i]=remove?0u:1u;
                 for(const auto corner:relations[i].corners) after+=error(corner,joined);
-                if(after<before) {
+                if(after<before && preservesNormals(joined,relations[i].corners)) {
                     changed=true;
                     for(const auto corner:relations[i].corners) current[corner]=error(corner,joined);
                 } else joined[i]=remove?1u:0u;
@@ -150,7 +165,7 @@ struct Smoothing {
             for(const auto corner:affected) before+=current[corner];
             joined[pair.first]^=1u;joined[pair.second]^=1u;
             for(const auto corner:affected) after+=error(corner,joined);
-            if(after<before) {
+            if(after<before && preservesNormals(joined,affected)) {
                 for(const auto corner:affected) current[corner]=error(corner,joined);
             } else {
                 joined[pair.first]^=1u;joined[pair.second]^=1u;
@@ -217,7 +232,7 @@ struct Smoothing {
             for(const auto corner:affected) before+=current[corner];
             for(const auto relation:added) joined[relation]=1u;
             for(const auto corner:affected) after+=error(corner,joined);
-            if(after<before) {
+            if(after<before && preservesNormals(joined,affected)) {
                 for(const auto corner:affected) current[corner]=error(corner,joined);
             } else {
                 for(const auto relation:added) joined[relation]=0u;
@@ -270,13 +285,178 @@ struct Smoothing {
             for(const auto corner:affected) before+=current[corner];
             for(const auto relation:removed) joined[relation]=0u;
             for(const auto corner:affected) after+=error(corner,joined);
-            if(after<before) {
+            if(after<before && preservesNormals(joined,affected)) {
                 for(const auto corner:affected) current[corner]=error(corner,joined);
             } else {
                 for(const auto relation:removed) joined[relation]=1u;
             }
         }
         return joined;
+    }
+
+    std::vector<std::uint8_t> fitBasisGroups(std::vector<std::uint8_t> joined) const {
+        std::map<std::pair<std::size_t,std::size_t>,std::size_t> links;
+        for(std::size_t i=0;i<relations.size();++i)
+            links.emplace(std::make_pair(relations[i].first,relations[i].second),i);
+        auto current=errors(joined);
+        std::set<std::vector<std::size_t>> seen;
+        for(std::size_t corner=0;corner<corners.size();++corner) {
+            if(current[corner]==0.0) continue;
+            const auto writer=corners[corner].basisWriter;
+            const auto& contributions=corners[writer].basisContributions;
+            for(const auto& seed:contributions) {
+                if(seed.relation==ownFace || joined[seed.relation]) continue;
+                std::vector<std::size_t> added;
+                for(const auto& entry:contributions) {
+                    if(entry.relation==ownFace || joined[entry.relation]) continue;
+                    const auto link=links.find(std::minmax(seed.face,entry.face));
+                    if(entry.face==seed.face || (link!=links.end() && joined[link->second]))
+                        added.push_back(entry.relation);
+                }
+                std::sort(added.begin(),added.end());
+                added.erase(std::unique(added.begin(),added.end()),added.end());
+                if(!seen.insert(added).second) continue;
+                job.check();
+                std::vector<std::size_t> affected;
+                for(const auto relation:added) {
+                    joined[relation]=1u;
+                    affected.insert(affected.end(),relations[relation].corners.begin(),relations[relation].corners.end());
+                }
+                std::sort(affected.begin(),affected.end());
+                affected.erase(std::unique(affected.begin(),affected.end()),affected.end());
+                double before{},after{};
+                for(const auto c:affected) {before+=current[c];after+=error(c,joined);}
+                if(after<before && preservesNormals(joined,affected)) {
+                    for(const auto c:affected) current[c]=error(c,joined);
+                } else for(const auto relation:added) joined[relation]=0u;
+            }
+        }
+        return joined;
+    }
+
+    std::vector<std::uint32_t> fitBasisMasks(std::vector<std::uint32_t> masks) const {
+        // Keep the existing intersections while recovering selective tangent
+        // groups. Re-encoding a whole relation graph can lose a useful group
+        // or join unrelated faces through a reused smoothing bit.
+        using BasisKey=std::pair<std::array<float,3>,std::array<float,9>>;
+        std::map<BasisKey,std::vector<std::size_t>> groups;
+        for(std::size_t corner=0;corner<corners.size();++corner) {
+            const auto& value=corners[corner];
+            const auto& b=value.basisTarget;
+            groups[{value.position,{{b.bitangent.x,b.bitangent.y,b.bitangent.z,
+                b.tangent.x,b.tangent.y,b.tangent.z,b.normal.x,b.normal.y,b.normal.z}}}].push_back(corner/3u);
+        }
+        for(auto& entry:groups) {
+            auto& faces=entry.second;
+            std::sort(faces.begin(),faces.end());
+            faces.erase(std::unique(faces.begin(),faces.end()),faces.end());
+        }
+        auto joined=intersections(masks);
+        auto current=errors(joined);
+        const auto considerMasks=[&](const std::vector<std::pair<std::size_t,std::uint32_t>>& proposedMasks) {
+            std::vector<std::size_t> changes,affected;
+            for(const auto& entry:proposedMasks)
+                changes.insert(changes.end(),faceRelations[entry.first].begin(),faceRelations[entry.first].end());
+            std::sort(changes.begin(),changes.end());
+            changes.erase(std::unique(changes.begin(),changes.end()),changes.end());
+            const auto proposed=[&](std::size_t face) {
+                const auto found=std::lower_bound(proposedMasks.begin(),proposedMasks.end(),face,
+                    [](const auto& entry,std::size_t value){return entry.first<value;});
+                return found!=proposedMasks.end() && found->first==face?found->second:masks[face];
+            };
+            changes.erase(std::remove_if(changes.begin(),changes.end(),[&](std::size_t index) {
+                const auto& r=relations[index];
+                return bool(proposed(r.first)&proposed(r.second))==bool(joined[index]);
+            }),changes.end());
+            if(changes.empty()) return false;
+            for(const auto index:changes)
+                affected.insert(affected.end(),relations[index].corners.begin(),relations[index].corners.end());
+            std::sort(affected.begin(),affected.end());
+            affected.erase(std::unique(affected.begin(),affected.end()),affected.end());
+            double before{},normalBefore{},after{},normalAfter{};
+            for(const auto corner:affected) {
+                before+=current[corner];
+                normalBefore+=difference(normal(corner,joined),corners[corner].target);
+            }
+            for(const auto index:changes) joined[index]^=1u;
+            for(const auto corner:affected) {
+                after+=error(corner,joined);
+                normalAfter+=difference(normal(corner,joined),corners[corner].target);
+            }
+            if(after<before && normalAfter<=normalBefore && preservesNormals(joined,affected)) {
+                for(const auto& entry:proposedMasks) masks[entry.first]=entry.second;
+                for(const auto corner:affected) current[corner]=error(corner,joined);
+                return true;
+            }
+            for(const auto index:changes) joined[index]^=1u;
+            return false;
+        };
+        const auto consider=[&](const std::vector<std::size_t>& faces,std::uint32_t bit,bool remove) {
+            std::vector<std::pair<std::size_t,std::uint32_t>> proposed;
+            for(const auto face:faces) proposed.emplace_back(face,remove?masks[face]&~bit:masks[face]|bit);
+            return considerMasks(proposed);
+        };
+        bool changed;
+        do {
+            changed=false;
+            for(std::size_t face=0;face<masks.size();++face) {
+                job.check();
+                const auto bits=masks[face];
+                for(unsigned index=0;index<32u;++index) {
+                    const auto bit=std::uint32_t{1}<<index;
+                    if(bits&bit) changed=consider({face},bit,true) || changed;
+                }
+            }
+            // Detach an unwanted tangent join without discarding the same
+            // face's required joins at its other corners. Spatially separate
+            // groups can reuse a bit even when all 32 bits are occupied.
+            const auto wanted=fit(joined,true);
+            for(std::size_t relation=0;relation<relations.size();++relation) {
+                if(!joined[relation] || wanted[relation]) continue;
+                const auto& pair=relations[relation];
+                for(const auto face:{pair.first,pair.second}) {
+                    job.check();
+                    const auto removed=masks[pair.first]&masks[pair.second];
+                    std::vector<std::size_t> members{face};
+                    for(const auto index:faceRelations[face]) if(wanted[index]) {
+                        const auto& r=relations[index];
+                        const auto other=r.first==face?r.second:r.first;
+                        if((masks[other]&masks[face]) && !(masks[other]&(masks[face]&~removed)))
+                            members.push_back(other);
+                    }
+                    std::sort(members.begin(),members.end());
+                    members.erase(std::unique(members.begin(),members.end()),members.end());
+                    for(unsigned index=0;index<32u;++index) {
+                        const auto bit=std::uint32_t{1}<<index;
+                        std::vector<std::pair<std::size_t,std::uint32_t>> proposal;
+                        for(const auto member:members)
+                            proposal.emplace_back(member,(member==face?masks[member]&~removed:masks[member])|bit);
+                        changed=considerMasks(proposal) || changed;
+                    }
+                }
+            }
+            for(const auto& entry:groups) {
+                job.check();
+                const auto& faces=entry.second;
+                if(faces.size()<2u) continue;
+                std::uint32_t used{};
+                for(const auto mask:masks) used|=mask;
+                // An unused bit adds exactly this group's intersections.
+                // Reuse a bit only after measuring all additional joins.
+                for(unsigned index=0;index<32u;++index) {
+                    const auto bit=std::uint32_t{1}<<index;
+                    if(!(used&bit)) {
+                        changed=consider(faces,bit,false) || changed;
+                        break;
+                    }
+                }
+                for(unsigned index=0;index<32u;++index) {
+                    const auto bit=std::uint32_t{1}<<index;
+                    if(used&bit) changed=consider(faces,bit,false) || changed;
+                }
+            }
+        } while(changed);
+        return masks;
     }
 
     using NormalKey=std::tuple<std::size_t,float,float,float>;
@@ -352,15 +532,24 @@ struct Smoothing {
                 // Compare every group change before committing: an earlier
                 // partial fit can exclude an exact overlapping contributor set.
                 for(;;) {
-                    auto selected=target;
+                    std::vector<std::size_t> selected;
                     for(std::size_t block=0;block<blocks.size();++block) if(block!=target) {
                         included[block]=!included[block];
                         const auto score=localScore();
                         included[block]=!included[block];
-                        if(score<best) {best=score;selected=block;}
+                        if(score<best) {best=score;selected={block};}
                     }
-                    if(selected==target) break;
-                    included[selected]=!included[selected];
+                    // Overlapping normal groups can need two contributor
+                    // sets changed together before either improves the fit.
+                    for(std::size_t a=0;a<blocks.size();++a) if(a!=target)
+                        for(std::size_t b=a+1u;b<blocks.size();++b) if(b!=target) {
+                            included[a]=!included[a];included[b]=!included[b];
+                            const auto score=localScore();
+                            included[a]=!included[a];included[b]=!included[b];
+                            if(score<best) {best=score;selected={a,b};}
+                        }
+                    if(selected.empty()) break;
+                    for(const auto block:selected) included[block]=!included[block];
                 }
                 for(const auto corner:blocks[target])
                     for(const auto& entry:corners[corner].contributions) if(entry.relation!=ownFace) {
@@ -470,120 +659,151 @@ struct Smoothing {
     }
 };
 
-struct SourceFaceNeighbors {
-    using Neighbor=std::pair<bool,std::size_t>;
-    struct EdgeNeighbors {
-        std::vector<std::size_t> faces;
-        std::vector<Neighbor> neighbors;
-    };
-    bool animated{};
-    std::map<std::pair<std::uint32_t,std::uint32_t>,std::vector<std::size_t>> edges;
-    std::vector<EdgeNeighbors> expected;
-
-    static std::vector<std::size_t> ranks(const std::vector<std::size_t>& order) {
-        std::vector<std::size_t> result(order.size());
-        for(std::size_t i=0;i<order.size();++i) result[order[i]]=i;
-        return result;
-    }
-    Neighbor neighbor(const std::vector<std::size_t>& incident,std::size_t face,
-                      const std::vector<std::size_t>& order,
-                      const std::vector<std::size_t>& rank) const {
-        auto first=ownFace;
-        std::int16_t pending=-1;
-        for(const auto other:incident) if(other!=face) {
-            const auto narrowed=static_cast<std::int16_t>(rank[other]);
-            if(animated?narrowed!=-1:narrowed>=0) {
-                if(rank[other]<first) first=rank[other];
-            } else if(rank[other]+1u==order.size() ||
-                      (rank[other]+2u==order.size() && rank[face]+1u==order.size()))
-                pending=narrowed;
-        }
-        const auto narrowed=first==ownFace?pending:static_cast<std::int16_t>(first);
-        return narrowed<0
-            ? Neighbor{false,static_cast<std::uint16_t>(narrowed)}
-            : Neighbor{true,order[static_cast<std::uint16_t>(narrowed)]};
-    }
-    SourceFaceNeighbors(const Mesh& mesh,
-            const std::vector<std::array<std::uint32_t,3>>& faces,
-            const std::vector<std::size_t>& order):animated(mesh.animated) {
-        for(std::size_t face=0;face<faces.size();++face)
-            for(std::size_t corner=0;corner<3u;++corner) {
-                auto& incident=edges[std::minmax(faces[face][corner],faces[face][(corner+1u)%3u])];
-                if(incident.empty() || incident.back()!=face) incident.push_back(face);
-            }
-        const auto rank=ranks(order);
-        for(const auto& edge:edges) {
-            // Isolated edges have no neighbor; two-face edges always choose
-            // each other while every emitted face index is nonnegative.
-            if(edge.second.size()<2u || (edge.second.size()==2u &&
-               order.size()<=static_cast<std::size_t>(std::numeric_limits<std::int16_t>::max())+1u)) continue;
-            auto& entry=expected.emplace_back();
-            entry.faces=edge.second;
-            for(const auto face:edge.second) entry.neighbors.push_back(neighbor(edge.second,face,order,rank));
-        }
-    }
-    bool preserves(const std::vector<std::size_t>& order,
-                   const std::vector<std::size_t>& rank) const {
-        for(const auto& edge:expected) {
-            for(std::size_t i=0;i<edge.faces.size();++i)
-                if(neighbor(edge.faces,edge.faces[i],order,rank)!=edge.neighbors[i]) return false;
-        }
-        return true;
-    }
-    template<class Visitor>
-    void permutations(const std::vector<std::size_t>& faces,
-                      const std::vector<std::size_t>& current,
-                      const neoshared::bif::JobControl& job,Visitor visit) const {
-        auto rank=ranks(current);
-        std::vector<bool> moving(current.size());
-        std::vector<std::size_t> slots;
-        for(const auto face:faces) {moving[face]=true;slots.push_back(rank[face]);}
-        std::sort(slots.begin(),slots.end());
-        std::set<std::pair<std::size_t,std::size_t>> precedence;
-        for(const auto& edge:edges) {
-            const auto& incident=edge.second;
-            if(incident.size()<3u || std::none_of(incident.begin(),incident.end(),
-                    [&](std::size_t face){return moving[face];})) continue;
-            // Within the nonnegative short range, preserving the first two
-            // edge users preserves every first-match neighbor. Other narrowed
-            // indices retain the complete neighbor check at each leaf.
-            if(std::any_of(incident.begin(),incident.end(),[&](std::size_t face) {
-                    return (moving[face]?slots.back():rank[face])>
-                        static_cast<std::size_t>(std::numeric_limits<std::int16_t>::max());
-                })) continue;
-            auto sorted=incident;
-            std::sort(sorted.begin(),sorted.end(),
-                [&](std::size_t a,std::size_t b){return rank[a]<rank[b];});
-            precedence.emplace(sorted[0],sorted[1]);
-            for(std::size_t i=2u;i<sorted.size();++i) precedence.emplace(sorted[1],sorted[i]);
-        }
-        std::vector<std::vector<std::size_t>> before(current.size()),after(current.size());
-        for(const auto& pair:precedence) {
-            before[pair.second].push_back(pair.first);
-            after[pair.first].push_back(pair.second);
-        }
-        for(const auto face:faces) rank[face]=ownFace;
-        auto order=current;
-        const auto search=[&](const auto& self,std::size_t depth,std::size_t changes)->void {
-            job.check();
-            if(depth==slots.size()) {visit(order,changes);return;}
-            const auto slot=slots[depth];
-            for(const auto face:faces) {
-                if(rank[face]!=ownFace ||
-                   std::any_of(before[face].begin(),before[face].end(),
-                       [&](std::size_t other){return rank[other]>=slot;}) ||
-                   std::any_of(after[face].begin(),after[face].end(),
-                       [&](std::size_t other){return rank[other]<=slot;})) continue;
-                rank[face]=slot;order[slot]=face;
-                self(self,depth+1u,changes+(current[slot]!=face));
-                rank[face]=ownFace;
-            }
-        };
-        search(search,0u,0u);
-    }
-};
 
 } // namespace
+
+std::vector<std::size_t> SourceFaceNeighbors::ranks(const std::vector<std::size_t>& order) {
+    std::vector<std::size_t> result(order.size());
+    for(std::size_t i=0;i<order.size();++i) result[order[i]]=i;
+    return result;
+}
+
+SourceFaceNeighbors::Neighbor SourceFaceNeighbors::neighbor(const std::vector<std::size_t>& incident,std::size_t face,
+                  const std::vector<std::size_t>& order,
+                  const std::vector<std::size_t>& rank) const {
+    auto first=ownFace;
+    std::int16_t pending=-1;
+    for(const auto other:incident) if(other!=face) {
+        const auto narrowed=static_cast<std::int16_t>(rank[other]);
+        if(animated?narrowed!=-1:narrowed>=0) {
+            if(rank[other]<first) first=rank[other];
+        } else if(rank[other]+1u==order.size() ||
+                  (rank[other]+2u==order.size() && rank[face]+1u==order.size()))
+            pending=narrowed;
+    }
+    const auto narrowed=first==ownFace?pending:static_cast<std::int16_t>(first);
+    return narrowed<0
+        ? Neighbor{false,static_cast<std::uint16_t>(narrowed)}
+        : Neighbor{true,order[static_cast<std::uint16_t>(narrowed)]};
+}
+
+SourceFaceNeighbors::SourceFaceNeighbors(const Mesh& mesh,
+        const std::vector<std::array<std::uint32_t,3>>& faces,
+        const std::vector<std::size_t>& order):animated(mesh.animated) {
+    for(std::size_t face=0;face<faces.size();++face)
+        for(std::size_t corner=0;corner<3u;++corner) {
+            auto& incident=edges[std::minmax(faces[face][corner],faces[face][(corner+1u)%3u])];
+            if(incident.empty() || incident.back()!=face) incident.push_back(face);
+        }
+    const auto rank=ranks(order);
+    for(const auto& edge:edges) {
+        // Isolated edges have no neighbor; two-face edges always choose
+        // each other while every emitted face index is nonnegative.
+        if(edge.second.size()<2u || (edge.second.size()==2u &&
+           order.size()<=static_cast<std::size_t>(std::numeric_limits<std::int16_t>::max())+1u)) continue;
+        auto& entry=expected.emplace_back();
+        entry.faces=edge.second;
+        for(const auto face:edge.second) entry.neighbors.push_back(neighbor(edge.second,face,order,rank));
+    }
+}
+
+bool SourceFaceNeighbors::preserves(const std::vector<std::size_t>& order,
+               const std::vector<std::size_t>& rank) const {
+    for(const auto& edge:expected) {
+        for(std::size_t i=0;i<edge.faces.size();++i)
+            if(neighbor(edge.faces,edge.faces[i],order,rank)!=edge.neighbors[i]) return false;
+    }
+    return true;
+}
+
+
+std::vector<SeamSmoothingCandidate> retainedRowSmoothingCandidates(
+    const Mesh& mesh,const std::vector<Vertex>& vertices,
+    const std::vector<std::array<std::uint32_t,3>>& sourceFaces,
+    const std::vector<std::uint32_t>& masks,const std::vector<bool>& seamCorners,
+    const neoshared::bif::JobControl& job) {
+    struct Group {std::vector<std::size_t> faces;bool seam{};};
+    std::set<std::pair<std::vector<std::uint32_t>,std::size_t>> proposals;
+    // Corners sharing a compiled row shared one geometric precursor.
+    // Recover equal contributor sets, including removing a surplus join:
+    // merely adding a shared bit cannot express that correction.
+    std::map<std::size_t,std::map<std::size_t,Group>> retainedRows;
+    std::map<std::size_t,std::set<std::size_t>> incident;
+    for(std::size_t face=0;face<sourceFaces.size();++face)
+        for(std::size_t corner=0;corner<3u;++corner) {
+            const auto source=sourceFaces[face][corner];
+            const auto row=static_cast<std::size_t>(mesh.faces[face].indices[corner]);
+            auto& group=retainedRows[source][row];
+            if(group.faces.empty() || group.faces.back()!=face) group.faces.push_back(face);
+            group.seam=group.seam || seamCorners[face*3u+corner];
+            incident[source].insert(face);
+        }
+    struct RowFit {std::size_t source;std::vector<std::size_t> faces,mixed;};
+    std::vector<RowFit> fits;
+    for(const auto& point:retainedRows) for(const auto& entry:point.second) {
+        const auto& group=entry.second;
+        if(!group.seam || group.faces.size()<2u) continue;
+        RowFit fit{point.first,group.faces,{}};
+        bool missing=false;
+        for(std::size_t a=0;a<group.faces.size();++a)
+            for(std::size_t b=a+1u;b<group.faces.size();++b)
+                missing=missing || !(masks[group.faces[a]]&masks[group.faces[b]]);
+        for(const auto other:incident.at(point.first)) {
+            if(std::find(group.faces.begin(),group.faces.end(),other)!=group.faces.end()) continue;
+            const bool joined=(masks[other]&masks[group.faces.front()])!=0u;
+            if(std::any_of(group.faces.begin(),group.faces.end(),[&](std::size_t face) {
+                    return ((masks[other]&masks[face])!=0u)!=joined;
+                })) fit.mixed.push_back(other);
+        }
+        if(missing || !fit.mixed.empty()) fits.push_back(std::move(fit));
+    }
+    if(!fits.empty()) {
+        Smoothing work{{},{},{},{},job,{}, {}};
+        work.crosses.resize(mesh.faces.size());work.faceRelations.resize(mesh.faces.size());
+        // Preserve unrelated normal joins and coincident tangent joins
+        // while encoding the requested local relationships in 32 bits.
+        std::map<std::array<float,3>,std::set<std::size_t>> points;
+        for(std::size_t face=0;face<mesh.faces.size();++face)
+            for(const auto row:mesh.faces[face].indices) {
+                const auto p=vertices[row].position;points[{p.x,p.y,p.z}].insert(face);
+            }
+        std::map<std::pair<std::size_t,std::size_t>,std::size_t> relationIds;
+        for(const auto& point:points)
+            for(auto a=point.second.begin();a!=point.second.end();++a)
+                for(auto b=std::next(a);b!=point.second.end();++b) relationIds.emplace(std::make_pair(*a,*b),0u);
+        for(auto& relation:relationIds) {
+            relation.second=work.relations.size();
+            const auto a=relation.first.first,b=relation.first.second;
+            work.faceRelations[a].push_back(relation.second);work.faceRelations[b].push_back(relation.second);
+            work.relations.push_back({a,b,{}});
+        }
+        const auto initial=work.intersections(masks);
+        for(const auto& fit:fits) {
+            auto wanted=initial;
+            for(std::size_t a=0;a<fit.faces.size();++a)
+                for(std::size_t b=a+1u;b<fit.faces.size();++b)
+                    wanted[relationIds.at(std::minmax(fit.faces[a],fit.faces[b]))]=1u;
+            const auto visit=[&](const auto& self,std::size_t depth)->void {
+                job.check();
+                if(depth==fit.mixed.size()) {
+                    auto candidate=work.encode(wanted);
+                    if(candidate!=masks && work.intersections(candidate)==wanted)
+                        proposals.emplace(std::move(candidate),fit.source);
+                    return;
+                }
+                for(const auto joined:{0u,1u}) {
+                    for(const auto face:fit.faces)
+                        wanted[relationIds.at(std::minmax(face,fit.mixed[depth]))]=joined;
+                    self(self,depth+1u);
+                }
+            };
+            visit(visit,0u);
+        }
+    }
+    std::vector<SeamSmoothingCandidate> result;
+    for(const auto& proposal:proposals) result.push_back({proposal.second,proposal.first});
+    return result;
+}
 
 bool preservesSourceFaceNeighbors(const Mesh& mesh,
         const std::vector<std::array<std::uint32_t,3>>& sourceFaces,
@@ -672,35 +892,41 @@ std::vector<std::size_t> reconstructNormalFaceOrder(
             (double(a.x)*b.x+double(a.y)*b.y)+double(a.z)*b.z);
     };
     struct Error {std::size_t corner;double squared,angle;};
-    const auto errors=[&](std::size_t source,const std::vector<std::size_t>& rank) {
+    std::vector<std::map<std::vector<std::size_t>,std::vector<Error>>> orderedErrors(sources.size());
+    const auto errors=[&](std::size_t source,const auto& rank) -> const std::vector<Error>& {
         auto incident=sources[source].faces;
-        std::sort(incident.begin(),incident.end(),[&](std::size_t a,std::size_t b){return rank[a]<rank[b];});
-        std::map<std::uint32_t,Vec3> shared;
-        std::vector<Error> result;
-        for(const auto corner:sources[source].corners) {
-            const auto face=corner/3u;
-            const auto mask=masks[face];
-            Vec3 normal;
-            const auto found=shared.find(mask);
-            if(mask && found!=shared.end()) normal=found->second;
-            else {
-                Vec3 sum{};
-                for(const auto other:incident) if(other==face || (mask&masks[other])) {
-                    const auto weighted=crosses[other];
-                    sum=weighted.accumulate(sum);
+        std::sort(incident.begin(),incident.end(),[&](std::size_t a,std::size_t b){return rank(a)<rank(b);});
+        // Absolute face slots do not affect a vertex's ordered contribution sum.
+        // Reuse its exact errors across moves of unrelated faces.
+        const auto inserted=orderedErrors[source].try_emplace(incident);
+        auto& result=inserted.first->second;
+        if(inserted.second) {
+            std::map<std::uint32_t,Vec3> shared;
+            for(const auto corner:sources[source].corners) {
+                const auto face=corner/3u;
+                const auto mask=masks[face];
+                Vec3 normal;
+                const auto found=shared.find(mask);
+                if(mask && found!=shared.end()) normal=found->second;
+                else {
+                    Vec3 sum{};
+                    for(const auto other:incident) if(other==face || (mask&masks[other])) {
+                        const auto weighted=crosses[other];
+                        sum=weighted.accumulate(sum);
+                    }
+                    normal=ascii::normalizeVertexNormal(sum);
+                    if(mask) shared.emplace(mask,normal);
                 }
-                normal=ascii::normalizeVertexNormal(sum);
-                if(mask) shared.emplace(mask,normal);
+                const auto target=vertices[static_cast<std::size_t>(mesh.faces[face].indices[corner%3u])].normal;
+                result.push_back({corner,difference(normal,target),precisePositions?angle(normal,target):0.0});
             }
-            const auto target=vertices[static_cast<std::size_t>(mesh.faces[face].indices[corner%3u])].normal;
-            result.push_back({corner,difference(normal,target),precisePositions?angle(normal,target):0.0});
         }
         return result;
     };
     std::vector<double> current(sourceFaces.size()*3u);
     std::vector<double> baselineAngles(sourceFaces.size()*3u);
     for(std::size_t source=0;source<sources.size();++source)
-        for(const auto& entry:errors(source,initialRanks)) {
+        for(const auto& entry:errors(source,[&](std::size_t face){return initialRanks[face];})) {
             current[entry.corner]=entry.squared;baselineAngles[entry.corner]=entry.angle;
         }
     const auto baseline=current;
@@ -709,40 +935,49 @@ std::vector<std::size_t> reconstructNormalFaceOrder(
         auto bestOrder=order;
         std::vector<Error> bestErrors;
         double improvement{};
-        const auto consider=[&](std::vector<std::size_t> candidate,std::vector<std::uint32_t> affected) {
+        const auto consider=[&](const auto& proposedRank,std::vector<std::uint32_t> affected) {
             job.check();
-            const auto candidateRanks=SourceFaceNeighbors::ranks(candidate);
-            if(!neighbors.preserves(candidate,candidateRanks)) return;
             std::sort(affected.begin(),affected.end());
             affected.erase(std::unique(affected.begin(),affected.end()),affected.end());
             std::vector<Error> changed;
             double before{},after{};
             for(const auto source:affected)
-                for(const auto& entry:errors(source,candidateRanks)) {
+                for(const auto& entry:errors(source,proposedRank)) {
                     if(entry.squared>baseline[entry.corner] ||
                        (precisePositions && entry.angle>baselineAngles[entry.corner])) return;
                     before+=current[entry.corner];after+=entry.squared;
                     changed.push_back(entry);
                 }
             if(before-after>improvement) {
+                // Only an improving local sum needs a complete order for
+                // neighbor validation. Other candidates touch a few ranks.
+                std::vector<std::size_t> candidate(order.size()),candidateRanks(order.size());
+                for(std::size_t face=0;face<order.size();++face) {
+                    const auto slot=proposedRank(face);candidate[slot]=face;candidateRanks[face]=slot;
+                }
+                if(!neighbors.preserves(candidate,candidateRanks)) return;
                 improvement=before-after;bestOrder=std::move(candidate);bestErrors=std::move(changed);
             }
         };
         for(std::size_t a=0;a<anchors.size();++a)
             for(std::size_t b=a+1u;b<anchors.size();++b) {
-                auto candidate=order;
-                std::swap(candidate[rank[anchors[a]]],candidate[rank[anchors[b]]]);
                 const auto& first=sourceFaces[anchors[a]];
                 const auto& second=sourceFaces[anchors[b]];
-                consider(std::move(candidate),{first[0],first[1],first[2],second[0],second[1],second[2]});
+                consider([&](std::size_t face) {
+                    return face==anchors[a]?rank[anchors[b]]:face==anchors[b]?rank[anchors[a]]:rank[face];
+                },{first[0],first[1],first[2],second[0],second[1],second[2]});
             }
         for(const auto face:anchors)
             for(const auto destination:anchors) if(face!=destination) {
-                auto candidate=order;
-                candidate.erase(candidate.begin()+static_cast<std::ptrdiff_t>(rank[face]));
-                candidate.insert(candidate.begin()+static_cast<std::ptrdiff_t>(rank[destination]),face);
                 const auto& source=sourceFaces[face];
-                consider(std::move(candidate),{source[0],source[1],source[2]});
+                const auto from=rank[face],to=rank[destination];
+                consider([&](std::size_t other) {
+                    const auto slot=rank[other];
+                    if(other==face) return to;
+                    if(from<to && slot>from && slot<=to) return slot-1u;
+                    if(to<from && slot>=to && slot<from) return slot+1u;
+                    return slot;
+                },{source[0],source[1],source[2]});
             }
         if(!(improvement>0.0)) return order;
         order=std::move(bestOrder);
@@ -836,7 +1071,7 @@ ReconstructedNormalStars reconstructNormalCornerStars(
     const SourceFaceNeighbors neighbors(mesh,sourceFaces,faceOrder);
     std::vector<ascii::NormalFaceCross> crosses(sourceFaces.size());
     for(std::size_t face=0;face<crosses.size();++face) crosses[face]=alternatives[face][current[face]];
-    const double rounding=precisePositions?8.0*std::numeric_limits<float>::epsilon():0.0;
+    const double rounding=precisePositions?32.0*std::numeric_limits<float>::epsilon():0.0;
     const auto squaredError=[&](Vec3 a,Vec3 b) {
         if(precisePositions && (same(a,Vec3{}) || same(b,Vec3{}))) return same(a,b)?0.0:1.0;
         const double value=difference(a,b);
@@ -886,9 +1121,54 @@ ReconstructedNormalStars reconstructNormalCornerStars(
             }
         }
     }
-    std::vector<std::vector<std::size_t>> explicitDomains;
-    if(movingFaces) explicitDomains.push_back(*movingFaces);
-    const auto& domains=movingFaces?explicitDomains:incident;
+    // The corner limits stay fixed throughout the search. Different rotation
+    // and face-order paths often produce the same rounded contribution sum.
+    struct GroupEvaluation {bool accepted{true};std::vector<double> squared;};
+    std::vector<std::map<std::array<float,3>,GroupEvaluation>> evaluations(groups.size());
+    const auto evaluateGroup=[&](std::size_t group)->const GroupEvaluation& {
+        Vec3 sum{};
+        for(const auto face:groups[group].faces) sum=crosses[face].accumulate(sum);
+        auto inserted=evaluations[group].try_emplace({{sum.x,sum.y,sum.z}});
+        auto& result=inserted.first->second;
+        if(inserted.second) {
+            const auto normal=ascii::normalizeVertexNormal(sum);
+            const auto& corners=groups[group].corners;
+            for(std::size_t i=0;i<corners.size();++i) {
+                const auto corner=corners[i];
+                const auto target=vertices[static_cast<std::size_t>(
+                    mesh.faces[corner/3u].indices[corner%3u])].normal;
+                const auto squared=squaredError(normal,target);
+                if(squared>baseline[group][i].squared ||
+                   (compareAngles && angle(normal,target)>baseline[group][i].angle)) {
+                    result.accepted=false;break;
+                }
+                result.squared.push_back(squared);
+            }
+        }
+        return result;
+    };
+    std::vector<std::vector<std::size_t>> domains;
+    if(movingFaces) domains.push_back(*movingFaces);
+    else {
+        // Disjoint smoothing groups have independent normal objectives.
+        // Fit each connected contributor set while retaining the other faces'
+        // slots; opposite sides of a two-sided mesh need not be permuted together.
+        std::set<std::vector<std::size_t>> seen;
+        for(const auto& star:incident) {
+            std::set<std::size_t> remaining;
+            for(const auto face:star) if(anchors[face]) remaining.insert(face);
+            while(!remaining.empty()) {
+                std::vector<std::size_t> connected{*remaining.begin()};
+                remaining.erase(remaining.begin());
+                for(std::size_t i=0;i<connected.size();++i)
+                    for(const auto group:faceGroups[connected[i]])
+                        for(const auto face:groups[group].faces)
+                            if(remaining.erase(face)) connected.push_back(face);
+                std::sort(connected.begin(),connected.end());
+                if(seen.insert(connected).second) domains.push_back(std::move(connected));
+            }
+        }
+    }
     const bool repairMode=movingFaces && baselineCornerNormals;
     bool improved;
     do {
@@ -897,7 +1177,7 @@ ReconstructedNormalStars reconstructNormalCornerStars(
             std::vector<std::size_t> faces;
             std::vector<std::vector<std::uint8_t>> choices;
             for(const auto face:star) if(movingFaces || anchors[face]) faces.push_back(face);
-            if(movingFaces) {
+            {
                 // Complete the smallest remaining contributor group first,
                 // so its immutable corner limits can prune the joint search.
                 std::vector<std::size_t> ordered;
@@ -965,20 +1245,10 @@ ReconstructedNormalStars reconstructNormalCornerStars(
                     candidate[face]=rotation;crosses[face]=alternatives[face][rotation];
                     double next=score;bool accepted=true;
                     for(const auto group:completed[depth]) {
-                        const auto normal=groupNormal(group);
-                        const auto& corners=groups[group].corners;
-                        for(std::size_t i=0;i<corners.size();++i) {
-                            const auto corner=corners[i];
-                            const auto target=vertices[static_cast<std::size_t>(
-                                mesh.faces[corner/3u].indices[corner%3u])].normal;
-                            const auto squared=squaredError(normal,target);
-                            if(squared>baseline[group][i].squared ||
-                               (compareAngles && angle(normal,target)>baseline[group][i].angle)) {
-                                accepted=false;break;
-                            }
-                            next+=squared;
-                        }
+                        const auto& evaluation=evaluateGroup(group);
+                        accepted=evaluation.accepted;
                         if(!accepted) break;
+                        for(const auto squared:evaluation.squared) next+=squared;
                     }
                     const auto nextChanges=changes+(rotation!=current[face]);
                     if(accepted && (next<bestScore ||
@@ -996,7 +1266,7 @@ ReconstructedNormalStars reconstructNormalCornerStars(
                     std::sort(contributions.begin(),contributions.end(),
                         [&](std::size_t a,std::size_t b){return ranks[a]<ranks[b];});
                 }
-                if(movingFaces) {
+                {
                     std::vector<std::size_t> signature;
                     for(const auto& entry:last) {
                         const auto& contributions=groups[entry.first].faces;
@@ -1034,12 +1304,37 @@ ReconstructedNormalStars reconstructNormalCornerStars(
                         orderSensitive=orderSensitive || !same(alternatives[face][rotation],first);
                 }
             }
-            if(orderSensitive) neighbors.permutations(faces,currentOrder,job,
-                [&](const std::vector<std::size_t>& order,std::size_t changes) {
+            if(orderSensitive && (bestScore>0.0 || bestChanges>0u || (repairMode && !foundRepair))) {
+                const auto considerPermutation=[&](const std::vector<std::size_t>& order,std::size_t changes) {
                     if(changes==0u) return;
                     orderChanges=changes;considerOrder(order);
-                });
-            if(bestScore<initialScore || (repairMode && foundRepair)) {
+                };
+                {
+                    // Refit rotations together with swaps and insertion moves.
+                    // Accepted moves are revisited until the contributor domains
+                    // converge, without enumerating every face permutation.
+                    const auto ranks=SourceFaceNeighbors::ranks(currentOrder);
+                    std::vector<std::size_t> slots;
+                    for(const auto face:faces) slots.push_back(ranks[face]);
+                    std::sort(slots.begin(),slots.end());
+                    for(std::size_t a=0;a<slots.size();++a)
+                        for(std::size_t b=a+1u;b<slots.size();++b) {
+                            auto order=currentOrder;
+                            std::swap(order[slots[a]],order[slots[b]]);
+                            considerPermutation(order,2u);
+                        }
+                    for(std::size_t a=0;a<slots.size();++a)
+                        for(std::size_t b=0;b<slots.size();++b) if(a!=b) {
+                            auto order=currentOrder;
+                            const auto face=order[slots[a]];
+                            if(a<b) for(auto i=a;i<b;++i) order[slots[i]]=order[slots[i+1u]];
+                            else for(auto i=a;i>b;--i) order[slots[i]]=order[slots[i-1u]];
+                            order[slots[b]]=face;
+                            considerPermutation(order,(a<b?b-a:a-b)+1u);
+                        }
+                }
+            }
+            if(foundRepair && (bestScore<initialScore || best!=current || bestOrder!=currentOrder)) {
                 current=std::move(best);currentOrder=std::move(bestOrder);improved=true;
                 for(const auto face:faces) crosses[face]=alternatives[face][current[face]];
             }
@@ -1050,7 +1345,7 @@ ReconstructedNormalStars reconstructNormalCornerStars(
                     [&](std::size_t a,std::size_t b){return ranks[a]<ranks[b];});
             }
         }
-    } while(improved && !movingFaces);
+    } while(improved);
     return {std::move(current),std::move(currentOrder)};
 }
 
@@ -1296,8 +1591,7 @@ ReconstructedSmoothing reconstructSmoothing(
     std::vector<std::vector<std::uint32_t>>* sharedCandidates,
     const std::vector<std::array<double,3>>* precisePositions) {
     Smoothing work{{},{},{},{},job,{}, {}};
-    std::vector<ascii::TangentFace> tangentFaces;
-    if(tangents) tangentFaces.reserve(sourceFaces.size());
+    if(tangents) work.faceBases=tangents->faceBases;
     work.faceRelations.resize(sourceFaces.size());
     std::vector<std::vector<std::size_t>> incident(sourceVertices.size());
     std::map<std::array<float,3>,std::vector<std::size_t>> positionFaces;
@@ -1323,27 +1617,7 @@ ReconstructedSmoothing reconstructSmoothing(
                 positionFaces[{{p.x,p.y,p.z}}].push_back(face);
             }
         }
-        if(tangents) {
-            const auto& va=vertices[mesh.faces[face].indices[rotation%3u]];
-            const auto& vb=vertices[mesh.faces[face].indices[(1u+rotation)%3u]];
-            const auto& vc=vertices[mesh.faces[face].indices[(2u+rotation)%3u]];
-            const auto p=subtract(b,a),q=subtract(c,a);
-            const float pu=vb.texcoord0.x-va.texcoord0.x,qu=vc.texcoord0.x-va.texcoord0.x;
-            const float pv=vb.texcoord0.y-va.texcoord0.y,qv=vc.texcoord0.y-va.texcoord0.y;
-            TangentBasis basis;
-            basis.bitangent=normalizeTangent({q.x*pu-p.x*qu,q.y*pu-p.y*qu,q.z*pu-p.z*qu});
-            basis.tangent=normalizeTangent({q.x*pv-p.x*qv,q.y*pv-p.y*qv,q.z*pv-p.z*qv});
-            basis.normal=ascii::tangentBasisNormal(basis.bitangent,basis.tangent,cross(subtract(b,a),subtract(c,b)));
-            const auto n=tangents->firstCornerNormals[face];
-            if((basis.normal.x*n.x+basis.normal.y*n.y)+basis.normal.z*n.z<0.0f) {
-                basis.tangent={-basis.tangent.x,-basis.tangent.y,-basis.tangent.z};
-                basis.normal={-basis.normal.x,-basis.normal.y,-basis.normal.z};
-            }
-            work.faceBases.push_back(basis);
-            tangentFaces.push_back({{a,b,c},{va.texcoord0,vb.texcoord0,vc.texcoord0}});
-        }
     }
-    if(tangents) ascii::orientSingularTangentComponents(tangentFaces,work.faceBases,job);
     std::map<std::pair<std::size_t,std::size_t>,std::size_t> relationIndices;
     for(const auto& faces:incident) {
         job.check();
@@ -1362,6 +1636,12 @@ ReconstructedSmoothing reconstructSmoothing(
         work.faceRelations[second].push_back(entry.second);
         work.relations.push_back({first,second,{}});
     }
+    if(tangents) {
+        const auto ranks=SourceFaceNeighbors::ranks(tangents->faceOrder);
+        const auto earlier=[&](std::size_t a,std::size_t b){return ranks[a]<ranks[b];};
+        for(auto& faces:incident) std::stable_sort(faces.begin(),faces.end(),earlier);
+        for(auto& entry:positionFaces) std::stable_sort(entry.second.begin(),entry.second.end(),earlier);
+    }
     for(std::size_t face=0;face<sourceFaces.size();++face)
         for(std::size_t corner=0;corner<3u;++corner) {
             const auto index=work.corners.size();
@@ -1379,6 +1659,7 @@ ReconstructedSmoothing reconstructSmoothing(
             if(tangents) {
                 value.basisTarget=vertices[value.compiledVertex].tangentBasis;
                 const auto p=vertices[sourceVertices[value.source]].position;
+                value.position={{p.x,p.y,p.z}};
                 for(const auto candidate:positionFaces.at({{p.x,p.y,p.z}})) {
                     const auto relation=candidate==face?ownFace:relationIndices.at(std::minmax(face,candidate));
                     value.basisContributions.push_back({candidate,relation});
@@ -1390,10 +1671,9 @@ ReconstructedSmoothing reconstructSmoothing(
         // The last face using a generated row overwrites its basis. Every
         // corner reading that row therefore depends on the writer's joins.
         std::map<std::int16_t,std::size_t> writers;
-        for(std::size_t face=0;face<tangents->cornerRows.size();++face)
+        for(const auto face:tangents->faceOrder)
             for(std::size_t corner=0;corner<3u;++corner)
                 writers[tangents->cornerRows[face][corner]]=face*3u+corner;
-        for(auto& relation:work.relations) relation.corners.clear();
         for(std::size_t corner=0;corner<work.corners.size();++corner) {
             const auto writer=tangents->useGeneratedWriters?
                 writers.at(tangents->cornerRows[corner/3u][corner%3u]):corner;
@@ -1420,15 +1700,25 @@ ReconstructedSmoothing reconstructSmoothing(
         result.masks=work.encode(joined);
         joined=work.intersections(result.masks);
     }
+    std::vector<std::size_t> normalCorners(work.corners.size());
+    std::iota(normalCorners.begin(),normalCorners.end(),0u);
+    if(tangents) {
+        constexpr double rounding=32.0*std::numeric_limits<float>::epsilon();
+        for(std::size_t corner=0;corner<work.corners.size();++corner)
+            work.normalLimits.push_back(std::max(rounding*rounding,
+                difference(work.normal(corner,joined),work.corners[corner].target)));
+    }
     double best=work.score(joined);
+    double bestNormal=tangents?work.normalScore(joined):0.0;
     std::set<std::vector<std::uint8_t>> evaluated;
     const auto consider=[&](const std::vector<std::uint8_t>& relations) {
         if(!evaluated.insert(relations).second) return;
         auto masks=work.encode(relations);
         auto candidate=work.intersections(masks);
         const auto score=work.score(candidate);
-        if(score<best) {
-            best=score;joined=std::move(candidate);result.masks=std::move(masks);
+        const auto normalScore=tangents?work.normalScore(candidate):0.0;
+        if(score<best && normalScore<=bestNormal && work.preservesNormals(candidate,normalCorners)) {
+            best=score;bestNormal=normalScore;joined=std::move(candidate);result.masks=std::move(masks);
         }
     };
     if(!seedMasks && !useStoredRows) {
@@ -1478,10 +1768,20 @@ ReconstructedSmoothing reconstructSmoothing(
     // the actual representable result stops improving.
     while(refine && best>0.0) {
         const auto previous=best;
+        if(tangents) {
+            auto masks=work.fitBasisMasks(result.masks);
+            auto candidate=work.intersections(masks);
+            const auto score=work.score(candidate);
+            if(score<best) {
+                best=score;bestNormal=work.normalScore(candidate);
+                joined=std::move(candidate);result.masks=std::move(masks);
+            }
+        }
         consider(work.fit(joined,false));
         consider(work.fit(joined,true));
         consider(work.fitPairs(joined));
         consider(work.fitSharedContributions(joined));
+        if(tangents) consider(work.fitBasisGroups(joined));
         if(!tangents) {
             consider(work.fitNormalGroups(joined));
             consider(work.fitSharedVertices(joined));
