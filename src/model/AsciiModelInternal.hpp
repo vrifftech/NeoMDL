@@ -206,7 +206,14 @@ void applyAsciiLightmap(RawNode& raw, Reader& reader);
 void postProcessSkinNode(RawNode& raw,const neoshared::bif::JobControl& job);
 void buildMesh(Model& model, RawNode& raw, std::size_t nodeIndex,
                const neoshared::bif::JobControl& job);
-Vec3 tangentBasisNormal(Vec3 bitangent,Vec3 tangent,Vec3 faceArea);
+inline Vec3 tangentBasisNormal(Vec3 bitangent,Vec3 tangent,Vec3) {
+    // Subtract the products before rounding. Collapsed UV derivatives can
+    // be almost parallel, so separately rounded products lose the basis axis.
+    return {
+        static_cast<float>(static_cast<double>(bitangent.y)*tangent.z-static_cast<double>(bitangent.z)*tangent.y),
+        static_cast<float>(static_cast<double>(bitangent.z)*tangent.x-static_cast<double>(bitangent.x)*tangent.z),
+        static_cast<float>(static_cast<double>(bitangent.x)*tangent.y-static_cast<double>(bitangent.y)*tangent.x)};
+}
 struct NormalFaceCross {
     float x,y;
     double z;
@@ -239,8 +246,24 @@ std::array<Vec3,2> normalPositionFaceProducts(const std::array<Vec3,3>& position
     const std::array<std::array<double,3>,3>& precise);
 Vec3 normalPositionFaceCross(const std::array<Vec3,3>& positions,
     const std::array<std::array<double,3>,3>& precise);
-Vec3 tangentUvDerivative(Vec3 p,Vec3 q,const std::array<Vec2,3>& uv,
-    const std::array<std::array<double,2>,3>& precise,std::size_t component);
+inline Vec3 tangentUvDerivative(Vec3 p,Vec3 q,const std::array<Vec2,3>& uv,
+        const std::array<std::array<double,2>,3>& precise,std::size_t component) {
+    const float a=component?uv[0].y:uv[0].x;
+    const float b=component?uv[1].y:uv[1].x;
+    const float c=component?uv[2].y:uv[2].x;
+    const float firstBase=b-a,secondBase=c-a;
+    // Retain the rounded coefficients and add only authored sub-float UV residuals.
+    const double firstResidual=(precise[1][component]-b)-(precise[0][component]-a);
+    const double secondResidual=(precise[2][component]-c)-(precise[0][component]-a);
+    const double first=firstResidual==0.0?static_cast<double>(firstBase):
+        static_cast<double>(firstBase)+firstResidual;
+    const double second=secondResidual==0.0?static_cast<double>(secondBase):
+        static_cast<double>(secondBase)+secondResidual;
+    return {
+        static_cast<float>(q.x*first)-static_cast<float>(p.x*second),
+        static_cast<float>(q.y*first)-static_cast<float>(p.y*second),
+        static_cast<float>(q.z*first)-static_cast<float>(p.z*second)};
+}
 struct TangentFace {
     std::array<Vec3,3> positions;
     std::array<Vec2,3> texcoords;
@@ -260,6 +283,7 @@ void orientSingularTangentComponents(const std::vector<TangentComponent>& compon
 // UV residual searches retain packed positions, UVs, faces and generated rows.
 // Prepare their incidence and singular components once for those candidates.
 TangentBasisTopology prepareTangentBasis(const Mesh& mesh,const neoshared::bif::JobControl& job);
+TangentBasisTopology prepareTangentBasis(const Mesh& mesh,std::vector<TangentComponent> singular);
 std::vector<TangentBasis> tangentFaceBases(const Mesh& mesh,const neoshared::bif::JobControl& job);
 void buildTangentBasis(Mesh& mesh,const TangentBasisTopology& topology,
     const neoshared::bif::JobControl& job);

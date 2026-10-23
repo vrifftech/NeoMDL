@@ -7,6 +7,7 @@
 #include <cstdio>
 #include <cstring>
 #include <map>
+#include <memory_resource>
 #include <numeric>
 #include <unordered_map>
 
@@ -321,6 +322,34 @@ struct PositionHash {
         return value;
     }
 };
+// Position groups are assigned in first-occurrence order. A contiguous
+// index keeps the temporary welding and tangent tables in contiguous storage.
+class PositionIndex {
+    std::vector<std::array<std::uint32_t,3>> keys;
+    std::vector<std::size_t> slots;
+    std::size_t empty;
+public:
+    explicit PositionIndex(std::size_t count):empty(count) {
+        std::size_t capacity=1u;
+        while(capacity<count*2u) capacity*=2u;
+        slots.resize(capacity,empty);keys.reserve(count);
+    }
+    std::size_t index(Vec3 position) {
+        const auto key=positionKey(position);
+        const auto mask=slots.size()-1u;
+        std::uint64_t hash=PositionHash{}(key);
+        hash^=hash>>30u;hash*=0xbf58476d1ce4e5b9ull;
+        hash^=hash>>27u;hash*=0x94d049bb133111ebull;
+        hash^=hash>>31u;
+        auto slot=static_cast<std::size_t>(hash)&mask;
+        while(slots[slot]!=empty && keys[slots[slot]]!=key) slot=(slot+1u)&mask;
+        if(slots[slot]==empty) {
+            slots[slot]=keys.size();keys.push_back(key);
+        }
+        return slots[slot];
+    }
+    std::size_t size() const {return keys.size();}
+};
 bool same(const GeneratedVertex& a,const GeneratedVertex& b,bool dangly) {
     if(!same(a.position,b.position) || !same(a.normal,b.normal) || !same(a.color,b.color) ||
        a.alpha!=b.alpha || !same(a.cpuPosition,b.cpuPosition) ||
@@ -545,12 +574,12 @@ std::vector<GeneratedVertex> generateVertices(RawNode& raw,Mesh& mesh,
     const auto noVertex=raw.faces.size()*3u;
     std::vector<GeneratedVertex> vertices;
     vertices.reserve(noVertex);
-    std::unordered_map<std::array<std::uint32_t,3>,std::size_t,PositionHash> positions;
-    positions.reserve(raw.vertices.size());
-    std::vector<std::size_t*> sourcePositions;
+    PositionIndex positions(raw.vertices.size());
+    std::vector<std::size_t> sourcePositions;
     sourcePositions.reserve(raw.vertices.size());
     for(const auto position:raw.vertices)
-        sourcePositions.push_back(&positions.try_emplace(positionKey(position),noVertex).first->second);
+        sourcePositions.push_back(positions.index(position));
+    std::vector<std::size_t> firstAtPosition(positions.size(),noVertex);
     mesh.faces.resize(raw.faces.size());
     raw.tangentFaceSources.resize(raw.faces.size());
     const bool dangly=raw.node.flags==0x121u;
@@ -573,7 +602,7 @@ std::vector<GeneratedVertex> generateVertices(RawNode& raw,Mesh& mesh,
                 if(!raw.texcoords[channel].empty())
                     vertex.texcoords[channel]=raw.texcoords[channel].at(raw.faces[i].texcoords[channel][corner]);
             if(dangly) vertex.constraint=raw.constraints.at(vertex.source);
-            auto& first=*sourcePositions[vertex.source];
+            auto& first=firstAtPosition[sourcePositions[vertex.source]];
             const auto matches=[&](std::size_t index){return same(vertices[index],vertex,dangly) &&
                     (!mesh.explicitNormals || vertices[index].normalSource==vertex.normalSource) &&
                     (!skin || (raw.skinData?
@@ -1176,15 +1205,6 @@ void buildMesh(Model& model,RawNode& raw,std::size_t nodeIndex,
     }
 }
 
-Vec3 tangentBasisNormal(Vec3 bitangent,Vec3 tangent,Vec3) {
-    // Subtract the products before rounding. Collapsed UV derivatives can
-    // be almost parallel, so separately rounded products lose the basis axis.
-    return {
-        static_cast<float>(static_cast<double>(bitangent.y)*tangent.z-static_cast<double>(bitangent.z)*tangent.y),
-        static_cast<float>(static_cast<double>(bitangent.z)*tangent.x-static_cast<double>(bitangent.x)*tangent.z),
-        static_cast<float>(static_cast<double>(bitangent.x)*tangent.y-static_cast<double>(bitangent.y)*tangent.x)};
-}
-
 std::array<Vec3,2> normalPositionFaceProducts(const std::array<Vec3,3>& positions,
         const std::array<std::array<double,3>,3>& precise) {
     // Retain rounded edges and add only authored sub-float position residuals.
@@ -1209,25 +1229,6 @@ Vec3 normalPositionFaceCross(const std::array<Vec3,3>& positions,
         const std::array<std::array<double,3>,3>& precise) {
     const auto products=normalPositionFaceProducts(positions,precise);
     return {products[0].x-products[1].x,products[0].y-products[1].y,products[0].z-products[1].z};
-}
-
-Vec3 tangentUvDerivative(Vec3 p,Vec3 q,const std::array<Vec2,3>& uv,
-        const std::array<std::array<double,2>,3>& precise,std::size_t component) {
-    const float a=component?uv[0].y:uv[0].x;
-    const float b=component?uv[1].y:uv[1].x;
-    const float c=component?uv[2].y:uv[2].x;
-    const float firstBase=b-a,secondBase=c-a;
-    // Retain the rounded coefficients and add only authored sub-float UV residuals.
-    const double firstResidual=(precise[1][component]-b)-(precise[0][component]-a);
-    const double secondResidual=(precise[2][component]-c)-(precise[0][component]-a);
-    const double first=firstResidual==0.0?static_cast<double>(firstBase):
-        static_cast<double>(firstBase)+firstResidual;
-    const double second=secondResidual==0.0?static_cast<double>(secondBase):
-        static_cast<double>(secondBase)+secondResidual;
-    return {
-        static_cast<float>(q.x*first)-static_cast<float>(p.x*second),
-        static_cast<float>(q.y*first)-static_cast<float>(p.y*second),
-        static_cast<float>(q.z*first)-static_cast<float>(p.z*second)};
 }
 
 std::vector<TangentComponent> singularTangentComponents(const std::vector<TangentFace>& faces,
@@ -1255,8 +1256,19 @@ std::vector<TangentComponent> singularTangentComponents(const std::vector<Tangen
             return result;
         }
     };
-    std::unordered_map<Edge,std::vector<std::size_t>,EdgeHash> edges;
+    const auto end=faces.size()*3u;
+    struct Incident {std::size_t face,next;};
+    struct EdgeFaces {std::size_t first,last;};
+    std::vector<Incident> incident;
+    incident.reserve(end);
+    std::pmr::monotonic_buffer_resource edgeMemory;
+    std::pmr::unordered_map<Edge,EdgeFaces,EdgeHash> edges{&edgeMemory};
     edges.reserve(3u*static_cast<std::size_t>(std::count(singular.begin(),singular.end(),true)));
+    const auto append=[&](EdgeFaces& list,std::size_t face) {
+        const auto next=incident.size();
+        incident.push_back({face,end});
+        incident[list.last].next=next;list.last=next;
+    };
     // Only edges touching singular faces participate in a component or its
     // boundary. Index those first, then attach their nonsingular neighbors.
     const auto visitEdges=[&](std::size_t i,const auto& visit) {
@@ -1274,11 +1286,16 @@ std::vector<TangentComponent> singularTangentComponents(const std::vector<Tangen
         }
     };
     for(std::size_t i=0;i<faces.size();++i)
-        if(singular[i]) visitEdges(i,[&](const Edge& edge){edges[edge].push_back(i);});
+        if(singular[i]) visitEdges(i,[&](const Edge& edge) {
+            const auto next=incident.size();
+            const auto entry=edges.try_emplace(edge,EdgeFaces{next,next});
+            if(entry.second) incident.push_back({i,end});
+            else append(entry.first->second,i);
+        });
     for(std::size_t i=0;i<faces.size();++i)
         if(!singular[i]) visitEdges(i,[&](const Edge& edge) {
             const auto found=edges.find(edge);
-            if(found!=edges.end()) found->second.push_back(i);
+            if(found!=edges.end()) append(found->second,i);
         });
     std::vector<std::size_t> parents(faces.size());
     for(std::size_t i=0;i<faces.size();++i) parents[i]=i;
@@ -1289,7 +1306,8 @@ std::vector<TangentComponent> singularTangentComponents(const std::vector<Tangen
     for(const auto& entry:edges) {
         job.check();
         auto first=faces.size();
-        for(const auto face:entry.second) if(singular[face]) {
+        for(auto at=entry.second.first;at!=end;at=incident[at].next) if(singular[incident[at].face]) {
+            const auto face=incident[at].face;
             if(first==faces.size()) first=face;
             else parents[root(face)]=root(first);
         }
@@ -1298,10 +1316,12 @@ std::vector<TangentComponent> singularTangentComponents(const std::vector<Tangen
     for(std::size_t i=0;i<faces.size();++i) if(singular[i]) components[root(i)].push_back(i);
     for(const auto& entry:edges) {
         job.check();
-        const auto& incident=entry.second;
-        const auto first=std::find_if(incident.begin(),incident.end(),[&](std::size_t face){return singular[face];});
-        if(first!=incident.end())
-            for(const auto face:incident) if(!singular[face]) boundaries[root(*first)].push_back(face);
+        // Singular faces create every edge list before its boundary readers.
+        const auto owner=root(incident[entry.second.first].face);
+        for(auto at=entry.second.first;at!=end;at=incident[at].next) {
+            const auto face=incident[at].face;
+            if(!singular[face]) boundaries[owner].push_back(face);
+        }
     }
     std::vector<TangentComponent> result;
     for(std::size_t component=0;component<components.size();++component) {
@@ -1361,7 +1381,6 @@ void orientSingularTangentComponents(const std::vector<TangentFace>& faces,
 
 TangentBasisTopology prepareTangentBasis(const Mesh& mesh,const neoshared::bif::JobControl& job) {
     const auto& source=*mesh.asciiTangentSource;
-    TangentBasisTopology result;
     std::vector<TangentFace> faces;
     faces.reserve(mesh.faces.size());
     for(const auto& face:mesh.faces) {
@@ -1374,12 +1393,17 @@ TangentBasisTopology prepareTangentBasis(const Mesh& mesh,const neoshared::bif::
         }
         faces.push_back(value);
     }
-    result.singular=singularTangentComponents(faces,job);
-    std::unordered_map<std::array<std::uint32_t,3>,std::size_t,PositionHash> positions;
-    positions.reserve(source.generatedPositions.size());
+    return prepareTangentBasis(mesh,singularTangentComponents(faces,job));
+}
+
+TangentBasisTopology prepareTangentBasis(const Mesh& mesh,std::vector<TangentComponent> singular) {
+    const auto& source=*mesh.asciiTangentSource;
+    TangentBasisTopology result;
+    result.singular=std::move(singular);
+    PositionIndex positions(source.generatedPositions.size());
     result.vertexPositions.reserve(source.generatedPositions.size());
     for(const auto position:source.generatedPositions)
-        result.vertexPositions.push_back(positions.emplace(positionKey(position),positions.size()).first->second);
+        result.vertexPositions.push_back(positions.index(position));
     result.offsets.resize(positions.size()+1u);
     for(const auto& face:mesh.faces)
         for(const auto index:face.indices)

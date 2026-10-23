@@ -402,6 +402,174 @@ PreciseUvPool preciseUvPool(const Mesh& mesh,const MeshReconstruction& plan) {
     return result;
 }
 
+ascii::RawNode geometrySource(const Mesh& mesh,const Model& source,const MeshReconstruction& plan,
+                              bool smooth,bool advanced) {
+    const auto precise=preciseUvPool(mesh,plan);
+    ascii::RawNode raw;
+    raw.vertices.reserve(plan.sourcePositions.size());
+    raw.faces.reserve(plan.faceOrder.size());
+    raw.normals.reserve(plan.vertices().size());
+    raw.skinChannels.reserve(plan.topology.sourceVertices.size());
+    for(std::size_t channel=0;channel<4u;++channel)
+        if(mesh.mdxBitmap&(2u<<channel)) raw.texcoords[channel].reserve(plan.vertices().size());
+    raw.node=source.nodes[mesh.nodeIndex];
+    if(!plan.preciseSourcePositions.empty()) {
+        raw.normalPositionPrecision=64u;
+        raw.normalPositions64=plan.preciseSourcePositions;
+    }
+    const auto* animation=raw.node.animmesh?&*raw.node.animmesh:nullptr;
+    const bool colors=mesh.hasVertexColors || (mesh.enginePrelightInput && (mesh.mdxBitmap&0x40u));
+    const auto& skin=*plan.skinChannels;
+    if(mesh.skinned) raw.skinData.emplace();
+    if(advanced && mesh.cpuPositions) raw.cpuPositions=*mesh.cpuPositions;
+    if(advanced && (mesh.mdxBitmap&0x80u))
+        for(const auto& vertex:plan.vertices()) raw.tangentBases.push_back(vertex.tangentBasis);
+    for(std::size_t source=0;source<plan.topology.sourceVertices.size();++source) {
+        const auto vertex=plan.topology.sourceVertices[source];
+        const auto& value=plan.vertices()[vertex];
+        raw.vertices.push_back(plan.sourcePositions[source]);
+        if(animation && plan.hasNormals) raw.normals.push_back(value.normal);
+        if(colors) {
+            if(advanced) raw.packedColors.push_back(value.color);
+            else raw.colors.push_back({float(value.color[0])/255.0f,
+                float(value.color[1])/255.0f,float(value.color[2])/255.0f});
+        }
+        if(mesh.skinned) raw.skinChannels.push_back(skin.at(vertex));
+        if(mesh.dangly) raw.constraints.push_back(mesh.dangly->constraints.at(vertex));
+        if(animation && !animation->staticTangents.empty())
+            raw.animTangents.push_back(animation->staticTangents.at(vertex));
+    }
+    if(plan.explicitNormals)
+        for(const auto& vertex:plan.vertices()) raw.normals.push_back(vertex.normal);
+    for(std::size_t channel=0;channel<4u;++channel)
+        if(mesh.mdxBitmap&(2u<<channel))
+            for(const auto& vertex:plan.vertices()) {
+                const auto value=uv(vertex,channel);
+                raw.texcoords[channel].push_back({value.x,value.y,0.0f});
+            }
+    if(!precise.values.empty()) {
+        raw.tangentUvPrecision=64u;
+        raw.tangentTexcoords64=precise.values;
+        raw.texcoords[0].clear();
+        for(const auto& value:precise.values)
+            raw.texcoords[0].push_back({static_cast<float>(value[0]),static_cast<float>(value[1]),0.0f});
+    }
+    for(const auto face:plan.faceOrder) {
+        ascii::RawFace value;
+        for(std::size_t corner=0;corner<3u;++corner)
+            value.vertices[corner]=plan.topology.sourceFaces[face][plan.sourceCorner(face,corner)];
+        value.smoothing=smooth && !animation && plan.hasNormals && !mesh.asciiNormalPositionSource?1u:plan.smoothing.masks[face];
+        value.material=mesh.faces[face].surfaceMaterial;
+        for(auto& channel:value.texcoords)
+            for(std::size_t corner=0;corner<3u;++corner)
+                channel[corner]=static_cast<std::uint32_t>(
+                    mesh.faces[face].indices[plan.sourceCorner(face,corner)]);
+        if(plan.explicitNormals) raw.normalIndices.push_back(value.texcoords[0]);
+        if(advanced && mesh.cpuPositions) raw.cpuIndices.push_back(value.texcoords[0]);
+        if(advanced && (mesh.mdxBitmap&0x80u)) raw.tangentIndices.push_back(value.texcoords[0]);
+        // Match the emitted texindices arrays: lightmap UVs keep their
+        // original rows when primary-UV precision adds separate entries.
+        for(std::size_t channel=1u;channel<4u;++channel)
+            if(mesh.mdxBitmap&(2u<<channel)) {
+                const auto& indices=value.texcoords[channel];
+                raw.textureIndices[channel-1u].push_back({static_cast<float>(indices[0]),
+                    static_cast<float>(indices[1]),static_cast<float>(indices[2])});
+            }
+        if(!precise.values.empty())
+            for(std::size_t corner=0;corner<3u;++corner)
+                value.texcoords[0][corner]=precise.indices[face][plan.sourceCorner(face,corner)];
+        raw.faces.push_back(value);
+    }
+    if(animation) {
+        raw.samplePeriod=animation->samplePeriod;
+        for(std::int32_t frame=0;frame<animation->positionSampleCount;++frame)
+            for(const auto vertex:plan.topology.sourceVertices)
+                raw.animatedVertices.push_back(animation->positionSamples.at(
+                    vertex*animation->positionSampleCount+frame));
+        for(std::int32_t frame=0;frame<animation->texcoordSampleCount;++frame)
+            for(std::size_t vertex=0;vertex<plan.vertices().size();++vertex) {
+                const auto value=animation->texcoordSamples.at(vertex*animation->texcoordSampleCount+frame);
+                raw.animatedTexcoords.push_back({value.x,value.y,0.0f});
+            }
+    }
+    return raw;
+}
+
+// Cyclic searches change face order and corner starts. Keep their authored
+// vertex, material and precise-UV pools while rearranging the face inputs.
+struct CyclicGeometry {
+    ascii::RawNode source,raw;
+    std::map<std::vector<std::uint8_t>,std::vector<ascii::TangentComponent>> components;
+    CyclicGeometry(const Mesh& mesh,const Model& model,MeshReconstruction plan,bool advanced) {
+        std::iota(plan.faceOrder.begin(),plan.faceOrder.end(),0u);
+        std::fill(plan.cornerRotations.begin(),plan.cornerRotations.end(),0u);
+        source=geometrySource(mesh,model,plan,false,advanced);
+        raw=source;
+    }
+    void order(const MeshReconstruction& plan) {
+        raw.normals=source.normals;
+        for(std::size_t channel=0;channel<3u;++channel)
+            raw.textureIndices[channel].resize(source.textureIndices[channel].size());
+        for(std::size_t output=0;output<plan.faceOrder.size();++output) {
+            const auto face=plan.faceOrder[output];
+            auto& target=raw.faces[output];target=source.faces[face];
+            for(std::size_t corner=0;corner<3u;++corner) {
+                const auto from=plan.sourceCorner(face,corner);
+                target.vertices[corner]=source.faces[face].vertices[from];
+                for(std::size_t channel=0;channel<4u;++channel)
+                    target.texcoords[channel][corner]=source.faces[face].texcoords[channel][from];
+                if(!source.normalIndices.empty()) raw.normalIndices[output][corner]=source.normalIndices[face][from];
+                if(!source.cpuIndices.empty()) raw.cpuIndices[output][corner]=source.cpuIndices[face][from];
+                if(!source.tangentIndices.empty()) raw.tangentIndices[output][corner]=source.tangentIndices[face][from];
+            }
+            for(std::size_t channel=0;channel<3u;++channel) if(!source.textureIndices[channel].empty()) {
+                const auto value=source.textureIndices[channel][face];
+                const std::array<float,3> indices{value.x,value.y,value.z};
+                raw.textureIndices[channel][output]={indices[plan.sourceCorner(face,0u)],
+                    indices[plan.sourceCorner(face,1u)],indices[plan.sourceCorner(face,2u)]};
+            }
+        }
+    }
+    ascii::TangentBasisTopology tangentTopology(const Mesh& mesh,const MeshReconstruction& plan,
+                                                const neoshared::bif::JobControl& job) {
+        const auto& tangent=*mesh.asciiTangentSource;
+        std::vector<std::size_t> authored(mesh.faces.size()),generated(plan.faceOrder.size());
+        std::vector<std::uint8_t> state(plan.faceOrder.size());
+        for(std::size_t face=0;face<mesh.faces.size();++face) {
+            job.check();
+            const auto original=plan.faceOrder[tangent.authoredFaceIndices[face]];
+            authored[face]=original;generated[original]=face;
+            const auto& indices=mesh.faces[face].indices;
+            const auto a=tangent.generatedTexcoords[indices[0]],b=tangent.generatedTexcoords[indices[1]],
+                c=tangent.generatedTexcoords[indices[2]];
+            const float pu=b.x-a.x,qu=c.x-a.x,pv=b.y-a.y,qv=c.y-a.y;
+            state[original]=pu*qv-pv*qu==0.0f?2u:1u;
+        }
+        const auto found=components.find(state);
+        if(found==components.end()) {
+            auto topology=ascii::prepareTangentBasis(mesh,job);
+            auto retained=topology.singular;
+            for(auto& component:retained) {
+                for(auto& face:component.faces) face=authored[face];
+                for(auto& face:component.boundary) face=authored[face];
+            }
+            components.emplace(std::move(state),std::move(retained));
+            return topology;
+        }
+        // Connectivity depends on retained faces and their rounded UV rank.
+        // Reorder each disjoint component's members so its reference tangent
+        // and boundary traversal retain the current face order exactly.
+        auto singular=found->second;
+        for(auto& component:singular) {
+            for(auto& face:component.faces) face=generated[face];
+            for(auto& face:component.boundary) face=generated[face];
+            std::sort(component.faces.begin(),component.faces.end());
+            std::sort(component.boundary.begin(),component.boundary.end());
+        }
+        return ascii::prepareTangentBasis(mesh,std::move(singular));
+    }
+};
+
 CornerRows generateGeometry(Model& rebuilt,const Model& source,
                            const std::map<const Mesh*,MeshReconstruction>& plans,
                            bool smooth,bool advanced,const neoshared::bif::JobControl& job,
@@ -414,95 +582,8 @@ CornerRows generateGeometry(Model& rebuilt,const Model& source,
         const auto found=plans.find(&mesh);
         if(found==plans.end()) continue; // Saber geometry has its own producer.
         const auto& plan=found->second;
-        const auto precise=preciseUvPool(mesh,plan);
-        ascii::RawNode raw;
-        raw.vertices.reserve(plan.sourcePositions.size());
-        raw.faces.reserve(plan.faceOrder.size());
-        raw.normals.reserve(plan.vertices().size());
-        raw.skinChannels.reserve(plan.topology.sourceVertices.size());
-        for(std::size_t channel=0;channel<4u;++channel)
-            if(mesh.mdxBitmap&(2u<<channel)) raw.texcoords[channel].reserve(plan.vertices().size());
+        auto raw=geometrySource(mesh,source,plan,smooth,advanced);
         rebuilt.meshes[index].explicitNormals=plan.explicitNormals;
-        raw.node=source.nodes[mesh.nodeIndex];
-        if(!plan.preciseSourcePositions.empty()) {
-            raw.normalPositionPrecision=64u;
-            raw.normalPositions64=plan.preciseSourcePositions;
-        }
-        const auto* animation=raw.node.animmesh?&*raw.node.animmesh:nullptr;
-        const bool colors=mesh.hasVertexColors || (mesh.enginePrelightInput && (mesh.mdxBitmap&0x40u));
-        const auto& skin=*plan.skinChannels;
-        if(mesh.skinned) raw.skinData.emplace();
-        if(advanced && mesh.cpuPositions) raw.cpuPositions=*mesh.cpuPositions;
-        if(advanced && (mesh.mdxBitmap&0x80u))
-            for(const auto& vertex:plan.vertices()) raw.tangentBases.push_back(vertex.tangentBasis);
-        for(std::size_t source=0;source<plan.topology.sourceVertices.size();++source) {
-            const auto vertex=plan.topology.sourceVertices[source];
-            const auto& value=plan.vertices()[vertex];
-            raw.vertices.push_back(plan.sourcePositions[source]);
-            if(animation && plan.hasNormals) raw.normals.push_back(value.normal);
-            if(colors) {
-                if(advanced) raw.packedColors.push_back(value.color);
-                else raw.colors.push_back({float(value.color[0])/255.0f,
-                    float(value.color[1])/255.0f,float(value.color[2])/255.0f});
-            }
-            if(mesh.skinned) raw.skinChannels.push_back(skin.at(vertex));
-            if(mesh.dangly) raw.constraints.push_back(mesh.dangly->constraints.at(vertex));
-            if(animation && !animation->staticTangents.empty())
-                raw.animTangents.push_back(animation->staticTangents.at(vertex));
-        }
-        if(plan.explicitNormals)
-            for(const auto& vertex:plan.vertices()) raw.normals.push_back(vertex.normal);
-        for(std::size_t channel=0;channel<4u;++channel)
-            if(mesh.mdxBitmap&(2u<<channel))
-                for(const auto& vertex:plan.vertices()) {
-                    const auto value=uv(vertex,channel);
-                    raw.texcoords[channel].push_back({value.x,value.y,0.0f});
-                }
-        if(!precise.values.empty()) {
-            raw.tangentUvPrecision=64u;
-            raw.tangentTexcoords64=precise.values;
-            raw.texcoords[0].clear();
-            for(const auto& value:precise.values)
-                raw.texcoords[0].push_back({static_cast<float>(value[0]),static_cast<float>(value[1]),0.0f});
-        }
-        for(const auto face:plan.faceOrder) {
-            ascii::RawFace value;
-            for(std::size_t corner=0;corner<3u;++corner)
-                value.vertices[corner]=plan.topology.sourceFaces[face][plan.sourceCorner(face,corner)];
-            value.smoothing=smooth && !animation && plan.hasNormals && !mesh.asciiNormalPositionSource?1u:plan.smoothing.masks[face];
-            value.material=mesh.faces[face].surfaceMaterial;
-            for(auto& channel:value.texcoords)
-                for(std::size_t corner=0;corner<3u;++corner)
-                    channel[corner]=static_cast<std::uint32_t>(
-                        mesh.faces[face].indices[plan.sourceCorner(face,corner)]);
-            if(plan.explicitNormals) raw.normalIndices.push_back(value.texcoords[0]);
-            if(advanced && mesh.cpuPositions) raw.cpuIndices.push_back(value.texcoords[0]);
-            if(advanced && (mesh.mdxBitmap&0x80u)) raw.tangentIndices.push_back(value.texcoords[0]);
-            // Match the emitted texindices arrays: lightmap UVs keep their
-            // original rows when primary-UV precision adds separate entries.
-            for(std::size_t channel=1u;channel<4u;++channel)
-                if(mesh.mdxBitmap&(2u<<channel)) {
-                    const auto& indices=value.texcoords[channel];
-                    raw.textureIndices[channel-1u].push_back({static_cast<float>(indices[0]),
-                        static_cast<float>(indices[1]),static_cast<float>(indices[2])});
-                }
-            if(!precise.values.empty())
-                for(std::size_t corner=0;corner<3u;++corner)
-                    value.texcoords[0][corner]=precise.indices[face][plan.sourceCorner(face,corner)];
-            raw.faces.push_back(value);
-        }
-        if(animation) {
-            raw.samplePeriod=animation->samplePeriod;
-            for(std::int32_t frame=0;frame<animation->positionSampleCount;++frame)
-                for(const auto vertex:plan.topology.sourceVertices)
-                    raw.animatedVertices.push_back(animation->positionSamples.at(
-                        vertex*animation->positionSampleCount+frame));
-            for(std::int32_t frame=0;frame<animation->texcoordSampleCount;++frame)
-                for(std::size_t vertex=0;vertex<plan.vertices().size();++vertex) {
-                    const auto value=animation->texcoordSamples.at(vertex*animation->texcoordSampleCount+frame);
-                    raw.animatedTexcoords.push_back({value.x,value.y,0.0f});
-                }
-        }
         const auto generated=ascii::generateAsciiMeshGeometry(rebuilt,raw,rebuilt.meshes[index],job);
         rows[index].resize(generated.size());
         for(std::size_t output=0;output<generated.size();++output) {
@@ -751,6 +832,9 @@ void reconstructCyclicCornerPass(Writer& out,const Model& model,const Model& fra
     for(const auto& entry:plans)
         faceNeighbors.emplace(entry.first,SourceFaceNeighbors(*entry.first,
             entry.second.topology.sourceFaces,entry.second.faceOrder));
+    std::map<const Mesh*,CyclicGeometry> geometrySources;
+    for(const auto& candidate:candidates)
+        geometrySources.try_emplace(candidate.first,*candidate.first,model,plans.at(candidate.first),out.advanced());
     for(const auto& group:groups) {
         bool improved;
         do {
@@ -776,12 +860,21 @@ void reconstructCyclicCornerPass(Writer& out,const Model& model,const Model& fra
                 previousMesh=mesh;
                 const auto index=static_cast<std::size_t>(mesh-model.meshes.data());
                 rebuilt.meshes[index]=frames.meshes[index];
-                auto changedRows=generateGeometry(rebuilt,model,changed,false,out.advanced(),out.job(),skinned && mesh->render);
-                generated[index]=std::move(changedRows[index]);
+                const auto& plan=changed.at(mesh);
+                auto& inputs=geometrySources.at(mesh);inputs.order(plan);
+                rebuilt.meshes[index].explicitNormals=plan.explicitNormals;
+                const auto changedRows=ascii::generateAsciiMeshGeometry(rebuilt,inputs.raw,rebuilt.meshes[index],out.job());
+                generated[index].resize(changedRows.size());
+                for(std::size_t output=0;output<changedRows.size();++output) {
+                    const auto face=plan.faceOrder[output];
+                    for(std::size_t corner=0;corner<3u;++corner)
+                        generated[index][face][plan.sourceCorner(face,corner)]=changedRows[output][corner];
+                }
+                if(skinned && mesh->render) initializeAsciiSkinSeamPools(rebuilt);
                 if(!preservesSkinChannels(model,generated,plans,mesh)) return;
                 auto errors=tangentErrors;
                 if((mesh->mdxBitmap&0x80u) && !mesh->dangly) {
-                    rebuildAsciiTangentBasis(rebuilt.meshes[index],out.job());
+                    ascii::buildTangentBasis(rebuilt.meshes[index],inputs.tangentTopology(rebuilt.meshes[index],plan,out.job()),out.job());
                     errors[index]=measureMeshTangents(rebuilt.meshes[index],*mesh,generated[index],retained);
                 }
                 double error{};
@@ -3118,16 +3211,30 @@ void reconstructTangentUvDomains(Writer& out,const Model& model,const Model& fra
                 cornersByRow[rows[index][face][corner]].push_back(targets.size());
                 targets.push_back(plan.vertices()[mesh.faces[face].indices[corner]].tangentBasis);
             }
+        std::vector<std::vector<std::vector<std::size_t>>> targetGroups(cornersByRow.size());
+        for(std::size_t row=0;row<cornersByRow.size();++row) {
+            std::map<std::array<std::uint32_t,9>,std::size_t> seen;
+            for(const auto corner:cornersByRow[row]) {
+                const auto& target=targets[corner];
+                const auto b=target.bitangent,t=target.tangent,n=target.normal;
+                const std::array<std::uint32_t,9> key{rawBits(b.x),rawBits(b.y),rawBits(b.z),
+                    rawBits(t.x),rawBits(t.y),rawBits(t.z),rawBits(n.x),rawBits(n.y),rawBits(n.z)};
+                const auto entry=seen.emplace(key,targetGroups[row].size());
+                if(entry.second) targetGroups[row].emplace_back();
+                targetGroups[row][entry.first->second].push_back(corner);
+            }
+        }
         std::vector<double> errors(targets.size());
         std::vector<std::size_t> opposed(targets.size());
         const auto scoreRow=[&](std::size_t row,const TangentBasis& value,
                                 auto& squared,auto& reversed) {
-            for(const auto corner:cornersByRow[row]) {
-                const auto& target=targets[corner];
-                squared[corner]=difference(value.bitangent,target.bitangent)+difference(value.tangent,target.tangent)+
+            for(const auto& group:targetGroups[row]) {
+                const auto& target=targets[group.front()];
+                const auto error=difference(value.bitangent,target.bitangent)+difference(value.tangent,target.tangent)+
                     difference(value.normal,target.normal);
-                reversed[corner]=opposite(value.bitangent,target.bitangent) || opposite(value.tangent,target.tangent) ||
+                const auto opposed=opposite(value.bitangent,target.bitangent) || opposite(value.tangent,target.tangent) ||
                     opposite(value.normal,target.normal);
+                for(const auto corner:group) {squared[corner]=error;reversed[corner]=opposed;}
             }
         };
         std::vector<std::vector<std::size_t>> contributors(existing.vertices.size()),affectedByFace(existing.faces.size());
@@ -3154,16 +3261,21 @@ void reconstructTangentUvDomains(Writer& out,const Model& model,const Model& fra
             TangentBasis basis;
             std::array<std::uint32_t,6> signature;
         };
-        const auto faceBasis=[&](std::size_t face) {
+        const auto faceDirection=[&](std::size_t face,std::size_t component) {
             const auto& indices=existing.faces[face].indices;
             const auto a=source->generatedPositions[indices[0]],b=source->generatedPositions[indices[1]],
                 c=source->generatedPositions[indices[2]];
             const Vec3 p{b.x-a.x,b.y-a.y,b.z-a.z},q{c.x-a.x,c.y-a.y,c.z-a.z};
             const std::array<Vec2,3> uv{source->generatedTexcoords[indices[0]],
                 source->generatedTexcoords[indices[1]],source->generatedTexcoords[indices[2]]};
+            return normalize(ascii::tangentUvDerivative(p,q,uv,source->faceTexcoords64[face],component));
+        };
+        std::vector<std::array<Vec3,2>> directions;
+        for(std::size_t face=0;face<existing.faces.size();++face)
+            directions.push_back({faceDirection(face,0u),faceDirection(face,1u)});
+        const auto faceBasis=[&](std::size_t face,const std::array<Vec3,2>& axes) {
             TangentBasis basis;
-            basis.bitangent=normalize(ascii::tangentUvDerivative(p,q,uv,source->faceTexcoords64[face],0u));
-            basis.tangent=normalize(ascii::tangentUvDerivative(p,q,uv,source->faceTexcoords64[face],1u));
+            basis.bitangent=axes[0];basis.tangent=axes[1];
             const std::array<std::uint32_t,6> signature{rawBits(basis.bitangent.x),rawBits(basis.bitangent.y),
                 rawBits(basis.bitangent.z),rawBits(basis.tangent.x),rawBits(basis.tangent.y),rawBits(basis.tangent.z)};
             basis.normal=ascii::tangentBasisNormal(basis.bitangent,basis.tangent,{});
@@ -3175,7 +3287,7 @@ void reconstructTangentUvDomains(Writer& out,const Model& model,const Model& fra
             return FaceBasis{basis,signature};
         };
         std::vector<TangentBasis> rawBases;
-        for(std::size_t face=0;face<existing.faces.size();++face) rawBases.push_back(faceBasis(face).basis);
+        for(std::size_t face=0;face<existing.faces.size();++face) rawBases.push_back(faceBasis(face,directions[face]).basis);
         auto bases=rawBases;
         ascii::orientSingularTangentComponents(topology.singular,bases,out.job());
         std::vector<std::size_t> writers(existing.vertices.size());
@@ -3258,16 +3370,18 @@ void reconstructTangentUvDomains(Writer& out,const Model& model,const Model& fra
             std::vector<TangentBasis> changedRaw,changedRows;
             std::vector<std::size_t> affectedRows;
             std::vector<double> previous;
-            const auto signature=[&] {
-                std::vector<std::uint32_t> key;
-                key.reserve(affected.size()*6u);
-                changedRaw.clear();
+            std::vector<std::array<Vec3,2>> changedDirections;
+            std::vector<std::uint32_t> signatureWords;
+            signatureWords.reserve(affected.size()*6u);
+            const auto signature=[&](std::size_t component)->const std::vector<std::uint32_t>& {
+                signatureWords.clear();changedRaw.clear();changedDirections.clear();
                 for(const auto face:affected) {
-                    const auto value=faceBasis(face);
-                    key.insert(key.end(),value.signature.begin(),value.signature.end());
-                    changedRaw.push_back(value.basis);
+                    auto axes=directions[face];axes[component]=faceDirection(face,component);
+                    const auto value=faceBasis(face,axes);
+                    signatureWords.insert(signatureWords.end(),value.signature.begin(),value.signature.end());
+                    changedRaw.push_back(value.basis);changedDirections.push_back(axes);
                 }
-                return key;
+                return signatureWords;
             };
             struct SignatureHash {
                 std::size_t operator()(const std::vector<std::uint32_t>& words) const {
@@ -3276,7 +3390,7 @@ void reconstructTangentUvDomains(Writer& out,const Model& model,const Model& fra
                     return hash;
                 }
             };
-            std::unordered_set<std::vector<std::uint32_t>,SignatureHash> evaluated{signature()};
+            std::unordered_set<std::vector<std::uint32_t>,SignatureHash> evaluated{signature(0u)};
             for(std::size_t component=0;component<2u;++component) {
                 if(search.component && component!=*search.component) continue;
                 std::vector<double> values;
@@ -3368,7 +3482,7 @@ void reconstructTangentUvDomains(Writer& out,const Model& model,const Model& fra
                         for(std::size_t i=0;i<corners.size();++i)
                             source->faceTexcoords64[corners[i].first][corners[i].second][component]=previous[i];
                     };
-                    if(!evaluated.insert(signature()).second) {restore();continue;}
+                    if(!evaluated.insert(signature(component)).second) {restore();continue;}
                     // UV edits leave topology and all unrelated face bases
                     // fixed. Propagate only changed contributions, including
                     // orientation changes across a singular component.
@@ -3426,7 +3540,9 @@ void reconstructTangentUvDomains(Writer& out,const Model& model,const Model& fra
                         }
                     }
                     std::size_t updated{};
-                    for(const auto face:affected) rawBases[face]=changedRaw[updated++];
+                    for(const auto face:affected) {
+                        rawBases[face]=changedRaw[updated];directions[face]=changedDirections[updated++];
+                    }
                     for(const auto face:changedFaces) bases[face]=proposedBases[face];
                     existing.asciiTangentSource=source;best=result;
                 }
@@ -3436,7 +3552,17 @@ void reconstructTangentUvDomains(Writer& out,const Model& model,const Model& fra
 }
 
 using TangentFit=std::array<std::array<double,2>,3>;
-using TangentFitCache=std::map<std::vector<std::uint32_t>,std::optional<TangentFit>>;
+struct DirectionHash {
+    std::size_t operator()(const std::array<std::uint32_t,3>& words) const {
+        std::size_t value=2166136261u;
+        for(const auto word:words) value=(value^word)*16777619u;
+        return value;
+    }
+};
+struct TangentFitCache {
+    std::map<std::vector<std::uint32_t>,std::optional<TangentFit>> fits;
+    std::map<std::vector<std::uint32_t>,std::vector<std::array<double,3>>> products;
+};
 
 // Recover UV residuals from the requested derivative directions, including
 // directions hidden by cancellation of several incident face contributions.
@@ -3520,11 +3646,41 @@ void reconstructTangentDirections(Writer& out,const Model& model,const Model& fr
             }
             for(const auto face:contributors) affectedByFace[face].push_back(row);
         }
+        // Authored corners can repeat the same packed shading target. Score
+        // each exact target once, then accumulate its original corner order.
+        std::vector<std::vector<TangentBasis>> distinctTargets(targets.size());
+        std::vector<std::vector<std::size_t>> targetOrder(targets.size());
+        for(std::size_t row=0;row<targets.size();++row) {
+            std::map<std::array<std::uint32_t,9>,std::size_t> seen;
+            for(const auto& target:targets[row]) {
+                const auto b=target.bitangent,t=target.tangent,n=target.normal;
+                const std::array<std::uint32_t,9> key{rawBits(b.x),rawBits(b.y),rawBits(b.z),
+                    rawBits(t.x),rawBits(t.y),rawBits(t.z),rawBits(n.x),rawBits(n.y),rawBits(n.z)};
+                const auto entry=seen.emplace(key,distinctTargets[row].size());
+                if(entry.second) distinctTargets[row].push_back(target);
+                targetOrder[row].push_back(entry.first->second);
+            }
+        }
+        std::vector<Vec3> rowBitangents(targets.size());
+        std::vector<std::vector<double>> bitangentErrors(targets.size()),targetErrors(targets.size());
+        const auto storeBitangent=[&](std::size_t row,Vec3 value) {
+            rowBitangents[row]=value;
+            for(std::size_t i=0;i<distinctTargets[row].size();++i)
+                bitangentErrors[row][i]=difference(value,distinctTargets[row][i].bitangent);
+        };
+        for(std::size_t row=0;row<targets.size();++row) {
+            bitangentErrors[row].resize(distinctTargets[row].size());
+            targetErrors[row].resize(distinctTargets[row].size());
+            storeBitangent(row,existing.vertices[row].tangentBasis.bitangent);
+        }
         const auto rowError=[&](std::size_t row,const TangentBasis& value) {
             if(independent && contributorsByRow[row].size()!=1u) return 0.0;
+            for(std::size_t i=0;i<distinctTargets[row].size();++i) {
+                const auto& target=distinctTargets[row][i];
+                targetErrors[row][i]=bitangentErrors[row][i]+difference(value.tangent,target.tangent)+difference(value.normal,target.normal);
+            }
             double error{};
-            for(const auto& target:targets[row]) error+=difference(value.bitangent,target.bitangent)+
-                difference(value.tangent,target.tangent)+difference(value.normal,target.normal);
+            for(const auto i:targetOrder[row]) error+=targetErrors[row][i];
             return error;
         };
         std::vector<double> errors(targets.size());
@@ -3555,9 +3711,6 @@ void reconstructTangentDirections(Writer& out,const Model& model,const Model& fr
         auto fittedRows=affectedByFace[fittedFace];
         std::sort(fittedRows.begin(),fittedRows.end());
         fittedRows.erase(std::unique(fittedRows.begin(),fittedRows.end()),fittedRows.end());
-        // Product cells depend only on the fixed packed UVs and position
-        // edges. Reuse their witnesses while the residual fit converges.
-        std::array<std::optional<std::vector<std::array<double,3>>>,2> productWitnesses;
         std::vector<std::uint32_t> cacheKey;
         std::vector<std::vector<std::uint32_t>> visitedFits;
         std::vector<TangentBasis> rawBases(existing.faces.size());
@@ -3641,9 +3794,9 @@ void reconstructTangentDirections(Writer& out,const Model& model,const Model& fr
                     cacheKey.push_back(static_cast<std::uint32_t>(targets[row].size()));
                     for(const auto& target:targets[row]) basisKey(target);
                 }
-                const auto cached=cache.find(cacheKey);
-                if(cached!=cache.end()) {
-                    for(auto& key:visitedFits) cache.emplace(std::move(key),cached->second);
+                const auto cached=cache.fits.find(cacheKey);
+                if(cached!=cache.fits.end()) {
+                    for(auto& key:visitedFits) cache.fits.emplace(std::move(key),cached->second);
                     if(cached->second) retain(*cached->second);
                     return;
                 }
@@ -3736,7 +3889,7 @@ void reconstructTangentDirections(Writer& out,const Model& model,const Model& fr
                 const auto a=source->generatedPositions[ids[0]],b=source->generatedPositions[ids[1]],c=source->generatedPositions[ids[2]];
                 const Vec3 p{b.x-a.x,b.y-a.y,b.z-a.z},q{c.x-a.x,c.y-a.y,c.z-a.z};
                 for(std::size_t axis=0;axis<2u;++axis) {
-                    std::set<std::array<std::uint32_t,3>> seen;
+                    std::unordered_set<std::array<std::uint32_t,3>,DirectionHash> seen;
                     const auto remember=[&](Coordinates values) {
                         auto precise=source->faceTexcoords64[face];
                         for(std::size_t c=0;c<3u;++c) {
@@ -3745,9 +3898,10 @@ void reconstructTangentDirections(Writer& out,const Model& model,const Model& fr
                             precise[c][axis]=values[c];
                         }
                         const auto value=normalize(derivative(face,precise,axis));
-                        const auto rounded=normalize(value);
-                        const Vec3 reverse{-rounded.x,-rounded.y,-rounded.z};
-                        if(!faceTarget && !mesh.render) for(const auto row:affectedByFace[face])
+                        if(!faceTarget && !mesh.render) {
+                            const auto rounded=normalize(value);
+                            const Vec3 reverse{-rounded.x,-rounded.y,-rounded.z};
+                            for(const auto row:affectedByFace[face])
                             if(contributorsByRow[row].size()==1u) for(const auto& target:targets[row]) {
                                 const auto wanted=axis?target.tangent:target.bitangent;
                                 const auto& current=existing.vertices[row].tangentBasis;
@@ -3757,6 +3911,7 @@ void reconstructTangentDirections(Writer& out,const Model& model,const Model& fr
                                     difference(rounded,wanted);
                                 if(error>bound) return;
                             }
+                        }
                         if(seen.insert({bits(value.x),bits(value.y),bits(value.z)}).second) {
                             choices[axis].push_back(values);axes[axis].push_back(value);
                         }
@@ -3800,126 +3955,145 @@ void reconstructTangentDirections(Writer& out,const Model& model,const Model& fr
                                 lower[2]+(upper[2]-lower[2])*seed[2]});
                     }
                     if(!interior && (!mesh.render || faceTarget || source->faceSmoothing[face]==0u) && low[1]==low[2] && low[0]!=low[1]) {
-                        if(productWitnesses[axis]) {
-                            for(const auto& witness:*productWitnesses[axis]) remember(witness);
+                        // Rounded product cells depend on packed edge/UV
+                        // inputs and, for hidden meshes, their directional
+                        // limits. Reuse the exact witnesses across face fits.
+                        const bool limited=!faceTarget && !mesh.render;
+                        std::vector<std::uint32_t> productKey{static_cast<std::uint32_t>(axis),limited?1u:0u,
+                            rawBits(p.x),rawBits(p.y),rawBits(p.z),rawBits(q.x),rawBits(q.y),rawBits(q.z)};
+                        for(const auto value:low) productKey.push_back(rawBits(static_cast<float>(value)));
+                        if(limited) for(const auto row:affectedByFace[face])
+                            if(contributorsByRow[row].size()==1u) for(const auto& target:targets[row]) {
+                                const auto wanted=axis?target.tangent:target.bitangent;
+                                const auto& current=existing.vertices[row].tangentBasis;
+                                const auto actual=axis?current.tangent:current.bitangent;
+                                const auto bound=std::max(1.0,difference(actual,wanted));
+                                std::uint64_t word;std::memcpy(&word,&bound,sizeof(word));
+                                productKey.insert(productKey.end(),{rawBits(wanted.x),rawBits(wanted.y),rawBits(wanted.z),
+                                    static_cast<std::uint32_t>(word),static_cast<std::uint32_t>(word>>32u)});
+                            }
+                        const auto entry=cache.products.try_emplace(std::move(productKey));
+                        auto& productWitnesses=entry.first->second;
+                        if(!entry.second) {
+                            for(const auto& witness:productWitnesses) remember(witness);
                         } else {
-                        if(mesh.render) productWitnesses[axis].emplace();
-                        const auto rememberWitness=[&](Coordinates witness) {
-                            if(mesh.render) productWitnesses[axis]->push_back(witness);
-                            remember(witness);
-                        };
-                        // Equal UV corners leave two independently rounded
-                        // products. Enumerate their cells together, retaining
-                        // a shared first-corner residual that realizes both.
-                        const float base=float(low[1])-float(low[0]);
-                        const auto coefficients=[&](Vec3 vector,std::size_t corner) {
-                            const double first=base+(lower[corner]-low[corner])-(upper[0]-low[0]);
-                            const double last=base+(upper[corner]-low[corner])-(lower[0]-low[0]);
-                            std::set<double> boundaries{first,last};
-                            for(std::size_t axis=0;axis<3u;++axis) {
-                                const auto product=[&](double value){return float(component(vector,axis)*value);};
-                                double cursor=first;
-                                const auto final=product(last);
-                                while(product(cursor)!=final) {
-                                    out.job().check();const auto value=product(cursor);
-                                    // Bracket the rounded product's midpoint
-                                    // locally, then retain the exact adjacent
-                                    // double witnesses used by the search.
-                                    const double midpoint=(double(value)+std::nextafter(value,final))*0.5;
-                                    const double seed=std::clamp(midpoint/component(vector,axis),cursor,last);
-                                    const bool within=product(seed)==value;
-                                    const double limit=within?last:cursor;
-                                    double near=seed,far=std::nextafter(seed,limit),step=std::abs(far-seed);
-                                    while((product(far)==value)==within && far!=limit) {
-                                        near=far;step*=2.0;
-                                        far=std::clamp(seed+std::copysign(step,limit-seed),cursor,last);
+                            const auto rememberWitness=[&](Coordinates witness) {
+                                productWitnesses.push_back(witness);remember(witness);
+                            };
+                            // Equal UV corners leave two independently rounded
+                            // products. Enumerate their cells together, retaining
+                            // a shared first-corner residual that realizes both.
+                            const float base=float(low[1])-float(low[0]);
+                            const auto coefficients=[&](Vec3 vector,std::size_t corner) {
+                                const double first=base+(lower[corner]-low[corner])-(upper[0]-low[0]);
+                                const double last=base+(upper[corner]-low[corner])-(lower[0]-low[0]);
+                                std::set<double> boundaries{first,last};
+                                for(std::size_t axis=0;axis<3u;++axis) {
+                                    const auto product=[&](double value){return float(component(vector,axis)*value);};
+                                    double cursor=first;
+                                    const auto final=product(last);
+                                    while(product(cursor)!=final) {
+                                        out.job().check();const auto value=product(cursor);
+                                        // Bracket the rounded product's midpoint
+                                        // locally, then retain the exact adjacent
+                                        // double witnesses used by the search.
+                                        const double midpoint=(double(value)+std::nextafter(value,final))*0.5;
+                                        const double seed=std::clamp(midpoint/component(vector,axis),cursor,last);
+                                        const bool within=product(seed)==value;
+                                        const double limit=within?last:cursor;
+                                        double near=seed,far=std::nextafter(seed,limit),step=std::abs(far-seed);
+                                        while((product(far)==value)==within && far!=limit) {
+                                            near=far;step*=2.0;
+                                            far=std::clamp(seed+std::copysign(step,limit-seed),cursor,last);
+                                        }
+                                        double inside=within?near:far,outside=within?far:near;
+                                        while(std::nextafter(inside,outside)!=outside) {
+                                            const double middle=inside+(outside-inside)*0.5;
+                                            if(product(middle)==value) inside=middle;else outside=middle;
+                                        }
+                                        boundaries.insert(inside);boundaries.insert(outside);cursor=outside;
                                     }
-                                    double inside=within?near:far,outside=within?far:near;
-                                    while(std::nextafter(inside,outside)!=outside) {
-                                        const double middle=inside+(outside-inside)*0.5;
-                                        if(product(middle)==value) inside=middle;else outside=middle;
-                                    }
-                                    boundaries.insert(inside);boundaries.insert(outside);cursor=outside;
                                 }
-                            }
-                            std::vector<std::pair<double,double>> result;
-                            std::map<std::array<std::uint32_t,3>,std::size_t> cells;
-                            const auto append=[&](double value) {
-                                const auto key=std::array<std::uint32_t,3>{bits(float(vector.x*value)),
-                                    bits(float(vector.y*value)),bits(float(vector.z*value))};
-                                const auto entry=cells.emplace(key,result.size());
-                                if(entry.second) result.push_back({value,value});
-                                else {auto& cell=result[entry.first->second];cell.first=std::min(cell.first,value);cell.second=std::max(cell.second,value);}
+                                std::vector<std::pair<double,double>> result;
+                                std::map<std::array<std::uint32_t,3>,std::size_t> cells;
+                                const auto append=[&](double value) {
+                                    const auto key=std::array<std::uint32_t,3>{bits(float(vector.x*value)),
+                                        bits(float(vector.y*value)),bits(float(vector.z*value))};
+                                    const auto entry=cells.emplace(key,result.size());
+                                    if(entry.second) result.push_back({value,value});
+                                    else {auto& cell=result[entry.first->second];cell.first=std::min(cell.first,value);cell.second=std::max(cell.second,value);}
+                                };
+                                auto previous=*boundaries.begin();append(previous);
+                                for(const auto value:boundaries) {append(previous+(value-previous)*0.5);append(value);previous=value;}
+                                return result;
                             };
-                            auto previous=*boundaries.begin();append(previous);
-                            for(const auto value:boundaries) {append(previous+(value-previous)*0.5);append(value);previous=value;}
-                            return result;
-                        };
-                        const auto first=coefficients(q,1u),second=coefficients(p,2u);
-                        // Prune product cells with the independent rounded-axis
-                        // limits before enumerating their joint UV residuals.
-                        struct ProductRange {std::size_t begin,end,left{},right{};Vec3 low,high;};
-                        const double residualError=8.0*std::numeric_limits<double>::epsilon()*
-                            std::max({std::abs(low[0]),std::abs(low[1]),std::abs(low[2])});
-                        const auto productBounds=[&](Vec3 vector,double begin,double end) {
-                            std::array<float,3> lo{},hi{};
-                            for(std::size_t i=0;i<3u;++i) {
-                                const auto a=float(component(vector,i)*(begin-residualError));
-                                const auto b=float(component(vector,i)*(end+residualError));
-                                lo[i]=std::min(a,b);hi[i]=std::max(a,b);
-                            }
-                            return std::make_pair(Vec3{lo[0],lo[1],lo[2]},Vec3{hi[0],hi[1],hi[2]});
-                        };
-                        std::vector<ProductRange> products;products.reserve(second.size()*2u);
-                        const auto build=[&](const auto& self,std::size_t begin,std::size_t end)->std::size_t {
-                            const auto id=products.size();const auto bounds=productBounds(p,second[begin].first,second[end-1u].second);
-                            products.push_back({begin,end,0u,0u,bounds.first,bounds.second});
-                            if(end-begin>1u) {
-                                const auto middle=begin+(end-begin)/2u;
-                                const auto left=self(self,begin,middle),right=self(self,middle,end);
-                                products[id].left=left;products[id].right=right;
-                            }
-                            return id;
-                        };
-                        build(build,0u,second.size());
-                        for(const auto& u:first) {
-                            const auto ub=productBounds(q,u.first,u.second);
-                            const auto visit=[&](const auto& self,std::size_t id)->void {
-                                const auto& node=products[id];
-                                auto bounds=normalizedBounds({ub.first.x-node.high.x,ub.first.y-node.high.y,ub.first.z-node.high.z},
-                                    {ub.second.x-node.low.x,ub.second.y-node.low.y,ub.second.z-node.low.z});
-                                bounds=normalizedBounds(bounds.first,bounds.second);
-                                if(!faceTarget && !mesh.render) for(const auto row:affectedByFace[face])
-                                    if(contributorsByRow[row].size()==1u) for(const auto& target:targets[row]) {
-                                        const auto wanted=axis?target.tangent:target.bitangent;
-                                        const auto& current=existing.vertices[row].tangentBasis;
-                                        const auto actual=axis?current.tangent:current.bitangent;
-                                        const Vec3 reverse{-wanted.x,-wanted.y,-wanted.z};
-                                        const auto error=axis?std::min(difference(nearest(wanted,bounds),wanted),
-                                            difference(nearest(reverse,bounds),reverse)):difference(nearest(wanted,bounds),wanted);
-                                        if(error>std::max(1.0,difference(actual,wanted))) return;
+                            const auto first=coefficients(q,1u),second=coefficients(p,2u);
+                            // Prune product cells with the independent rounded-axis
+                            // limits before enumerating their joint UV residuals.
+                            struct ProductRange {std::size_t begin,end,left{},right{};Vec3 low,high;};
+                            const double residualError=8.0*std::numeric_limits<double>::epsilon()*
+                                std::max({std::abs(low[0]),std::abs(low[1]),std::abs(low[2])});
+                            const auto productBounds=[&](Vec3 vector,double begin,double end) {
+                                std::array<float,3> lo{},hi{};
+                                for(std::size_t i=0;i<3u;++i) {
+                                    const auto a=float(component(vector,i)*(begin-residualError));
+                                    const auto b=float(component(vector,i)*(end+residualError));
+                                    lo[i]=std::min(a,b);hi[i]=std::max(a,b);
+                                }
+                                return std::make_pair(Vec3{lo[0],lo[1],lo[2]},Vec3{hi[0],hi[1],hi[2]});
+                            };
+                            std::vector<ProductRange> products;products.reserve(second.size()*2u);
+                            const auto build=[&](const auto& self,std::size_t begin,std::size_t end)->std::size_t {
+                                const auto id=products.size();const auto bounds=productBounds(p,second[begin].first,second[end-1u].second);
+                                products.push_back({begin,end,0u,0u,bounds.first,bounds.second});
+                                if(end-begin>1u) {
+                                    const auto middle=begin+(end-begin)/2u;
+                                    const auto left=self(self,begin,middle),right=self(self,middle,end);
+                                    products[id].left=left;products[id].right=right;
+                                }
+                                return id;
+                            };
+                            build(build,0u,second.size());
+                            for(const auto& u:first) {
+                                const auto ub=productBounds(q,u.first,u.second);
+                                const auto visit=[&](const auto& self,std::size_t id)->void {
+                                    const auto& node=products[id];
+                                    if(!faceTarget && !mesh.render) {
+                                        auto bounds=normalizedBounds({ub.first.x-node.high.x,ub.first.y-node.high.y,ub.first.z-node.high.z},
+                                            {ub.second.x-node.low.x,ub.second.y-node.low.y,ub.second.z-node.low.z});
+                                        bounds=normalizedBounds(bounds.first,bounds.second);
+                                        for(const auto row:affectedByFace[face])
+                                        if(contributorsByRow[row].size()==1u) for(const auto& target:targets[row]) {
+                                            const auto wanted=axis?target.tangent:target.bitangent;
+                                            const auto& current=existing.vertices[row].tangentBasis;
+                                            const auto actual=axis?current.tangent:current.bitangent;
+                                            const Vec3 reverse{-wanted.x,-wanted.y,-wanted.z};
+                                            const auto error=axis?std::min(difference(nearest(wanted,bounds),wanted),
+                                                difference(nearest(reverse,bounds),reverse)):difference(nearest(wanted,bounds),wanted);
+                                            if(error>std::max(1.0,difference(actual,wanted))) return;
+                                        }
                                     }
-                                if(node.end-node.begin>1u) {self(self,node.left);self(self,node.right);return;}
-                                const auto v=second[node.begin];
-                                const double left=std::max({lower[0]-low[0],lower[1]-low[1]-(u.second-base),lower[2]-low[2]-(v.second-base)});
-                                const double right=std::min({upper[0]-low[0],upper[1]-low[1]-(u.first-base),upper[2]-low[2]-(v.first-base)});
-                                if(left>right) return;
-                                const double origin=left+(right-left)*0.5;
-                                const double ul=std::max(u.first,base+(lower[1]-low[1])-origin);
-                                const double uh=std::min(u.second,base+(upper[1]-low[1])-origin);
-                                const double vl=std::max(v.first,base+(lower[2]-low[2])-origin);
-                                const double vh=std::min(v.second,base+(upper[2]-low[2])-origin);
-                                const double uc=ul+(uh-ul)*0.5,vc=vl+(vh-vl)*0.5;
-                                // Reassembling a residual can leave a tiny
-                                // cancellation remainder outside a zero UV's
-                                // float cell. Project the witness back into its
-                                // exact cells before evaluating its derivatives.
-                                rememberWitness({std::clamp(low[0]+origin,lower[0],upper[0]),
-                                    std::clamp(low[1]+origin+(uc-base),lower[1],upper[1]),
-                                    std::clamp(low[2]+origin+(vc-base),lower[2],upper[2])});
-                            };
-                            visit(visit,0u);
-                        }
+                                    if(node.end-node.begin>1u) {self(self,node.left);self(self,node.right);return;}
+                                    const auto v=second[node.begin];
+                                    const double left=std::max({lower[0]-low[0],lower[1]-low[1]-(u.second-base),lower[2]-low[2]-(v.second-base)});
+                                    const double right=std::min({upper[0]-low[0],upper[1]-low[1]-(u.first-base),upper[2]-low[2]-(v.first-base)});
+                                    if(left>right) return;
+                                    const double origin=left+(right-left)*0.5;
+                                    const double ul=std::max(u.first,base+(lower[1]-low[1])-origin);
+                                    const double uh=std::min(u.second,base+(upper[1]-low[1])-origin);
+                                    const double vl=std::max(v.first,base+(lower[2]-low[2])-origin);
+                                    const double vh=std::min(v.second,base+(upper[2]-low[2])-origin);
+                                    const double uc=ul+(uh-ul)*0.5,vc=vl+(vh-vl)*0.5;
+                                    // Reassembling a residual can leave a tiny
+                                    // cancellation remainder outside a zero UV's
+                                    // float cell. Project the witness back into its
+                                    // exact cells before evaluating its derivatives.
+                                    rememberWitness({std::clamp(low[0]+origin,lower[0],upper[0]),
+                                        std::clamp(low[1]+origin+(uc-base),lower[1],upper[1]),
+                                        std::clamp(low[2]+origin+(vc-base),lower[2],upper[2])});
+                                };
+                                visit(visit,0u);
+                            }
                         }
                     }
                     std::vector<Coordinates> origins{initial,low};
@@ -4010,7 +4184,74 @@ void reconstructTangentDirections(Writer& out,const Model& model,const Model& fr
                     return id;
                 };
                 range(range,0u,axes[1].size());
-                const auto cannotImprove=[&](Vec3 bitangent,const AxisRange& node) {
+                // Tangent bounds have only three orientation states. Their
+                // target losses are independent of the bitangent being fitted.
+                // A nonzero fitted normal leaves its singular component raw;
+                // unrelated components retain their established orientation.
+                std::vector<Vec3> boundTangents;
+                for(const auto& basis:bases) boundTangents.push_back(basis.tangent);
+                for(const auto f:reorientedFaces) boundTangents[f]=rawBases[f].tangent;
+                struct NormalTerm {Vec3 value;bool fitted;};
+                std::vector<std::size_t> boundRows;
+                std::vector<std::vector<NormalTerm>> normalSums;
+                std::map<std::vector<std::uint32_t>,std::size_t> normalSumIndices;
+                std::vector<std::pair<std::size_t,Vec3>> normalTargets;
+                std::vector<std::size_t> normalTargetOrder;
+                std::map<std::array<std::size_t,4>,std::size_t> normalTargetIndices;
+                std::size_t targetCount{};
+                for(const auto row:directRows) {
+                    if(independent && contributorsByRow[row].size()!=1u) continue;
+                    std::vector<NormalTerm> terms;
+                    std::vector<std::uint32_t> key;
+                    for(const auto f:contributorsByRow[row]) {
+                        const bool fitted=f==face;
+                        const auto value=fitted?Vec3{}:bases[f].normal;
+                        terms.push_back({value,fitted});
+                        key.insert(key.end(),{fitted?1u:0u,rawBits(value.x),rawBits(value.y),rawBits(value.z)});
+                    }
+                    const auto entry=normalSumIndices.emplace(std::move(key),normalSums.size());
+                    if(entry.second) normalSums.push_back(std::move(terms));
+                    boundRows.push_back(row);
+                    for(const auto& target:targets[row]) {
+                        const auto n=target.normal;
+                        const auto found=normalTargetIndices.emplace(std::array<std::size_t,4>{entry.first->second,
+                            rawBits(n.x),rawBits(n.y),rawBits(n.z)},normalTargets.size());
+                        if(found.second) normalTargets.push_back({entry.first->second,n});
+                        normalTargetOrder.push_back(found.first->second);
+                    }
+                    targetCount+=targets[row].size();
+                }
+                if(faceTarget) targetCount=1u;
+                std::vector<double> tangentLoss(ranges.size()*3u*targetCount);
+                std::vector<std::array<bool,3>> tangentReady(ranges.size());
+                const auto cacheTangent=[&](std::size_t id,std::size_t orientation) {
+                    if(tangentReady[id][orientation]) return;
+                    tangentReady[id][orientation]=true;
+                    auto low=ranges[id].low,high=ranges[id].high;
+                    if(orientation==1u) {
+                        const auto original=low;low={-high.x,-high.y,-high.z};high={-original.x,-original.y,-original.z};
+                    } else if(orientation==2u) {
+                        high={std::max(std::abs(low.x),std::abs(high.x)),std::max(std::abs(low.y),std::abs(high.y)),
+                            std::max(std::abs(low.z),std::abs(high.z))};
+                        low={-high.x,-high.y,-high.z};
+                    }
+                    auto at=(id*3u+orientation)*targetCount;
+                    if(faceTarget) tangentLoss[at]=difference(nearest(faceTarget->tangent,{low,high}),faceTarget->tangent);
+                    else for(const auto row:boundRows) {
+                        Vec3 tl{},th{};
+                        for(const auto f:contributorsByRow[row]) {
+                            tl=add(tl,f==face?low:boundTangents[f]);
+                            th=add(th,f==face?high:boundTangents[f]);
+                        }
+                        const auto tangent=normalizedBounds(tl,th);
+                        for(const auto& target:targets[row])
+                            tangentLoss[at++]=difference(nearest(target.tangent,tangent),target.tangent);
+                    }
+                };
+                std::vector<std::pair<Vec3,Vec3>> normalBounds(normalSums.size());
+                std::vector<double> normalLoss(normalTargets.size());
+                const auto cannotImprove=[&](Vec3 bitangent,std::size_t id) {
+                    const auto& node=ranges[id];
                     if(!faceTarget && (changesBoundary || same(rawBases[face].normal,Vec3{}))) return false;
                     if(fixedBitangentError>=directError) return true;
                     std::array<float,3> low{},high{};
@@ -4032,42 +4273,53 @@ void reconstructTangentDirections(Writer& out,const Model& model,const Model& fr
                         alignLow[i]=c*(c<0.0f?high[i]:low[i]);alignHigh[i]=c*(c<0.0f?low[i]:high[i]);
                     }
                     const float alignMin=(alignLow[0]+alignLow[1])+alignLow[2],alignMax=(alignHigh[0]+alignHigh[1])+alignHigh[2];
-                    auto tangentLow=node.low,tangentHigh=node.high;
-                    std::array<float,3> tl{},th{};
+                    const std::size_t orientation=alignMax<0.0f?1u:alignMin<0.0f?2u:0u;
                     for(std::size_t i=0;i<3u;++i) {
-                        tl[i]=component(tangentLow,i);th[i]=component(tangentHigh,i);
-                        if(alignMax<0.0f) {
+                        if(orientation==1u) {
                             const auto value=low[i];low[i]=-high[i];high[i]=-value;
-                            const auto t=tl[i];tl[i]=-th[i];th[i]=-t;
-                        } else if(alignMin<0.0f) {
+                        } else if(orientation==2u) {
                             const auto extent=std::max(std::abs(low[i]),std::abs(high[i]));low[i]=-extent;high[i]=extent;
-                            const auto t=std::max(std::abs(tl[i]),std::abs(th[i]));tl[i]=-t;th[i]=t;
                         }
                     }
-                    tangentLow={tl[0],tl[1],tl[2]};tangentHigh={th[0],th[1],th[2]};
                     const Vec3 normalLow{low[0],low[1],low[2]},normalHigh{high[0],high[1],high[2]};
-                    if(faceTarget) return fixedBitangentError+
-                        difference(nearest(faceTarget->tangent,{tangentLow,tangentHigh}),faceTarget->tangent)+
+                    cacheTangent(id,orientation);
+                    auto at=(id*3u+orientation)*targetCount;
+                    if(faceTarget) return fixedBitangentError+tangentLoss[at]+
                         difference(nearest(targetNormal,normalizedBounds(normalLow,normalHigh)),targetNormal)>=directError;
-                    double bound=fixedBitangentError;
-                    for(const auto row:directRows) {
-                        if(independent && contributorsByRow[row].size()!=1u) continue;
-                        Vec3 tl{},th{},nl{},nh{};
-                        for(const auto f:contributorsByRow[row]) {
-                            tl=add(tl,f==face?tangentLow:bases[f].tangent);
-                            th=add(th,f==face?tangentHigh:bases[f].tangent);
-                            nl=add(nl,f==face?normalLow:bases[f].normal);
-                            nh=add(nh,f==face?normalHigh:bases[f].normal);
+                    for(std::size_t sum=0;sum<normalSums.size();++sum) {
+                        Vec3 nl{},nh{};
+                        for(const auto& term:normalSums[sum]) {
+                            nl=add(nl,term.fitted?normalLow:term.value);
+                            nh=add(nh,term.fitted?normalHigh:term.value);
                         }
-                        const auto tangent=normalizedBounds(tl,th),normal=normalizedBounds(nl,nh);
-                        for(const auto& target:targets[row]) bound+=difference(nearest(target.tangent,tangent),target.tangent)+
-                            difference(nearest(target.normal,normal),target.normal);
+                        normalBounds[sum]=normalizedBounds(nl,nh);
                     }
+                    for(std::size_t i=0;i<normalTargets.size();++i) {
+                        const auto& target=normalTargets[i];
+                        normalLoss[i]=difference(nearest(target.second,normalBounds[target.first]),target.second);
+                    }
+                    double bound=fixedBitangentError;
+                    for(const auto i:normalTargetOrder) bound+=tangentLoss[at++]+normalLoss[i];
                     return bound>=directError;
                 };
                 std::vector<std::size_t> affected;
                 std::vector<TangentBasis> changed;
                 std::vector<double> changedErrors;
+                // Tangent orientation never changes a bitangent contribution.
+                // Evaluate each row once per U choice, keeping its per-target
+                // losses in the original row-error addition order.
+                for(std::size_t row=0;row<targets.size();++row) {
+                    Vec3 value{};
+                    for(const auto f:contributorsByRow[row]) value=add(value,bases[f].bitangent);
+                    storeBitangent(row,normalize(value));
+                }
+                const auto cacheBitangent=[&](Vec3 bitangent) {
+                    for(const auto row:directRows) {
+                        Vec3 value{};
+                        for(const auto f:contributorsByRow[row]) value=add(value,f==face?bitangent:bases[f].bitangent);
+                        storeBitangent(row,normalize(value));
+                    }
+                };
                 const auto considerCoordinates=[&](const Coordinates& u,const Coordinates& v,Vec3 bitangent,Vec3 tangent) {
                     out.job().check();
                     TangentBasis newRaw;newRaw.bitangent=bitangent;newRaw.tangent=tangent;
@@ -4111,14 +4363,13 @@ void reconstructTangentDirections(Writer& out,const Model& model,const Model& fr
                     };
                     changed.clear();changedErrors.clear();double before{},after{};
                     for(const auto row:affected) {
-                        TangentBasis value;
+                        TangentBasis value;value.bitangent=rowBitangents[row];
                         for(const auto f:contributorsByRow[row]) {
                             const auto& basis=contribution(f);
-                            value.bitangent=add(value.bitangent,basis.bitangent);
                             value.tangent=add(value.tangent,basis.tangent);
                             value.normal=add(value.normal,basis.normal);
                         }
-                        value.bitangent=normalize(value.bitangent);value.tangent=normalize(value.tangent);
+                        value.tangent=normalize(value.tangent);
                         value.normal=normalize(value.normal);value.valid=true;changed.push_back(value);
                         const auto error=rowError(row,value);changedErrors.push_back(error);
                         before+=errors[row];after+=error;
@@ -4153,14 +4404,12 @@ void reconstructTangentDirections(Writer& out,const Model& model,const Model& fr
                     return considerCoordinates(choices[0][ui],choices[1][vi],axes[0][ui],axes[1][vi]);
                 };
                 for(std::size_t ui=0;ui<choices[0].size();++ui) {
+                    cacheBitangent(axes[0][ui]);
                     fixedBitangentError=0.0;
                     if(faceTarget) fixedBitangentError=difference(axes[0][ui],faceTarget->bitangent);
                     else for(const auto row:directRows) {
                         if(independent && contributorsByRow[row].size()!=1u) continue;
-                        Vec3 value{};
-                        for(const auto f:contributorsByRow[row]) value=add(value,f==face?axes[0][ui]:bases[f].bitangent);
-                        value=normalize(value);
-                        for(const auto& target:targets[row]) fixedBitangentError+=difference(value,target.bitangent);
+                        for(const auto i:targetOrder[row]) fixedBitangentError+=bitangentErrors[row][i];
                     }
                     // Singular orientation can flip tangent contributions,
                     // but never bitangents. Their error alone bounds the full
@@ -4169,7 +4418,7 @@ void reconstructTangentDirections(Writer& out,const Model& model,const Model& fr
                     const auto visit=[&](const auto& self,std::size_t id)->void {
                         const auto& node=ranges[id];
                         if(node.end-node.begin==1u) considerPair(ui,axisOrder[node.begin]);
-                        else if(!cannotImprove(axes[0][ui],node)) {self(self,node.left);self(self,node.right);}
+                        else if(!cannotImprove(axes[0][ui],id)) {self(self,node.left);self(self,node.right);}
                     };
                     visit(visit,0u);
                 }
@@ -4193,8 +4442,9 @@ void reconstructTangentDirections(Writer& out,const Model& model,const Model& fr
                         if(!retained) break;
                         const Coordinates u{precise[0][0],precise[1][0],precise[2][0]},
                             v{precise[0][1],precise[1][1],precise[2][1]};
-                        considerCoordinates(u,v,normalize(derivative(face,precise,0u)),
-                            normalize(derivative(face,precise,1u)));
+                        const auto bitangent=normalize(derivative(face,precise,0u));
+                        cacheBitangent(bitangent);
+                        considerCoordinates(u,v,bitangent,normalize(derivative(face,precise,1u)));
                     }
                 }
             }
@@ -4202,7 +4452,7 @@ void reconstructTangentDirections(Writer& out,const Model& model,const Model& fr
         }
         const auto fitted=plan.preciseFaceTexcoords.empty()?std::nullopt:
             std::optional<TangentFit>{plan.preciseFaceTexcoords[selectedFace]};
-        for(auto& key:visitedFits) cache.emplace(std::move(key),fitted);
+        for(auto& key:visitedFits) cache.fits.emplace(std::move(key),fitted);
     }
 }
 
