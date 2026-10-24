@@ -291,6 +291,14 @@ void buildTangentBasis(Mesh& mesh,const TangentBasisTopology& topology,
 // authored face-corner rows before duplicate-index faces are removed.
 std::vector<std::array<std::int16_t,3>> generateAsciiMeshGeometry(
     Model& model, RawNode& raw, Mesh& mesh, const neoshared::bif::JobControl& job);
+// Cyclic searches retain corner attributes and normal contributor groups.
+struct CyclicMeshData;
+std::shared_ptr<const CyclicMeshData> prepareCyclicMesh(
+    RawNode raw,Mesh mesh,const neoshared::bif::JobControl& job);
+std::vector<std::array<std::int16_t,3>> generateCyclicMeshGeometry(
+    RawNode& raw,Mesh& mesh,const CyclicMeshData& data,
+    const std::vector<std::size_t>& faceOrder,const std::vector<std::uint8_t>& rotations,
+    const neoshared::bif::JobControl& job);
 void finalizeNodeTree(Model& model, std::vector<RawNode>& raw, Animation* animation);
 void buildSkin(Model& model, RawNode& raw, Mesh& mesh,
                const std::vector<std::size_t>& sources,

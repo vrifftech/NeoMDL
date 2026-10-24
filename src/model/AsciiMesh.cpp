@@ -12,6 +12,27 @@
 #include <unordered_map>
 
 namespace neomdl::model::ascii {
+struct GeneratedVertex {
+    Vec3 position,normal,color,cpuPosition;
+    std::uint8_t alpha{255u};
+    TangentBasis tangentBasis;
+    std::array<Vec3,4> texcoords{};
+    float constraint{};
+    std::size_t source{},normalSource{},previousAtPosition{};
+};
+struct CyclicMeshData {
+    std::vector<std::array<GeneratedVertex,3>> corners;
+    std::vector<std::array<std::size_t,3>> groups;
+    std::size_t groupCount{};
+    std::optional<EngineMeshBounds> bounds;
+    std::vector<std::array<NormalFaceCross,3>> crosses;
+    std::vector<std::array<std::size_t,3>> normalGroups;
+    struct NormalGroup {
+        mutable std::vector<std::size_t> faces,signature;
+        mutable Vec3 normal;
+    };
+    std::vector<NormalGroup> normals;
+};
 namespace {
 
 std::string arguments(const Line& line, std::size_t first=1u) {
@@ -307,14 +328,7 @@ std::vector<std::array<std::size_t,3>> processVertices(RawNode& raw,Mesh& mesh,
     return indices;
 }
 
-struct GeneratedVertex {
-    Vec3 position,normal,color,cpuPosition;
-    std::uint8_t alpha{255u};
-    TangentBasis tangentBasis;
-    std::array<Vec3,4> texcoords{};
-    float constraint{};
-    std::size_t source{},normalSource{},previousAtPosition{};
-};
+
 struct PositionHash {
     std::size_t operator()(const std::array<std::uint32_t,3>& key) const {
         std::size_t value{};
@@ -373,6 +387,19 @@ void authoredVertexData(const RawNode& raw,const Mesh& mesh,std::size_t face,std
     }
     if(!raw.tangentBases.empty() && mesh.asciiTangents.value_or(true))
         vertex.tangentBasis=raw.tangentBases.at(index(raw.tangentIndices));
+}
+
+GeneratedVertex cornerVertex(const RawNode& raw,const Mesh& mesh,std::size_t face,std::size_t corner) {
+    GeneratedVertex vertex;
+    vertex.source=raw.faces[face].vertices[corner];
+    vertex.position=raw.vertices.at(vertex.source);
+    vertex.color={1.0f,1.0f,1.0f};
+    authoredVertexData(raw,mesh,face,corner,vertex);
+    for(std::size_t channel=0;channel<4u;++channel)
+        if(!raw.texcoords[channel].empty())
+            vertex.texcoords[channel]=raw.texcoords[channel].at(raw.faces[face].texcoords[channel][corner]);
+    if(raw.node.flags==0x121u) vertex.constraint=raw.constraints.at(vertex.source);
+    return vertex;
 }
 
 // NWN:EE's active animmesh builder supplies the missing KOTOR ASCII producer.
@@ -564,6 +591,20 @@ std::vector<GeneratedVertex> generateAnimVertices(RawNode& raw,Mesh& mesh,
     return vertices;
 }
 
+void removeCollapsedFaces(const RawNode& raw,Mesh& mesh,std::vector<std::size_t>& faceSources) {
+    const bool dangly=raw.node.flags==0x121u,skin=raw.node.flags==0x61u;
+    // InternalGenVertices removes duplicate-index faces backwards, except AABB.
+    // BuildNeighborLists subsequently continues to index the raw face array.
+    if(raw.node.flags!=0x221u && !dangly && !skin)
+        for(std::size_t i=mesh.faces.size();i--;) {
+            const auto& v=mesh.faces[i].indices;
+            if(v[0]==v[1] || v[0]==v[2] || v[1]==v[2]) {
+                mesh.faces.erase(mesh.faces.begin()+static_cast<std::ptrdiff_t>(i));
+                faceSources.erase(faceSources.begin()+static_cast<std::ptrdiff_t>(i));
+            }
+        }
+}
+
 std::vector<GeneratedVertex> generateVertices(RawNode& raw,Mesh& mesh,
         const std::vector<std::array<std::size_t,3>>& normals,
         const neoshared::bif::JobControl& job,
@@ -589,19 +630,11 @@ std::vector<GeneratedVertex> generateVertices(RawNode& raw,Mesh& mesh,
         raw.tangentFaceSources[i]=i;
         auto& face=mesh.faces[i];face.surfaceMaterial=raw.faces[i].material;
         for(std::size_t corner=0;corner<3u;++corner) {
-            GeneratedVertex vertex;
-            vertex.source=raw.faces[i].vertices[corner];
-            vertex.position=raw.vertices.at(vertex.source);
+            auto vertex=cornerVertex(raw,mesh,i,corner);
             vertex.normal=raw.normals.at(normals[i][corner]);
             // Distinct authored normal indices retain intentional vertex
             // splits even when their final vectors became equal at a seam.
             vertex.normalSource=normals[i][corner];
-            vertex.color={1.0f,1.0f,1.0f};
-            authoredVertexData(raw,mesh,i,corner,vertex);
-            for(std::size_t channel=0;channel<4u;++channel)
-                if(!raw.texcoords[channel].empty())
-                    vertex.texcoords[channel]=raw.texcoords[channel].at(raw.faces[i].texcoords[channel][corner]);
-            if(dangly) vertex.constraint=raw.constraints.at(vertex.source);
             auto& first=firstAtPosition[sourcePositions[vertex.source]];
             const auto matches=[&](std::size_t index){return same(vertices[index],vertex,dangly) &&
                     (!mesh.explicitNormals || vertices[index].normalSource==vertex.normalSource) &&
@@ -620,16 +653,7 @@ std::vector<GeneratedVertex> generateVertices(RawNode& raw,Mesh& mesh,
         }
         if(authoredCorners) authoredCorners->push_back(face.indices);
     }
-    // InternalGenVertices removes duplicate-index faces backwards, except AABB.
-    // BuildNeighborLists subsequently continues to index the raw face array.
-    if(raw.node.flags!=0x221u && !dangly && !skin)
-        for(std::size_t i=mesh.faces.size();i--;) {
-            const auto& v=mesh.faces[i].indices;
-            if(v[0]==v[1] || v[0]==v[2] || v[1]==v[2]) {
-                mesh.faces.erase(mesh.faces.begin()+static_cast<std::ptrdiff_t>(i));
-                raw.tangentFaceSources.erase(raw.tangentFaceSources.begin()+static_cast<std::ptrdiff_t>(i));
-            }
-        }
+    removeCollapsedFaces(raw,mesh,raw.tangentFaceSources);
     return vertices;
 }
 void neighbors(RawNode& raw,Mesh& mesh) {
@@ -985,6 +1009,160 @@ void retainTangentSource(const RawNode& raw,Mesh& mesh,
     mesh.asciiTangentSource=std::move(source);
 }
 
+void publishGeometryVertices(Mesh& mesh,const std::vector<GeneratedVertex>& generated) {
+    mesh.enginePrelightVertexCount=static_cast<std::uint16_t>(generated.size());
+    mesh.vertices.clear();
+    mesh.vertices.reserve(mesh.enginePrelightVertexCount);
+    for(std::size_t i=0;i<mesh.enginePrelightVertexCount;++i) {
+        const auto& source=generated[i];
+        Vertex vertex;vertex.position=source.position;vertex.normal=source.normal;
+        mesh.vertices.push_back(vertex);
+    }
+    mesh.asciiNormalPool.reset();
+}
+
+std::shared_ptr<const CyclicMeshData> prepareCyclicMesh(
+        RawNode raw,Mesh mesh,const neoshared::bif::JobControl& job) {
+    processVertices(raw,mesh,job);
+    auto cache=std::make_shared<CyclicMeshData>();
+    cache->bounds=mesh.engineBounds;
+    cache->corners.resize(raw.faces.size());cache->groups.resize(raw.faces.size());
+    cache->crosses.resize(raw.faces.size());cache->normalGroups.resize(raw.faces.size());
+    std::vector<std::vector<std::size_t>> incident(raw.vertices.size());
+    for(std::size_t face=0;face<raw.faces.size();++face) {
+        for(std::size_t rotation=0;rotation<3u;++rotation) {
+            auto rotated=raw.faces[face];
+            for(std::size_t corner=0;corner<3u;++corner)
+                rotated.vertices[corner]=raw.faces[face].vertices[(corner+rotation)%3u];
+            cache->crosses[face][rotation]=raw.normalPositionPrecision==64u?
+                preciseNormalCross(rotated,raw):normalFaceCross(raw.vertices[rotated.vertices[0]],
+                    raw.vertices[rotated.vertices[1]],raw.vertices[rotated.vertices[2]]);
+        }
+        for(const auto vertex:raw.faces[face].vertices) {
+            auto& faces=incident[vertex];
+            if(faces.empty() || faces.back()!=face) faces.push_back(face);
+        }
+    }
+    std::map<std::pair<std::uint32_t,std::uint32_t>,std::size_t> normalGroups;
+    for(std::size_t face=0;face<raw.faces.size();++face) {
+        const auto& value=raw.faces[face];
+        if(value.smoothing==0u) {
+            cache->normalGroups[face].fill(cache->normals.size());
+            cache->normals.push_back({{face},{raw.faces.size()*3u},{}});
+            continue;
+        }
+        for(std::size_t corner=0;corner<3u;++corner) {
+            const auto vertex=value.vertices[corner];
+            const auto entry=normalGroups.emplace(std::make_pair(vertex,value.smoothing),cache->normals.size());
+            cache->normalGroups[face][corner]=entry.first->second;
+            if(entry.second) {
+                CyclicMeshData::NormalGroup group;
+                for(const auto other:incident[vertex])
+                    if(value.smoothing&raw.faces[other].smoothing) group.faces.push_back(other);
+                group.signature.resize(group.faces.size(),raw.faces.size()*3u);
+                cache->normals.push_back(std::move(group));
+            }
+        }
+    }
+    PositionIndex positions(raw.vertices.size());
+    std::vector<std::size_t> sourcePositions;
+    for(const auto position:raw.vertices) sourcePositions.push_back(positions.index(position));
+    const auto end=raw.faces.size()*3u;
+    std::vector<std::size_t> first(positions.size(),end);
+    const bool dangly=raw.node.flags==0x121u,skin=raw.node.flags==0x61u;
+    for(std::size_t face=0;face<raw.faces.size();++face) {
+        job.check();
+        for(std::size_t corner=0;corner<3u;++corner) {
+            auto& vertex=cache->corners[face][corner];vertex=cornerVertex(raw,mesh,face,corner);
+            auto& head=first[sourcePositions[vertex.source]];
+            auto at=head;
+            for(;at!=end;at=cache->corners[at/3u][at%3u].previousAtPosition) {
+                const auto& prior=cache->corners[at/3u][at%3u];
+                if(same(prior,vertex,dangly) && (!skin || (raw.skinData?
+                    raw.skinChannels.at(prior.source).weights==raw.skinChannels.at(vertex.source).weights &&
+                    raw.skinChannels.at(prior.source).indices==raw.skinChannels.at(vertex.source).indices:
+                    raw.weights.at(prior.source)==raw.weights.at(vertex.source)))) break;
+            }
+            if(at==end) {
+                cache->groups[face][corner]=cache->groupCount++;
+                vertex.previousAtPosition=head;head=face*3u+corner;
+            } else cache->groups[face][corner]=cache->groups[at/3u][at%3u];
+        }
+    }
+    return cache;
+}
+
+std::vector<std::array<std::int16_t,3>> generateCyclicMeshGeometry(
+        RawNode& raw,Mesh& mesh,const CyclicMeshData& cache,
+        const std::vector<std::size_t>& faceOrder,const std::vector<std::uint8_t>& rotations,
+        const neoshared::bif::JobControl& job) {
+    // Only contributors whose order or cyclic start changed need a new sum.
+    // Preserve each sum's authored order and the engine's mixed precision.
+    std::vector<std::size_t> rank(faceOrder.size());
+    for(std::size_t face=0;face<faceOrder.size();++face) rank[faceOrder[face]]=face;
+    for(const auto& group:cache.normals) {
+        std::sort(group.faces.begin(),group.faces.end(),[&](auto a,auto b){return rank[a]<rank[b];});
+        bool changed=false;
+        for(std::size_t i=0;i<group.faces.size();++i) {
+            const auto face=group.faces[i],state=face*3u+rotations[face];
+            changed=changed || group.signature[i]!=state;group.signature[i]=state;
+        }
+        if(changed) {
+            Vec3 sum{};
+            for(const auto face:group.faces) sum=cache.crosses[face][rotations[face]].accumulate(sum);
+            group.normal=normalizeVertexNormal(sum);
+        }
+    }
+    std::vector<std::array<std::size_t,3>> normals(raw.faces.size());
+    std::vector<std::size_t> firstFace(cache.normals.size(),raw.faces.size()),normalIndex(cache.normals.size());
+    raw.normals.clear();mesh.engineBounds=cache.bounds;
+    for(std::size_t face=0;face<raw.faces.size();++face) {
+        const auto original=faceOrder[face];
+        for(std::size_t corner=0;corner<3u;++corner) {
+            const auto group=cache.normalGroups[original][(corner+rotations[original])%3u];
+            if(raw.faces[face].smoothing!=0u && firstFace[group]<face) normals[face][corner]=normalIndex[group];
+            else {
+                // Repeated vertices in the first face publish distinct rows;
+                // later faces reuse that face's last matching corner.
+                firstFace[group]=face;normalIndex[group]=raw.normals.size();
+                normals[face][corner]=raw.normals.size();raw.normals.push_back(cache.normals[group].normal);
+            }
+        }
+    }
+    const auto end=raw.faces.size()*3u;
+    std::vector<std::size_t> first(cache.groupCount,end);
+    std::vector<GeneratedVertex> generated;generated.reserve(end);
+    std::vector<std::array<std::int16_t,3>> corners;corners.reserve(raw.faces.size());
+    mesh.faces.resize(raw.faces.size());raw.tangentFaceSources.resize(raw.faces.size());
+    for(std::size_t face=0;face<raw.faces.size();++face) {
+        job.check();
+        raw.tangentFaceSources[face]=face;
+        auto& output=mesh.faces[face];output.surfaceMaterial=raw.faces[face].material;
+        const auto original=faceOrder[face];
+        for(std::size_t corner=0;corner<3u;++corner) {
+            const auto from=(corner+rotations[original])%3u;
+            const auto normal=raw.normals.at(normals[face][corner]);
+            auto& head=first[cache.groups[original][from]];
+            auto at=head;
+            while(at!=end && !same(generated[at].normal,normal)) at=generated[at].previousAtPosition;
+            if(at==end) {
+                at=generated.size();
+                auto vertex=cache.corners[original][from];
+                vertex.normal=normal;vertex.normalSource=normals[face][corner];
+                vertex.previousAtPosition=head;head=at;
+                generated.push_back(vertex);
+            }
+            output.indices[corner]=static_cast<std::int16_t>(at);
+        }
+        corners.push_back(output.indices);
+    }
+    removeCollapsedFaces(raw,mesh,raw.tangentFaceSources);
+    retainNormalPositionSource(raw,mesh);
+    retainTangentSource(raw,mesh,normals,generated,false,job);
+    publishGeometryVertices(mesh,generated);
+    return corners;
+}
+
 std::vector<std::array<std::int16_t,3>> generateAsciiMeshGeometry(
         Model& model,RawNode& raw,Mesh& mesh,const neoshared::bif::JobControl& job) {
     const bool animated=raw.node.animmesh.has_value();
@@ -997,15 +1175,7 @@ std::vector<std::array<std::int16_t,3>> generateAsciiMeshGeometry(
     retainTangentSource(raw,mesh,normals,generated,animated,job);
     if(animated)
         for(const auto& face:mesh.faces) corners.push_back(face.indices);
-    mesh.enginePrelightVertexCount=static_cast<std::uint16_t>(generated.size());
-    mesh.vertices.clear();
-    mesh.vertices.reserve(mesh.enginePrelightVertexCount);
-    for(std::size_t i=0;i<mesh.enginePrelightVertexCount;++i) {
-        const auto& source=generated[i];
-        Vertex vertex;vertex.position=source.position;vertex.normal=source.normal;
-        mesh.vertices.push_back(vertex);
-    }
-    mesh.asciiNormalPool.reset();
+    publishGeometryVertices(mesh,generated);
     if(animated) {
         mesh.animated=true;
         mesh.asciiMdxAllocation.reset();
