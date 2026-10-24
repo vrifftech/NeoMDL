@@ -4798,6 +4798,13 @@ void reconstructTangentPositionPrecision(Writer& out,const Model& model,const Mo
     constexpr double oneDegree=0.00030460968721752167;
     constexpr double quantum=8.0*std::numeric_limits<float>::epsilon();
     struct Error {double total{},maximum{};};
+    const auto roundingCell=[](float value) {
+        std::array<double,2> cell{
+            std::nextafter((double(value)+std::nextafter(value,-std::numeric_limits<float>::infinity()))*0.5,double(value)),
+            std::nextafter((double(value)+std::nextafter(value,std::numeric_limits<float>::infinity()))*0.5,double(value))};
+        if(value==0.0f) cell[std::signbit(value)?1u:0u]=double(value);
+        return cell;
+    };
     for(std::size_t index=0;index<model.meshes.size();++index) {
         const auto& mesh=model.meshes[index];const auto found=plans.find(&mesh);
         if(found==plans.end() || !tangentPrecisionMesh(mesh) || !found->second.preciseSourcePositions.empty()) continue;
@@ -4835,6 +4842,11 @@ void reconstructTangentPositionPrecision(Writer& out,const Model& model,const Mo
             }
         }
         if(selected.empty()) continue;
+        std::vector<std::vector<Vec3>> faceNormalHints(existing.faces.size());
+        for(std::size_t f=0;f<readers.size();++f) for(const auto row:readers[f]) for(const auto& target:targets[row]) {
+            auto& hints=faceNormalHints[f];
+            if(std::none_of(hints.begin(),hints.end(),[&](Vec3 n){return same(n,target.normal);})) hints.push_back(target.normal);
+        }
         // Joint samples cross product-rounding cells that scalar UV moves cannot
         // reach. Every coordinate remains inside its original float rounding cell.
         static const auto seeds=[] {
@@ -4861,10 +4873,7 @@ void reconstructTangentPositionPrecision(Writer& out,const Model& model,const Mo
             if(!entry.second) continue;
             Position lo,hi;
             for(std::size_t axis=0;axis<3u;++axis) {
-                const auto v=value[axis];
-                lo[axis]=std::nextafter((double(v)+std::nextafter(v,-std::numeric_limits<float>::infinity()))*0.5,double(v));
-                hi[axis]=std::nextafter((double(v)+std::nextafter(v,std::numeric_limits<float>::infinity()))*0.5,double(v));
-                if(v==0.0f) (std::signbit(v)?hi[axis]:lo[axis])=double(v);
+                const auto cell=roundingCell(value[axis]);lo[axis]=cell[0];hi[axis]=cell[1];
             }
             positions.push_back(plan.tangentSourcePositions.empty()?Position{p.x,p.y,p.z}:plan.tangentSourcePositions[sourceIndex]);
             lower.push_back(lo);upper.push_back(hi);
@@ -4885,6 +4894,10 @@ void reconstructTangentPositionPrecision(Writer& out,const Model& model,const Mo
                     std::array<double,2>{faceUv[f][c].x,faceUv[f][c].y}:source.faceTexcoords64[f][c];
             }
         }
+        const auto originalGroups=faceGroups;
+        const auto originalPositions=facePositions;
+        const auto originalUv=faceUv;
+        std::vector<std::size_t> rotations(existing.faces.size());
         auto rawBases=ascii::tangentFaceBases(existing,out.job()),bases=rawBases;
         ascii::orientSingularTangentComponents(topology.singular,bases,out.job());
         auto proposed=bases;
@@ -4892,160 +4905,250 @@ void reconstructTangentPositionPrecision(Writer& out,const Model& model,const Mo
         for(std::size_t sweep=0;sweep<3u;++sweep) {
             for(const auto face:selected) {
                 if(preciseUv[face][0]==preciseUv[face][1] && preciseUv[face][0]==preciseUv[face][2]) continue;
-                const auto& chosen=faceGroups[face];
-                std::set<std::size_t> affectedFaces;
-                for(const auto group:chosen) affectedFaces.insert(incident[group].begin(),incident[group].end());
-                std::set<std::size_t> orientedFaces=affectedFaces;
-                std::vector<ascii::TangentComponent> components;
-                for(const auto& component:topology.singular)
-                    if(std::any_of(component.faces.begin(),component.faces.end(),[&](auto f){return affectedFaces.count(f);}) ||
-                       std::any_of(component.boundary.begin(),component.boundary.end(),[&](auto f){return affectedFaces.count(f);})) {
-                        components.push_back(component);orientedFaces.insert(component.faces.begin(),component.faces.end());
+                // Flat faces can change their cyclic start without changing
+                // ordinary normals or their tangent contributor rows.
+                const bool cyclic=source.faceSmoothing[face]==0u;
+                for(std::size_t turn=0;turn<(cyclic?3u:1u);++turn) {
+                    const auto rotation=cyclic?(turn+1u)%3u:rotations[face];
+                    const auto& original=originalPositions[face];
+                    const auto normal=ascii::normalizeVertexNormal(ascii::normalFaceCross(original[0],original[1],original[2]).accumulate({}));
+                    const auto rotated=ascii::normalizeVertexNormal(ascii::normalFaceCross(original[rotation],original[(rotation+1u)%3u],original[(rotation+2u)%3u]).accumulate({}));
+                    const auto singular=[&](std::size_t r) {
+                        const auto& uv=originalUv[face];
+                        const float pu=uv[(r+1u)%3u].x-uv[r].x,qu=uv[(r+2u)%3u].x-uv[r].x;
+                        const float pv=uv[(r+1u)%3u].y-uv[r].y,qv=uv[(r+2u)%3u].y-uv[r].y;
+                        return pu*qv-pv*qu==0.0f;
+                    };
+                    if(!same(normal,rotated) || singular(0u)!=singular(rotation)) continue;
+                    TangentFit fittedUv;
+                    for(std::size_t c=0;c<3u;++c) {
+                        faceGroups[face][c]=originalGroups[face][(c+rotation)%3u];
+                        facePositions[face][c]=originalPositions[face][(c+rotation)%3u];
+                        faceUv[face][c]=originalUv[face][(c+rotation)%3u];
+                        fittedUv[c]=preciseUv[face][(c+rotation+3u-rotations[face])%3u];
                     }
-                std::set<std::size_t> affectedRows;
-                for(const auto f:orientedFaces) affectedRows.insert(readers[f].begin(),readers[f].end());
-                std::vector<Error> changedErrors(affectedRows.size());
-                std::vector<TangentBasis> changedRaw(affectedFaces.size());
-                auto candidate=positions;
-                auto candidateUv=preciseUv[face];
-                std::vector<Vec3> normalHints;
-                for(const auto row:readers[face]) for(const auto& target:targets[row])
-                    if(std::none_of(normalHints.begin(),normalHints.end(),[&](Vec3 n){return same(n,target.normal);}))
-                        normalHints.push_back(target.normal);
-                const auto roots=[&](auto projection,double low,double high,std::vector<double>& values) {
-                    const auto left=projection(low),right=projection(high);
-                    if((left<0.0 && right>0.0) || (left>0.0 && right<0.0)) {
-                        while(std::nextafter(low,high)!=high) {
-                            const double middle=low+(high-low)*0.5;
-                            if((projection(middle)<0.0)==(left<0.0)) low=middle;else high=middle;
+                    const auto& chosen=faceGroups[face];
+                    std::set<std::size_t> affectedFaces;
+                    for(const auto group:chosen) affectedFaces.insert(incident[group].begin(),incident[group].end());
+                    std::set<std::size_t> orientedFaces=affectedFaces;
+                    std::vector<ascii::TangentComponent> components;
+                    for(const auto& component:topology.singular)
+                        if(std::any_of(component.faces.begin(),component.faces.end(),[&](auto f){return affectedFaces.count(f);}) ||
+                           std::any_of(component.boundary.begin(),component.boundary.end(),[&](auto f){return affectedFaces.count(f);})) {
+                            components.push_back(component);orientedFaces.insert(component.faces.begin(),component.faces.end());
                         }
-                        values.push_back(low);values.push_back(high);
-                    }
-                };
-                const auto project=[&](const std::array<Position,3>& high,const TangentFit& uv,std::size_t axis,Vec3 n) {
-                    const auto v=ascii::tangentPositionDerivative(facePositions[face],high,faceUv[face],uv,axis);
-                    return (double(v.x)*n.x+double(v.y)*n.y)+double(v.z)*n.z;
-                };
-                double best{},maximum{};
-                for(const auto row:affectedRows) {best+=errors[row].total;maximum=std::max(maximum,errors[row].maximum);}
-                const auto consider=[&] {
-                    out.job().check();
-                    for(const auto f:orientedFaces) proposed[f]=rawBases[f];
-                    std::size_t at{};
-                    for(const auto f:affectedFaces) {
+                    std::set<std::size_t> affectedRows;
+                    for(const auto f:orientedFaces) affectedRows.insert(readers[f].begin(),readers[f].end());
+                    std::vector<Error> changedErrors(affectedRows.size());
+                    std::vector<TangentBasis> changedRaw(affectedFaces.size());
+                    auto candidate=positions;
+                    auto candidateUv=fittedUv;
+                    const auto& normalHints=faceNormalHints[face];
+                    const auto roots=[&](auto projection,double low,double high,std::vector<double>& values) {
+                        const auto left=projection(low),right=projection(high);
+                        if((left<0.0 && right>0.0) || (left>0.0 && right<0.0)) {
+                            while(std::nextafter(low,high)!=high) {
+                                const double middle=low+(high-low)*0.5;
+                                if((projection(middle)<0.0)==(left<0.0)) low=middle;else high=middle;
+                            }
+                            values.push_back(low);values.push_back(high);
+                        }
+                    };
+                    const auto project=[&](std::size_t f,const std::array<Position,3>& high,const TangentFit& uv,std::size_t axis,Vec3 n) {
+                        const auto v=ascii::tangentPositionDerivative(facePositions[f],high,faceUv[f],uv,axis);
+                        return (double(v.x)*n.x+double(v.y)*n.y)+double(v.z)*n.z;
+                    };
+                    const auto uvCandidates=[&](std::size_t f,std::size_t corner,std::size_t axis,
+                            const std::array<Position,3>& highPositions,const TangentFit& fit,bool local) {
+                        const auto cell=roundingCell(axis?faceUv[f][corner].y:faceUv[f][corner].x);
+                        std::vector<double> values;
+                        for(std::size_t step=0;step<=64u;++step) values.push_back(cell[0]+(cell[1]-cell[0])*(double(step)/64.0));
+                        if(local) for(const auto end:cell) for(double scale=0.5;scale>=1.0/4096.0;scale*=0.5)
+                            values.push_back(fit[corner][axis]+(end-fit[corner][axis])*scale);
+                        for(const auto n:faceNormalHints[f]) {
+                            const auto projection=[&](double value) {
+                                auto uv=fit;uv[corner][axis]=value;
+                                return project(f,highPositions,uv,axis,n);
+                            };
+                            roots(projection,cell[0],cell[1],values);
+                        }
+                        return values;
+                    };
+                    struct JointProposal {std::array<Position,3> positions;TangentFit uv;};
+                    std::vector<JointProposal> jointProposals;
+                    double isolatedBest=std::numeric_limits<double>::infinity();
+                    auto jointUv=preciseUv;
+                    bool fittingNeighbors=false;
+                    const auto faceScore=[&](std::size_t f,TangentBasis value) {
+                        value.bitangent=normalize(value.bitangent);value.tangent=normalize(value.tangent);value.normal=normalize(value.normal);
+                        Error result;
+                        for(const auto row:readers[f]) {
+                            const auto error=score(row,value);result.total+=error.total;result.maximum=std::max(result.maximum,error.maximum);
+                        }
+                        return result;
+                    };
+                    const auto rawFace=[&](std::size_t f,const TangentFit& uv) {
                         const auto& ids=faceGroups[f];
                         const std::array<Position,3> high{candidate[ids[0]],candidate[ids[1]],candidate[ids[2]]};
-                        auto& value=changedRaw[at++];
-                        value.bitangent=normalize(ascii::tangentPositionDerivative(facePositions[f],high,faceUv[f],f==face?candidateUv:preciseUv[f],0u));
-                        value.tangent=normalize(ascii::tangentPositionDerivative(facePositions[f],high,faceUv[f],f==face?candidateUv:preciseUv[f],1u));
+                        TangentBasis value;
+                        value.bitangent=normalize(ascii::tangentPositionDerivative(facePositions[f],high,faceUv[f],uv,0u));
+                        value.tangent=normalize(ascii::tangentPositionDerivative(facePositions[f],high,faceUv[f],uv,1u));
                         value.normal=ascii::tangentBasisNormal(value.bitangent,value.tangent,{});
                         const auto n=source.firstCornerNormals[f];
                         if((value.normal.x*n.x+value.normal.y*n.y)+value.normal.z*n.z<0.0f) {
                             value.tangent={-value.tangent.x,-value.tangent.y,-value.tangent.z};
                             value.normal={-value.normal.x,-value.normal.y,-value.normal.z};
                         }
-                        proposed[f]=value;
-                    }
-                    ascii::orientSingularTangentComponents(components,proposed,out.job());
-                    double total{},worst{};at=0u;
-                    for(const auto row:affectedRows) {
-                        TangentBasis value;
-                        for(const auto f:contributors[row]) {
-                            value.bitangent=add(value.bitangent,proposed[f].bitangent);
-                            value.tangent=add(value.tangent,proposed[f].tangent);
-                            value.normal=add(value.normal,proposed[f].normal);
+                        return value;
+                    };
+                    double best{},maximum{};
+                    for(const auto row:affectedRows) {best+=errors[row].total;maximum=std::max(maximum,errors[row].maximum);}
+                    const auto consider=[&] {
+                        out.job().check();
+                        for(const auto f:orientedFaces) proposed[f]=rawBases[f];
+                        std::size_t at{};
+                        for(const auto f:affectedFaces) {
+                            auto& value=changedRaw[at++];
+                            value=rawFace(f,f==face?candidateUv:fittingNeighbors?jointUv[f]:preciseUv[f]);
+                            proposed[f]=value;
                         }
-                        value.bitangent=normalize(value.bitangent);value.tangent=normalize(value.tangent);value.normal=normalize(value.normal);
-                        const auto error=score(row,value);changedErrors[at++]=error;
-                        total+=error.total;worst=std::max(worst,error.maximum);
-                        if(worst>maximum || (worst==maximum && total>=best)) break;
-                    }
-                    // Minimize the worst reconstructed axis first, then the
-                    // accumulated error when the maximum is unchanged.
-                    if(worst>maximum || (worst==maximum && !(total<best))) return;
-                    best=total;maximum=worst;changed=true;preciseUv[face]=candidateUv;
-                    for(const auto group:chosen) positions[group]=candidate[group];
-                    at=0u;for(const auto f:affectedFaces) rawBases[f]=changedRaw[at++];
-                    for(const auto f:orientedFaces) bases[f]=proposed[f];
-                    at=0u;for(const auto row:affectedRows) errors[row]=changedErrors[at++];
-                };
-                for(const auto group:chosen) for(std::size_t axis=0;axis<3u;++axis) {
-                    const auto origin=positions[group][axis];
-                    std::vector<double> values;
-                    for(std::size_t step=0;step<=64u;++step)
-                        values.push_back(lower[group][axis]+(upper[group][axis]-lower[group][axis])*(double(step)/64.0));
-                    for(const auto end:{lower[group][axis],upper[group][axis]})
-                        for(double scale=0.5;scale>=1.0/4096.0;scale*=0.5)
-                            values.push_back(origin+(end-origin)*scale);
-                    for(const auto normal:normalHints) for(std::size_t uvAxis=0;uvAxis<2u;++uvAxis) {
-                        const auto projection=[&](double value) {
-                            std::array<Position,3> high;
-                            for(std::size_t c=0;c<3u;++c) {
-                                high[c]=positions[chosen[c]];
-                                if(chosen[c]==group) high[c][axis]=value;
+                        if(cyclic && !fittingNeighbors) {
+                            const auto error=faceScore(face,proposed[face]);
+                            if(error.maximum<isolatedBest) {
+                                isolatedBest=error.maximum;
+                                jointProposals.push_back({{candidate[chosen[0]],candidate[chosen[1]],candidate[chosen[2]]},candidateUv});
                             }
-                            return project(high,preciseUv[face],uvAxis,normal);
-                        };
-                        roots(projection,lower[group][axis],upper[group][axis],values);
+                        }
+                        ascii::orientSingularTangentComponents(components,proposed,out.job());
+                        double total{},worst{};at=0u;
+                        for(const auto row:affectedRows) {
+                            TangentBasis value;
+                            for(const auto f:contributors[row]) {
+                                value.bitangent=add(value.bitangent,proposed[f].bitangent);
+                                value.tangent=add(value.tangent,proposed[f].tangent);
+                                value.normal=add(value.normal,proposed[f].normal);
+                            }
+                            value.bitangent=normalize(value.bitangent);value.tangent=normalize(value.tangent);value.normal=normalize(value.normal);
+                            const auto error=score(row,value);changedErrors[at++]=error;
+                            total+=error.total;worst=std::max(worst,error.maximum);
+                            if(worst>maximum || (worst==maximum && total>=best)) break;
+                        }
+                        // Minimize the worst reconstructed axis first, then the
+                        // accumulated error when the maximum is unchanged.
+                        if(worst>maximum || (worst==maximum && !(total<best))) return;
+                        best=total;maximum=worst;changed=true;fittedUv=candidateUv;
+                        if(fittingNeighbors) for(const auto f:affectedFaces) preciseUv[f]=jointUv[f];
+                        preciseUv[face]=candidateUv;rotations[face]=rotation;
+                        for(const auto group:chosen) positions[group]=candidate[group];
+                        at=0u;for(const auto f:affectedFaces) rawBases[f]=changedRaw[at++];
+                        for(const auto f:orientedFaces) bases[f]=proposed[f];
+                        at=0u;for(const auto row:affectedRows) errors[row]=changedErrors[at++];
+                    };
+                    if(cyclic) for(std::size_t c=0;c<3u;++c) for(std::size_t axis=0;axis<2u;++axis) {
+                        std::array<Position,3> highPositions;
+                        for(std::size_t k=0;k<3u;++k) highPositions[k]={facePositions[face][k].x,facePositions[face][k].y,facePositions[face][k].z};
+                        const auto values=uvCandidates(face,c,axis,highPositions,fittedUv,false);
+                        for(const auto value:values) {
+                            for(std::size_t k=0;k<3u;++k) candidate[chosen[k]]=highPositions[k];
+                            candidateUv=fittedUv;candidateUv[c][axis]=value;consider();
+                        }
+                        candidateUv=fittedUv;
                     }
-                    for(const auto value:values) {
-                        for(const auto other:chosen) candidate[other]=positions[other];
-                        candidate[group][axis]=value;consider();
+                    for(const auto group:chosen) for(std::size_t axis=0;axis<3u;++axis) {
+                        const auto origin=positions[group][axis];
+                        std::vector<double> values;
+                        for(std::size_t step=0;step<=64u;++step)
+                            values.push_back(lower[group][axis]+(upper[group][axis]-lower[group][axis])*(double(step)/64.0));
+                        for(const auto end:{lower[group][axis],upper[group][axis]})
+                            for(double scale=0.5;scale>=1.0/4096.0;scale*=0.5)
+                                values.push_back(origin+(end-origin)*scale);
+                        for(const auto normal:normalHints) for(std::size_t uvAxis=0;uvAxis<2u;++uvAxis) {
+                            const auto projection=[&](double value) {
+                                std::array<Position,3> high;
+                                for(std::size_t c=0;c<3u;++c) {
+                                    high[c]=positions[chosen[c]];
+                                    if(chosen[c]==group) high[c][axis]=value;
+                                }
+                                return project(face,high,fittedUv,uvAxis,normal);
+                            };
+                            roots(projection,lower[group][axis],upper[group][axis],values);
+                        }
+                        for(const auto value:values) {
+                            for(const auto other:chosen) candidate[other]=positions[other];
+                            candidate[group][axis]=value;consider();
+                        }
                     }
-                }
-                // Translate an edge or the whole face together. These moves
-                // preserve its shared derivatives while fitting adjacent faces.
-                for(const std::size_t mask:{3u,5u,6u,7u}) for(std::size_t axis=0;axis<3u;++axis) {
-                    double low=-std::numeric_limits<double>::infinity(),high=std::numeric_limits<double>::infinity();
-                    const std::array<Position,3> origin{positions[chosen[0]],positions[chosen[1]],positions[chosen[2]]};
-                    for(std::size_t c=0;c<3u;++c) if(mask&(1u<<c)) {
-                        const auto group=chosen[c];
-                        low=std::max(low,lower[group][axis]-origin[c][axis]);
-                        high=std::min(high,upper[group][axis]-origin[c][axis]);
+                    // Translate an edge or the whole face together. These moves
+                    // preserve its shared derivatives while fitting adjacent faces.
+                    for(const std::size_t mask:{3u,5u,6u,7u}) for(std::size_t axis=0;axis<3u;++axis) {
+                        double low=-std::numeric_limits<double>::infinity(),high=std::numeric_limits<double>::infinity();
+                        const std::array<Position,3> origin{positions[chosen[0]],positions[chosen[1]],positions[chosen[2]]};
+                        for(std::size_t c=0;c<3u;++c) if(mask&(1u<<c)) {
+                            const auto group=chosen[c];
+                            low=std::max(low,lower[group][axis]-origin[c][axis]);
+                            high=std::min(high,upper[group][axis]-origin[c][axis]);
+                        }
+                        std::vector<double> values;
+                        for(std::size_t step=0;step<=64u;++step) values.push_back(low+(high-low)*(double(step)/64.0));
+                        for(const auto end:{low,high}) for(double scale=0.5;scale>=1.0/4096.0;scale*=0.5)
+                            values.push_back(end*scale);
+                        for(const auto value:values) {
+                            for(const auto group:chosen) candidate[group]=positions[group];
+                            for(std::size_t c=0;c<3u;++c) if(mask&(1u<<c))
+                                candidate[chosen[c]][axis]=origin[c][axis]+value;
+                            consider();
+                        }
                     }
-                    std::vector<double> values;
-                    for(std::size_t step=0;step<=64u;++step) values.push_back(low+(high-low)*(double(step)/64.0));
-                    for(const auto end:{low,high}) for(double scale=0.5;scale>=1.0/4096.0;scale*=0.5)
-                        values.push_back(end*scale);
-                    for(const auto value:values) {
-                        for(const auto group:chosen) candidate[group]=positions[group];
-                        for(std::size_t c=0;c<3u;++c) if(mask&(1u<<c))
-                            candidate[chosen[c]][axis]=origin[c][axis]+value;
+                    for(const auto& seed:seeds) {
+                        for(std::size_t c=0;c<3u;++c) for(std::size_t axis=0;axis<3u;++axis) {
+                            const auto group=chosen[c];
+                            candidate[group][axis]=lower[group][axis]+(upper[group][axis]-lower[group][axis])*seed[c*3u+axis];
+                        }
                         consider();
                     }
-                }
-                for(const auto& seed:seeds) {
-                    for(std::size_t c=0;c<3u;++c) for(std::size_t axis=0;axis<3u;++axis) {
-                        const auto group=chosen[c];
-                        candidate[group][axis]=lower[group][axis]+(upper[group][axis]-lower[group][axis])*seed[c*3u+axis];
+                    for(std::size_t c=0;c<3u;++c) for(std::size_t axis=0;axis<2u;++axis) {
+                        const std::array<Position,3> highPositions{positions[chosen[0]],positions[chosen[1]],positions[chosen[2]]};
+                        const auto values=uvCandidates(face,c,axis,highPositions,fittedUv,true);
+                        for(const auto value:values) {
+                            for(const auto group:chosen) candidate[group]=positions[group];
+                            candidateUv=fittedUv;candidateUv[c][axis]=value;consider();
+                        }
+                        candidateUv=fittedUv;
                     }
-                    consider();
-                }
-                for(std::size_t c=0;c<3u;++c) for(std::size_t axis=0;axis<2u;++axis) {
-                    const auto rounded=axis?faceUv[face][c].y:faceUv[face][c].x;
-                    auto low=std::nextafter((double(rounded)+std::nextafter(rounded,-std::numeric_limits<float>::infinity()))*0.5,double(rounded));
-                    auto high=std::nextafter((double(rounded)+std::nextafter(rounded,std::numeric_limits<float>::infinity()))*0.5,double(rounded));
-                    if(rounded==0.0f) (std::signbit(rounded)?high:low)=double(rounded);
-                    const auto origin=preciseUv[face][c][axis];
-                    std::vector<double> values;
-                    for(std::size_t step=0;step<=64u;++step) values.push_back(low+(high-low)*(double(step)/64.0));
-                    for(const auto end:{low,high}) for(double scale=0.5;scale>=1.0/4096.0;scale*=0.5)
-                        values.push_back(origin+(end-origin)*scale);
-                    const std::array<Position,3> highPositions{positions[chosen[0]],positions[chosen[1]],positions[chosen[2]]};
-                    for(const auto normal:normalHints) {
-                        const auto projection=[&](double value) {
-                            auto uv=preciseUv[face];uv[c][axis]=value;
-                            return project(highPositions,uv,axis,normal);
-                        };
-                        roots(projection,low,high,values);
+                    // A promising position move can reverse a neighboring basis.
+                    // Fit those UV residuals in the same proposal before comparing
+                    // the complete affected rows with the accepted reconstruction.
+                    fittingNeighbors=true;
+                    for(auto proposal=jointProposals.rbegin();proposal!=jointProposals.rend();++proposal) {
+                        for(std::size_t c=0;c<3u;++c) candidate[chosen[c]]=proposal->positions[c];
+                        candidateUv=proposal->uv;jointUv=preciseUv;
+                        for(const auto f:affectedFaces) {
+                            if(f==face || source.faceSmoothing[f]!=0u) continue;
+                            auto loss=faceScore(f,rawFace(f,jointUv[f]));
+                            const auto& ids=faceGroups[f];
+                            const std::array<Position,3> highPositions{candidate[ids[0]],candidate[ids[1]],candidate[ids[2]]};
+                            for(std::size_t round=0;round<2u;++round)
+                                for(std::size_t c=0;c<3u;++c) for(std::size_t axis=0;axis<2u;++axis) {
+                                    const auto values=uvCandidates(f,c,axis,highPositions,jointUv[f],false);
+                                    for(const auto value:values) {
+                                        auto uv=jointUv[f];uv[c][axis]=value;
+                                        const auto error=faceScore(f,rawFace(f,uv));
+                                        if(std::make_pair(error.maximum,error.total)<std::make_pair(loss.maximum,loss.total)) {
+                                            loss=error;jointUv[f]=uv;
+                                        }
+                                    }
+                                }
+                        }
+                        consider();
                     }
-                    for(const auto value:values) {
-                        for(const auto group:chosen) candidate[group]=positions[group];
-                        candidateUv=preciseUv[face];candidateUv[c][axis]=value;consider();
+                    fittingNeighbors=false;
+                    proposed=bases;
+                    for(std::size_t c=0;c<3u;++c) {
+                        faceGroups[face][c]=originalGroups[face][(c+rotations[face])%3u];
+                        facePositions[face][c]=originalPositions[face][(c+rotations[face])%3u];
+                        faceUv[face][c]=originalUv[face][(c+rotations[face])%3u];
                     }
-                    candidateUv=preciseUv[face];
                 }
-                proposed=bases;
             }
             selected.clear();
             for(std::size_t row=0;row<errors.size();++row) if(errors[row].maximum>oneDegree)
@@ -5058,6 +5161,7 @@ void reconstructTangentPositionPrecision(Writer& out,const Model& model,const Mo
             plan.preciseFaceTexcoords.resize(mesh.faces.size());
             for(std::size_t f=0;f<existing.faces.size();++f) {
                 const auto original=plan.faceOrder[source.authoredFaceIndices[f]];
+                plan.cornerRotations[original]=static_cast<std::uint8_t>((plan.cornerRotations[original]+rotations[f])%3u);
                 for(std::size_t c=0;c<3u;++c)
                     plan.preciseFaceTexcoords[original][plan.sourceCorner(original,c)]=preciseUv[f][c];
             }
