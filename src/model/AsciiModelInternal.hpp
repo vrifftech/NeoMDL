@@ -152,6 +152,7 @@ struct RawNode {
     std::vector<Vec3> vertices;
     std::vector<std::array<double,3>> normalPositions64;
     std::uint32_t normalPositionPrecision{32u};
+    std::uint32_t tangentPositionPrecision{32u};
     std::vector<Vec3> normals;
     std::vector<std::array<std::uint32_t,3>> normalIndices;
     std::vector<std::array<std::size_t,3>> processedSkinNormals;
@@ -206,6 +207,13 @@ void applyAsciiLightmap(RawNode& raw, Reader& reader);
 void postProcessSkinNode(RawNode& raw,const neoshared::bif::JobControl& job);
 void buildMesh(Model& model, RawNode& raw, std::size_t nodeIndex,
                const neoshared::bif::JobControl& job);
+inline Vec3 normalizeTangentBasis(Vec3 v) {
+    const float length=std::sqrt((v.x*v.x+v.y*v.y)+v.z*v.z);
+    // Engine normalize(Vector) uses a double 1e-9 limit (K1 0x6c3530).
+    if(static_cast<double>(length)<1e-9) return Vec3{1.0f,0.0f,0.0f};
+    const float reciprocal=1.0f/length;
+    return {v.x*reciprocal,v.y*reciprocal,v.z*reciprocal};
+}
 inline Vec3 tangentBasisNormal(Vec3 bitangent,Vec3 tangent,Vec3) {
     // Subtract the products before rounding. Collapsed UV derivatives can
     // be almost parallel, so separately rounded products lose the basis axis.
@@ -263,6 +271,32 @@ inline Vec3 tangentUvDerivative(Vec3 p,Vec3 q,const std::array<Vec2,3>& uv,
         static_cast<float>(q.x*first)-static_cast<float>(p.x*second),
         static_cast<float>(q.y*first)-static_cast<float>(p.y*second),
         static_cast<float>(q.z*first)-static_cast<float>(p.z*second)};
+}
+// Retain rounded edges and add only the authored sub-float XYZ residuals.
+inline Vec3 tangentPositionDerivative(const std::array<Vec3,3>& positions,
+        const std::array<std::array<double,3>,3>& precisePositions,
+        const std::array<Vec2,3>& uv,const std::array<std::array<double,2>,3>& preciseUv,
+        std::size_t component) {
+    const float a=component?uv[0].y:uv[0].x;
+    const float b=component?uv[1].y:uv[1].x;
+    const float c=component?uv[2].y:uv[2].x;
+    const float firstBase=b-a,secondBase=c-a;
+    const double firstResidual=(preciseUv[1][component]-b)-(preciseUv[0][component]-a);
+    const double secondResidual=(preciseUv[2][component]-c)-(preciseUv[0][component]-a);
+    const double first=double(firstBase)+firstResidual,second=double(secondBase)+secondResidual;
+    const std::array<std::array<float,3>,3> low{{
+        {positions[0].x,positions[0].y,positions[0].z},
+        {positions[1].x,positions[1].y,positions[1].z},
+        {positions[2].x,positions[2].y,positions[2].z}}};
+    std::array<float,3> result;
+    for(std::size_t axis=0;axis<3u;++axis) {
+        const float p=low[1][axis]-low[0][axis],q=low[2][axis]-low[0][axis];
+        const double residualP=(precisePositions[1][axis]-low[1][axis])-(precisePositions[0][axis]-low[0][axis]);
+        const double residualQ=(precisePositions[2][axis]-low[2][axis])-(precisePositions[0][axis]-low[0][axis]);
+        const double preciseP=double(p)+residualP,preciseQ=double(q)+residualQ;
+        result[axis]=static_cast<float>(preciseQ*first)-static_cast<float>(preciseP*second);
+    }
+    return {result[0],result[1],result[2]};
 }
 struct TangentFace {
     std::array<Vec3,3> positions;

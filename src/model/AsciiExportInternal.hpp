@@ -27,6 +27,7 @@ struct MeshReconstruction {
     std::vector<Vec3> sourcePositions;
     std::vector<std::array<std::array<double,2>,3>> preciseFaceTexcoords;
     std::vector<std::array<double,3>> preciseSourcePositions;
+    std::vector<std::array<double,3>> tangentSourcePositions;
     std::shared_ptr<const std::vector<EngineFloatSkinChannels>> skinChannels;
     std::size_t sourceCorner(std::size_t face,std::size_t corner) const {
         return (corner+cornerRotations[face])%3u;

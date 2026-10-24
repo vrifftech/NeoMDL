@@ -383,6 +383,8 @@ struct AsciiTangentSource {
     std::vector<std::uint32_t> faceSmoothing;
     std::vector<Vec3> firstCornerNormals;
     std::vector<std::array<std::array<double,2>,3>> faceTexcoords64;
+    // Authored position residuals used only by tangent construction.
+    std::vector<std::array<std::array<double,3>,3>> facePositions64;
     // CalculateTangentSpaceBasis reads the full temporary NodeVertex list,
     // after the signed-short count has limited the published MDX pool.
     std::vector<Vec3> generatedPositions;

@@ -747,6 +747,7 @@ static bool parseMeshValue(const Line& line,Reader& reader,RawNode& raw,GameVers
     const auto key=lower(line.tokens.front());
     if(key=="verts") vectorList(line,reader,raw.vertices,nullptr,&raw.normalPositions64);
     else if(key=="normalpositionprecision") integer(line,raw.normalPositionPrecision);
+    else if(key=="tangentpositionprecision") integer(line,raw.tangentPositionPrecision);
     else if(key=="normals" && raw.node.flags!=0xa1u) {
         vectorList(line,reader,raw.normals);
         mesh.explicitNormals=true;
@@ -895,7 +896,7 @@ bool parseMeshField(const Line& initial,Reader& reader,RawNode& raw,GameVersion 
             extension=="sabernormals"?saber.normals:saber.originalPositions);
         return true;
     }
-    if(extension=="tangentuvprecision" || extension=="normalpositionprecision")
+    if(extension=="tangentuvprecision" || extension=="normalpositionprecision" || extension=="tangentpositionprecision")
         return parseMeshValue(initial,reader,raw,game);
     if(extension=="hastangentbasis" || extension=="tangentbasis" || extension=="tangentindices" ||
        extension=="colorsrgba" || extension=="colorindices" || extension=="cpuverts" ||
@@ -1000,6 +1001,11 @@ void retainTangentSource(const RawNode& raw,Mesh& mesh,
             const auto& uv=raw.faces[source->authoredFaceIndices[i]].texcoords[0];
             source->faceTexcoords64.push_back({raw.tangentTexcoords64.at(uv[0]),
                 raw.tangentTexcoords64.at(uv[1]),raw.tangentTexcoords64.at(uv[2])});
+        }
+        if(raw.tangentPositionPrecision==64u) {
+            const auto& positions=raw.faces[i].vertices;
+            source->facePositions64.push_back({raw.normalPositions64.at(positions[0]),
+                raw.normalPositions64.at(positions[1]),raw.normalPositions64.at(positions[2])});
         }
     }
     for(const auto& vertex:generated) {
@@ -1597,14 +1603,7 @@ TangentBasisTopology prepareTangentBasis(const Mesh& mesh,std::vector<TangentCom
 // resource stage; they are distinct from the already published MDX rows.
 std::vector<TangentBasis> tangentFaceBases(const Mesh& mesh,const neoshared::bif::JobControl& job) {
     const auto& source=*mesh.asciiTangentSource;
-    const auto normalize=[](Vec3 v) {
-        const auto length=magnitude(v);
-        // normalize(Vector) and Vector::Normalize use a DOUBLE 1e-9 limit,
-        // unlike NormalOf's zero test (K1 constant at 0x6c3530).
-        if(static_cast<double>(length)<1e-9) return Vec3{1.0f,0.0f,0.0f};
-        const auto reciprocal=1.0f/length;
-        return Vec3{v.x*reciprocal,v.y*reciprocal,v.z*reciprocal};
-    };
+    const auto normalize=normalizeTangentBasis;
     const auto negate=[](Vec3 v){return Vec3{-v.x,-v.y,-v.z};};
     std::vector<TangentBasis> faceBasis;
     faceBasis.reserve(mesh.faces.size());
@@ -1620,7 +1619,14 @@ std::vector<TangentBasis> tangentFaceBases(const Mesh& mesh,const neoshared::bif
         const float pu=buv.x-auv.x,qu=cuv.x-auv.x;
         const float pv=buv.y-auv.y,qv=cuv.y-auv.y;
         TangentBasis basis;
-        if(source.faceTexcoords64.empty()) {
+        if(!source.facePositions64.empty()) {
+            const std::array<Vec2,3> uv{{auv,buv,cuv}};
+            const std::array<std::array<double,2>,3> roundedUv{{{auv.x,auv.y},{buv.x,buv.y},{cuv.x,cuv.y}}};
+            const auto& preciseUv=source.faceTexcoords64.empty()?roundedUv:source.faceTexcoords64[i];
+            const std::array<Vec3,3> positions{{source.generatedPositions[a],source.generatedPositions[b],source.generatedPositions[c]}};
+            basis.bitangent=normalize(tangentPositionDerivative(positions,source.facePositions64[i],uv,preciseUv,0u));
+            basis.tangent=normalize(tangentPositionDerivative(positions,source.facePositions64[i],uv,preciseUv,1u));
+        } else if(source.faceTexcoords64.empty()) {
             basis.bitangent=normalize({q.x*pu-p.x*qu,q.y*pu-p.y*qu,q.z*pu-p.z*qu});
             basis.tangent=normalize({q.x*pv-p.x*qv,q.y*pv-p.y*qv,q.z*pv-p.z*qv});
         } else {
@@ -1645,14 +1651,7 @@ void buildTangentBasis(Mesh& mesh,const TangentBasisTopology& topology,
     // Preserve the extra MDX row's defined zero tangent channels.
     if(mesh.vertices.size()>mesh.enginePrelightVertexCount)
         mesh.vertices[mesh.enginePrelightVertexCount].tangentBasis.valid=true;
-    const auto normalize=[](Vec3 v) {
-        const auto length=magnitude(v);
-        // normalize(Vector) and Vector::Normalize use a DOUBLE 1e-9 limit,
-        // unlike NormalOf's zero test (K1 constant at 0x6c3530).
-        if(static_cast<double>(length)<1e-9) return Vec3{1.0f,0.0f,0.0f};
-        const auto reciprocal=1.0f/length;
-        return Vec3{v.x*reciprocal,v.y*reciprocal,v.z*reciprocal};
-    };
+    const auto normalize=normalizeTangentBasis;
     const auto add=[](Vec3 a,Vec3 b){return Vec3{a.x+b.x,a.y+b.y,a.z+b.z};};
     auto faceBasis=tangentFaceBases(mesh,job);
     orientSingularTangentComponents(topology.singular,faceBasis,job);
