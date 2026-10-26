@@ -1010,7 +1010,7 @@ bool improvesReconstructedShading(const Model& model,
         const std::map<const Mesh*,MeshReconstruction>& plans,
         const Model& current,const CornerRows& rows,
         const Model& rebuilt,const CornerRows& generated,bool retainAngles=false,
-        double rounding=0.0) {
+        double rounding=0.0,bool retainTangentBounds=false) {
     const auto difference=[&](Vec3 a,Vec3 b) {
         if(rounding && (same(a,Vec3{}) || same(b,Vec3{}))) return same(a,b)?0.0:1.0;
         const double x=double(a.x)-b.x,y=double(a.y)-b.y,z=double(a.z)-b.z;
@@ -1037,6 +1037,8 @@ bool improvesReconstructedShading(const Model& model,
         const auto existing=plans.find(&source);
         if(existing==plans.end()) continue;
         const auto& plan=existing->second;
+        double beforeMaximum{},afterMaximum{};
+        std::size_t beforeUnresolved{},afterUnresolved{};
         for(std::size_t face=0;face<source.faces.size() && retained;++face)
             for(std::size_t corner=0;corner<3u;++corner) {
                 const auto beforeRow=rows[index][face][corner],afterRow=generated[index][face][corner];
@@ -1047,11 +1049,22 @@ bool improvesReconstructedShading(const Model& model,
                 if((source.mdxBitmap&0x80u) && !source.animated && !source.dangly) {
                     const auto& before=current.meshes[index].vertices[beforeRow].tangentBasis;
                     const auto& after=rebuilt.meshes[index].vertices[afterRow].tangentBasis;
-                    compare(before.bitangent,after.bitangent,target.tangentBasis.bitangent);
-                    compare(before.tangent,after.tangent,target.tangentBasis.tangent);
-                    compare(before.normal,after.normal,target.tangentBasis.normal);
+                    bool beforeOver=false,afterOver=false;
+                    for(const auto& axes:{std::array<Vec3,3>{before.bitangent,after.bitangent,target.tangentBasis.bitangent},
+                            std::array<Vec3,3>{before.tangent,after.tangent,target.tangentBasis.tangent},
+                            std::array<Vec3,3>{before.normal,after.normal,target.tangentBasis.normal}}) {
+                        if(retainTangentBounds) {
+                            constexpr double oneDegree=0.00030460968721752167;
+                            const auto old=difference(axes[0],axes[2]),next=difference(axes[1],axes[2]);
+                            beforeOver=beforeOver || old>oneDegree;afterOver=afterOver || next>oneDegree;
+                            beforeMaximum=std::max(beforeMaximum,old);afterMaximum=std::max(afterMaximum,next);
+                            improved=improved || next<old;
+                        } else compare(axes[0],axes[1],axes[2]);
+                    }
+                    beforeUnresolved+=beforeOver;afterUnresolved+=afterOver;
                 }
             }
+        retained=retained && afterMaximum<=beforeMaximum && afterUnresolved<=beforeUnresolved;
     }
     return retained && improved;
 }
@@ -1108,7 +1121,8 @@ bool reconstructTangentSmoothing(Writer& out,const Model& model,const Model& fra
         tangentChanged=false;
         // A corner-local proposal can split a row before its last writer
         // becomes independently selectable in the next generated mapping.
-        for(const bool useGeneratedWriters:{false,true}) {
+        for(unsigned writerMode=0u;writerMode<(finalFit?3u:2u);++writerMode) {
+            const bool useGeneratedWriters=writerMode!=0u;
             auto current=frames;
             const auto currentRows=generateGeometry(current,model,plans,false,out.advanced(),out.job());
             bestTangent=measureTangentBasis(current,model,currentRows,plans,out.job());
@@ -1143,8 +1157,14 @@ bool reconstructTangentSmoothing(Writer& out,const Model& model,const Model& fra
                 std::vector<TangentBasis> authoredBases(mesh.faces.size());
                 for(std::size_t face=0;face<bases.size();++face)
                     authoredBases[plan.faceOrder[source.authoredFaceIndices[face]]]=bases[face];
+                std::vector<std::array<std::uint16_t,3>> retainedRows;
+                if(writerMode==2u) {
+                    retainedRows.resize(mesh.faces.size());
+                    for(std::size_t f=0;f<mesh.faces.size();++f) for(std::size_t c=0;c<3u;++c)
+                        retainedRows[f][c]=static_cast<std::uint16_t>(mesh.faces[f].indices[c]);
+                }
                 const TangentSmoothingSource tangents{
-                    authoredBases,plan.faceOrder,currentRows[index],useGeneratedWriters,finalFit};
+                    authoredBases,plan.faceOrder,writerMode==2u?retainedRows:currentRows[index],useGeneratedWriters,finalFit};
                 const auto smoothing=out.smoothing(mesh,plan.vertices(),plan.topology.sourceVertices,
                     plan.topology.sourceFaces,out.job(),nullptr,true,nullptr,&plan.smoothing.masks,false,
                     &tangents,&plan.cornerRotations,nullptr,
@@ -1163,7 +1183,7 @@ bool reconstructTangentSmoothing(Writer& out,const Model& model,const Model& fra
                 const auto normalError=measureSeamNormals(rebuilt,model,rows,trial);
                 const bool improves=finalFit?
                     tangentError<bestTangent && improvesReconstructedShading(model,plans,
-                        baseline,baselineRows,rebuilt,rows,true,32.0*std::numeric_limits<float>::epsilon()):
+                        baseline,baselineRows,rebuilt,rows,true,32.0*std::numeric_limits<float>::epsilon(),true):
                     normalError<=best && tangentError<=bestTangent && (normalError<best || tangentError<bestTangent);
                 if(improves) {
                     best=normalError;bestTangent=tangentError;plans=std::move(trial);tangentChanged=true;refined=true;
@@ -5235,6 +5255,111 @@ void reconstructTangentPositionPrecision(Writer& out,const Model& model,const Mo
     }
 }
 
+// Smoothing joins and cyclic starts determine exact normal-row sharing.
+// Recover the tangent writer selected by those generated rows together.
+void reconstructTangentCornerRows(Writer& out,const Model& model,const Model& frames,
+                                  std::map<const Mesh*,MeshReconstruction>& plans) {
+    auto current=frames;
+    auto rows=generateGeometry(current,model,plans,false,out.advanced(),out.job());
+    measureTangentBasis(current,model,rows,plans,out.job());
+    AsciiSkinSeamCache seams;
+    processAsciiSkinSeams(current,out.job(),seams);
+    constexpr double oneDegree=0.00030460968721752167;
+    const auto difference=[](Vec3 a,Vec3 b) {
+        const double x=double(a.x)-b.x,y=double(a.y)-b.y,z=double(a.z)-b.z;
+        return (x*x+y*y)+z*z;
+    };
+    for(std::size_t index=0;index<model.meshes.size();++index) {
+        const auto& mesh=model.meshes[index];
+        const auto found=plans.find(&mesh);
+        if(found==plans.end() || !(mesh.mdxBitmap&0x80u) || mesh.animated || mesh.dangly ||
+           found->second.explicitNormals) continue;
+        auto best=measureMeshTangents(current.meshes[index],mesh,rows[index],found->second);
+        bool improved;
+        do {
+            improved=false;
+            const auto& plan=plans.at(&mesh);
+            std::set<std::array<float,3>> points;
+            for(std::size_t face=0;face<mesh.faces.size();++face)
+                for(std::size_t corner=0;corner<3u;++corner) {
+                    const auto& target=plan.vertices()[mesh.faces[face].indices[corner]];
+                    const auto& actual=current.meshes[index].vertices[rows[index][face][corner]].tangentBasis;
+                    const auto& b=target.tangentBasis;
+                    if(std::max({difference(actual.bitangent,b.bitangent),difference(actual.tangent,b.tangent),
+                            difference(actual.normal,b.normal)})>oneDegree)
+                        points.insert({target.position.x,target.position.y,target.position.z});
+                }
+            std::map<std::array<float,3>,std::vector<std::size_t>> incident;
+            std::set<std::size_t> faces;
+            for(std::size_t face=0;face<mesh.faces.size();++face)
+                for(const auto row:mesh.faces[face].indices) {
+                    const auto p=plan.vertices()[row].position;const std::array<float,3> point{p.x,p.y,p.z};
+                    if(points.count(point)) {faces.insert(face);incident[point].push_back(face);}
+                }
+            const auto consider=[&](MeshReconstruction candidate) {
+                std::map<const Mesh*,MeshReconstruction> changed;
+                changed.emplace(&mesh,std::move(candidate));
+                auto rebuilt=current;
+                auto generated=rows;
+                const auto changedRows=generateGeometry(rebuilt,model,changed,false,out.advanced(),out.job());
+                generated[index]=changedRows[index];
+                if(!preservesSkinChannels(model,generated,plans,&mesh)) return;
+                measureTangentBasis(rebuilt,model,generated,changed,out.job());
+                const auto error=measureMeshTangents(rebuilt.meshes[index],mesh,generated[index],changed.at(&mesh));
+                if(!(error<best)) return;
+                processAsciiSkinSeams(rebuilt,out.job(),seams);
+                if(!improvesReconstructedShading(model,plans,current,rows,rebuilt,generated,
+                        true,32.0*std::numeric_limits<float>::epsilon(),true)) return;
+                best=error;plans.at(&mesh)=std::move(changed.at(&mesh));
+                current=std::move(rebuilt);rows=std::move(generated);improved=true;
+            };
+            std::set<std::vector<std::size_t>> planarGroups;
+            for(const auto& entry:incident) for(const auto seed:entry.second) {
+                std::vector<std::size_t> group;
+                for(const auto face:entry.second)
+                    if(difference(mesh.faces[face].normal,mesh.faces[seed].normal)<1e-8) group.push_back(face);
+                std::sort(group.begin(),group.end());group.erase(std::unique(group.begin(),group.end()),group.end());
+                for(std::size_t a=0;a<group.size();++a) for(std::size_t b=a+1u;b<group.size();++b)
+                    planarGroups.insert({group[a],group[b]});
+                if(group.size()>1u) planarGroups.insert(std::move(group));
+            }
+            for(const auto face:faces) {
+                const auto bits=plans.at(&mesh).smoothing.masks[face];
+                for(std::uint32_t bit=1u;bit;bit<<=1u) if(bits&bit) {
+                    // Removing a join can split an exactly shared normal row.
+                    // Fit its cyclic start in the same move so the intended
+                    // tangent writer remains shared after the mask changes.
+                    for(std::uint8_t rotation=0u;rotation<3u;++rotation) {
+                        auto candidate=plans.at(&mesh);candidate.smoothing.masks[face]&=~bit;
+                        candidate.cornerRotations[face]=rotation;consider(std::move(candidate));
+                    }
+                }
+            }
+            for(const auto& group:planarGroups) {
+                auto candidate=plans.at(&mesh);std::uint32_t used{};
+                for(const auto mask:candidate.smoothing.masks) used|=mask;
+                const auto shared=(~used)&(used+1u);
+                for(const auto face:group) candidate.smoothing.masks[face]|=shared;
+                consider(std::move(candidate));
+            }
+            for(const auto face:faces) for(std::uint8_t rotation=0;rotation<3u;++rotation) {
+                if(plans.at(&mesh).cornerRotations[face]==rotation) continue;
+                auto candidate=plans.at(&mesh);candidate.cornerRotations[face]=rotation;consider(std::move(candidate));
+            }
+            if(improved) continue;
+            std::set<std::pair<std::size_t,std::size_t>> pairs;
+            for(const auto& entry:incident)
+                for(const auto a:entry.second) for(const auto b:entry.second) if(a<b) pairs.emplace(a,b);
+            for(const auto& pair:pairs) for(std::uint8_t a=0;a<3u;++a) for(std::uint8_t b=0;b<3u;++b) {
+                if(plans.at(&mesh).cornerRotations[pair.first]==a || plans.at(&mesh).cornerRotations[pair.second]==b) continue;
+                auto candidate=plans.at(&mesh);candidate.cornerRotations[pair.first]=a;candidate.cornerRotations[pair.second]=b;
+                consider(std::move(candidate));
+            }
+        } while(improved);
+    }
+    measureSeamNormals(current,model,rows,plans);
+}
+
 void reconstructRetainedSeamRows(Writer& out,const Model& model,const Model& frames,
                                 std::map<const Mesh*,MeshReconstruction>& plans) {
     using Plans=std::map<const Mesh*,MeshReconstruction>;
@@ -5349,6 +5474,8 @@ void reconstructSkinSeamSmoothing(Writer& out,const Model& model) {
         reconstructTangentSmoothing(out,model,frames,out.meshReconstructions);
         reconstructCyclicTangentDirections(out,model,frames,out.meshReconstructions,true);
         reconstructTangentPositionPrecision(out,model,frames,out.meshReconstructions);
+        reconstructTangentSmoothing(out,model,frames,out.meshReconstructions,true);
+        reconstructTangentCornerRows(out,model,frames,out.meshReconstructions);
         reconstructTangentSmoothing(out,model,frames,out.meshReconstructions,true);
         return;
     }
@@ -5790,6 +5917,8 @@ void reconstructSkinSeamSmoothing(Writer& out,const Model& model) {
     reconstructRetainedSeamRows(out,model,frames,plans);
     reconstructCyclicTangentDirections(out,model,frames,plans,true);
     reconstructTangentPositionPrecision(out,model,frames,plans);
+    reconstructTangentSmoothing(out,model,frames,plans,true);
+    reconstructTangentCornerRows(out,model,frames,plans);
     reconstructTangentSmoothing(out,model,frames,plans,true);
 }
 
