@@ -54,6 +54,12 @@ struct Smoothing {
     std::vector<TangentBasis> faceBases;
     mutable std::map<std::pair<std::vector<std::uint8_t>,bool>,std::vector<std::uint8_t>> fitted;
     std::vector<double> normalLimits;
+    bool roundNormalScores{};
+    double normalDifference(Vec3 a,Vec3 b) const {
+        const auto error=difference(a,b);
+        constexpr double rounding=32.0*std::numeric_limits<float>::epsilon();
+        return roundNormalScores && error<=rounding*rounding?0.0:error;
+    }
 
     Vec3 normal(std::size_t corner,const std::vector<std::uint8_t>& joined) const {
         Vec3 sum{};
@@ -107,7 +113,7 @@ struct Smoothing {
     double normalScore(const std::vector<std::uint8_t>& joined) const {
         double result{};
         for(std::size_t i=0;i<corners.size();++i)
-            result+=difference(normal(i,joined),corners[i].target);
+            result+=normalDifference(normal(i,joined),corners[i].target);
         return result;
     }
     std::vector<std::uint8_t> fit(std::vector<std::uint8_t> joined,bool remove) const {
@@ -376,12 +382,12 @@ struct Smoothing {
             double before{},normalBefore{},after{},normalAfter{};
             for(const auto corner:affected) {
                 before+=current[corner];
-                normalBefore+=difference(normal(corner,joined),corners[corner].target);
+                normalBefore+=normalDifference(normal(corner,joined),corners[corner].target);
             }
             for(const auto index:changes) joined[index]^=1u;
             for(const auto corner:affected) {
                 after+=error(corner,joined);
-                normalAfter+=difference(normal(corner,joined),corners[corner].target);
+                normalAfter+=normalDifference(normal(corner,joined),corners[corner].target);
             }
             if(after<before && normalAfter<=normalBefore && preservesNormals(joined,affected)) {
                 for(const auto& entry:proposedMasks) masks[entry.first]=entry.second;
@@ -1591,7 +1597,7 @@ ReconstructedSmoothing reconstructSmoothing(
     std::vector<std::vector<std::uint32_t>>* sharedCandidates,
     const std::vector<std::array<double,3>>* precisePositions) {
     Smoothing work{{},{},{},{},job,{}, {}};
-    if(tangents) work.faceBases=tangents->faceBases;
+    if(tangents) {work.faceBases=tangents->faceBases;work.roundNormalScores=tangents->roundNormalScores;}
     work.faceRelations.resize(sourceFaces.size());
     std::vector<std::vector<std::size_t>> incident(sourceVertices.size());
     std::map<std::array<float,3>,std::vector<std::size_t>> positionFaces;

@@ -659,6 +659,15 @@ std::vector<GeneratedVertex> generateVertices(RawNode& raw,Mesh& mesh,
 void neighbors(RawNode& raw,Mesh& mesh) {
     // K1 0x5c3274; K2 0x6e1330. The first nonnegative narrowed match for each
     // undirected source-index edge wins. Planes use raw authored coordinates.
+    std::map<std::pair<std::uint32_t,std::uint32_t>,std::vector<std::size_t>> incident;
+    for(std::size_t i=0;i<mesh.faces.size();++i) {
+        const auto& v=raw.faces[i].vertices;
+        for(std::size_t a=0;a<3u;++a)
+            for(std::size_t b=a+1u;b<3u;++b) {
+                auto& faces=incident[std::minmax(v[a],v[b])];
+                if(faces.empty() || faces.back()!=i) faces.push_back(i);
+            }
+    }
     for(std::size_t i=0;i<mesh.faces.size();++i) {
         const auto& source=raw.faces[i];auto& face=mesh.faces[i];
         const auto weighted=faceCross(source,raw.vertices);
@@ -668,21 +677,19 @@ void neighbors(RawNode& raw,Mesh& mesh) {
         for(std::size_t edge=0;edge<3u;++edge) {
             face.adjacentFaces[edge]=-1;
             const auto a=source.vertices[edge],b=source.vertices[(edge+1u)%3u];
-            for(std::size_t j=0;j<mesh.faces.size();++j) {
+            for(const auto j:incident.at(std::minmax(a,b))) {
                 if(i==j) continue;
                 // A negative narrowed match does not end the engine search;
                 // every subsequent other face starts again with -1.
                 // K1 0x34e0fc/0x5c33c4; K2 0xb68e7/0x6e1563.
-                face.adjacentFaces[edge]=-1;
-                const auto& v=raw.faces[j].vertices;
-                if((v[0]==a && (v[1]==b||v[2]==b)) ||
-                   (v[1]==a && (v[2]==b||v[0]==b)) ||
-                   (v[2]==a && (v[0]==b||v[1]==b))) {
-                    face.adjacentFaces[edge]=static_cast<std::int16_t>(j);
-                    // NW tests only the ushort -1 sentinel (0x453a3c),
-                    // whereas the KOTOR builder requires a nonnegative short.
-                    if(raw.node.flags==0xa1u?face.adjacentFaces[edge]!=-1:face.adjacentFaces[edge]>=0) break;
+                const auto narrowed=static_cast<std::int16_t>(j);
+                // NW tests only the ushort -1 sentinel (0x453a3c),
+                // whereas the KOTOR builder requires a nonnegative short.
+                if(raw.node.flags==0xa1u?narrowed!=-1:narrowed>=0) {
+                    face.adjacentFaces[edge]=narrowed;break;
                 }
+                if(j+1u==mesh.faces.size() || (j+2u==mesh.faces.size() && i+1u==mesh.faces.size()))
+                    face.adjacentFaces[edge]=narrowed;
             }
         }
     }

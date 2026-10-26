@@ -379,7 +379,7 @@ MeshReconstruction reconstructMesh(Writer& out,const Node& node,const Mesh& mesh
     return result;
 }
 
-using CornerRows=std::vector<std::vector<std::array<std::int16_t,3>>>;
+using CornerRows=std::vector<std::vector<std::array<std::uint16_t,3>>>;
 
 struct PreciseUvPool {
     std::vector<std::array<double,2>> values;
@@ -676,7 +676,7 @@ double measureSeamNormals(const Model& rebuilt,const Model& source,const CornerR
 }
 
 double measureMeshTangents(const Mesh& rebuilt,const Mesh& source,
-                          const std::vector<std::array<std::int16_t,3>>& rows,
+                          const std::vector<std::array<std::uint16_t,3>>& rows,
                           const MeshReconstruction& plan) {
     double error{};
     const auto difference=[](Vec3 a,Vec3 b) {
@@ -1091,11 +1091,12 @@ void reconstructFaceOrder(Writer& out,const Model& model,const Model& frames,
 
 // Retained tangent channels disambiguate smoothing even on coplanar faces.
 bool reconstructTangentSmoothing(Writer& out,const Model& model,const Model& frames,
-                                 std::map<const Mesh*,MeshReconstruction>& plans) {
+                                 std::map<const Mesh*,MeshReconstruction>& plans,bool finalFit=false) {
     using Plans=std::map<const Mesh*,MeshReconstruction>;
     AsciiSkinSeamCache seamCache;
     auto baseline=frames;
-    const auto baselineRows=generateGeometry(baseline,model,plans,false,out.advanced(),out.job());
+    auto baselineRows=generateGeometry(baseline,model,plans,false,out.advanced(),out.job());
+    if(finalFit) measureTangentBasis(baseline,model,baselineRows,plans,out.job());
     processAsciiSkinSeams(baseline,out.job(),seamCache);
     double best=measureSeamNormals(baseline,model,baselineRows,plans),bestTangent{};
     bool refined=false;
@@ -1120,6 +1121,21 @@ bool reconstructTangentSmoothing(Writer& out,const Model& model,const Model& fra
                    found->second.explicitNormals || mesh.asciiNormalPositionSource) continue;
                 auto& plan=found->second;
                 const auto& generated=current.meshes[index];
+                if(finalFit) {
+                    bool unresolved=false;
+                    for(std::size_t face=0;face<mesh.faces.size();++face)
+                        for(std::size_t corner=0;corner<3u;++corner) {
+                            const auto& actual=generated.vertices[currentRows[index][face][corner]].tangentBasis;
+                            const auto& target=plan.vertices()[mesh.faces[face].indices[corner]].tangentBasis;
+                            for(const auto& pair:{std::make_pair(actual.bitangent,target.bitangent),
+                                    std::make_pair(actual.tangent,target.tangent),std::make_pair(actual.normal,target.normal)}) {
+                                const double x=double(pair.first.x)-pair.second.x,y=double(pair.first.y)-pair.second.y,
+                                    z=double(pair.first.z)-pair.second.z;
+                                unresolved=unresolved || (x*x+y*y)+z*z>0.00030460968721752167;
+                            }
+                        }
+                    if(!unresolved) continue;
+                }
                 const auto& source=*generated.asciiTangentSource;
                 auto bases=ascii::tangentFaceBases(generated,out.job());
                 const auto topology=ascii::prepareTangentBasis(generated,out.job());
@@ -1128,7 +1144,7 @@ bool reconstructTangentSmoothing(Writer& out,const Model& model,const Model& fra
                 for(std::size_t face=0;face<bases.size();++face)
                     authoredBases[plan.faceOrder[source.authoredFaceIndices[face]]]=bases[face];
                 const TangentSmoothingSource tangents{
-                    authoredBases,plan.faceOrder,currentRows[index],useGeneratedWriters};
+                    authoredBases,plan.faceOrder,currentRows[index],useGeneratedWriters,finalFit};
                 const auto smoothing=out.smoothing(mesh,plan.vertices(),plan.topology.sourceVertices,
                     plan.topology.sourceFaces,out.job(),nullptr,true,nullptr,&plan.smoothing.masks,false,
                     &tangents,&plan.cornerRotations,nullptr,
@@ -1145,9 +1161,13 @@ bool reconstructTangentSmoothing(Writer& out,const Model& model,const Model& fra
                 processAsciiSkinSeams(rebuilt,out.job(),seamCache);
                 if(!preservesSkinChannels(model,rows,plans)) return;
                 const auto normalError=measureSeamNormals(rebuilt,model,rows,trial);
-                if(normalError<=best && tangentError<=bestTangent &&
-                   (normalError<best || tangentError<bestTangent)) {
+                const bool improves=finalFit?
+                    tangentError<bestTangent && improvesReconstructedShading(model,plans,
+                        baseline,baselineRows,rebuilt,rows,true,32.0*std::numeric_limits<float>::epsilon()):
+                    normalError<=best && tangentError<=bestTangent && (normalError<best || tangentError<bestTangent);
+                if(improves) {
                     best=normalError;bestTangent=tangentError;plans=std::move(trial);tangentChanged=true;refined=true;
+                    if(finalFit) {baseline=std::move(rebuilt);baselineRows=rows;}
                 }
             };
             considerTangents(candidate);
@@ -3610,7 +3630,7 @@ struct TangentFitCache {
     std::map<std::vector<std::uint32_t>,std::vector<std::array<double,3>>> products;
     struct Geometry {
         Mesh mesh;
-        std::vector<std::array<std::int16_t,3>> rows;
+        std::vector<std::array<std::uint16_t,3>> rows;
         ascii::TangentBasisTopology topology;
         std::vector<std::size_t> faceOrder;
         std::vector<std::uint8_t> cornerRotations;
@@ -5283,6 +5303,7 @@ void reconstructSkinSeamSmoothing(Writer& out,const Model& model) {
         reconstructTangentSmoothing(out,model,frames,out.meshReconstructions);
         reconstructCyclicTangentDirections(out,model,frames,out.meshReconstructions,true);
         reconstructTangentPositionPrecision(out,model,frames,out.meshReconstructions);
+        reconstructTangentSmoothing(out,model,frames,out.meshReconstructions,true);
         return;
     }
     using Plans=std::map<const Mesh*,MeshReconstruction>;
@@ -5723,6 +5744,7 @@ void reconstructSkinSeamSmoothing(Writer& out,const Model& model) {
     reconstructRetainedSeamRows(out,model,frames,plans);
     reconstructCyclicTangentDirections(out,model,frames,plans,true);
     reconstructTangentPositionPrecision(out,model,frames,plans);
+    reconstructTangentSmoothing(out,model,frames,plans,true);
 }
 
 ReconstructedMesh writeMesh(Writer& out,const Model& model,const Node& node,const Mesh& mesh) {

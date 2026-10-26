@@ -48,6 +48,18 @@ Edge edge(std::uint32_t a,std::uint32_t b) {
     return {{std::min(a,b),std::max(a,b)}};
 }
 
+std::int16_t edgeNeighbor(const Mesh& mesh,const std::vector<std::size_t>& incident,
+                          std::size_t face,std::size_t count) {
+    std::int16_t result=-1;
+    for(const auto candidate:incident) {
+        if(candidate==face) continue;
+        const auto narrowed=static_cast<std::int16_t>(candidate);
+        if(mesh.animated?narrowed!=-1:narrowed>=0) return narrowed;
+        if(candidate+1u==count || (candidate+2u==count && face+1u==count)) result=narrowed;
+    }
+    return result;
+}
+
 std::vector<std::array<std::int16_t,3>> reconstructedAdjacency(const Mesh& mesh,
                             const std::vector<std::array<std::uint32_t,3>>& faces,
                             const neoshared::bif::JobControl& job) {
@@ -63,24 +75,8 @@ std::vector<std::array<std::int16_t,3>> reconstructedAdjacency(const Mesh& mesh,
     for(std::size_t i=0;i<faces.size();++i) {
         job.check();
         for(std::size_t corner=0;corner<3u;++corner) {
-            std::int16_t neighbor=-1;
-            const auto& list=incident.at(edge(faces[i][corner],faces[i][(corner+1u)%3u]));
-            for(const auto candidate:list) {
-                if(candidate==i) continue;
-                const auto narrowed=static_cast<std::int16_t>(candidate);
-                // BuildNeighborLists: K1 0x5c3274, K2 0x6e1330. A negative
-                // narrowed KOTOR match continues; animmesh tests only -1.
-                if(mesh.animated?narrowed!=-1:narrowed>=0) {
-                    neighbor=narrowed;
-                    break;
-                }
-                // Each subsequent other face resets the pending result.
-                // Retain a negative match only at the last visited face.
-                if(candidate+1u==faces.size() ||
-                   (candidate+2u==faces.size() && i+1u==faces.size()))
-                    neighbor=narrowed;
-            }
-            result[i][corner]=neighbor;
+            result[i][corner]=edgeNeighbor(mesh,
+                incident.at(edge(faces[i][corner],faces[i][(corner+1u)%3u])),i,faces.size());
         }
     }
     return result;
@@ -175,6 +171,17 @@ std::vector<ReconstructedTopology> reconstructTopologies(
     appendCandidate();
     auto neighbors=reconstructedAdjacency(mesh,result.front().sourceFaces,job);
 
+    std::vector<std::array<std::uint32_t,3>> sourceFaces(mesh.faces.size());
+    std::map<Edge,std::vector<std::size_t>> incident;
+    for(std::size_t face=0;face<sourceFaces.size();++face) {
+        for(std::size_t corner=0;corner<3u;++corner)
+            sourceFaces[face][corner]=static_cast<std::uint32_t>(groups.find(face*3u+corner));
+        for(std::size_t corner=0;corner<3u;++corner) {
+            auto& list=incident[edge(sourceFaces[face][corner],sourceFaces[face][(corner+1u)%3u])];
+            if(list.empty() || list.back()!=face) list.push_back(face);
+        }
+    }
+
     std::vector<std::vector<std::size_t>> members(mesh.faces.size()*3u);
     std::vector<ascii::NormalFaceCross> crosses;
     for(std::size_t face=0;face<mesh.faces.size();++face) {
@@ -221,31 +228,54 @@ std::vector<ReconstructedTopology> reconstructTopologies(
             for(std::size_t j=i+1u;j<candidates.size();++j) {
                 if(groups.find(candidates[i])==groups.find(candidates[j])) continue;
                 if(improveNormals && !(normalJoinImprovement(candidates[i],candidates[j])>0.0)) continue;
-                // A point join must preserve existing directed neighbors,
-                // including boundaries. An already unreconstructable edge
-                // must not block unrelated joins; it may also recover its
-                // original neighbor when the joined endpoints identify it.
-                auto proposed=groups;
-                proposed.join(candidates[i],candidates[j]);
-                std::vector<std::array<std::uint32_t,3>> faces(mesh.faces.size());
-                for(std::size_t face=0;face<faces.size();++face) {
-                    job.check();
-                    for(std::size_t corner=0;corner<3u;++corner)
-                        faces[face][corner]=static_cast<std::uint32_t>(proposed.find(face*3u+corner));
+                // Update only edges incident to the merged source. Retain
+                // every recovered neighbor; unresolved source edges may move
+                // while the remaining endpoint joins are reconstructed.
+                const auto first=groups.find(candidates[i]),second=groups.find(candidates[j]);
+                const auto kept=std::min(first,second),removed=std::max(first,second);
+                std::map<std::size_t,std::array<std::uint32_t,3>> oldFaces;
+                std::map<Edge,std::vector<std::size_t>> oldEdges;
+                for(const auto corner:members[removed]) oldFaces.emplace(corner/3u,sourceFaces[corner/3u]);
+                for(const auto& entry:oldFaces) {
+                    auto& face=sourceFaces[entry.first];
+                    for(std::size_t corner=0;corner<3u;++corner) {
+                        const auto key=edge(face[corner],face[(corner+1u)%3u]);
+                        oldEdges.emplace(key,incident[key]);
+                        auto& list=incident[key];
+                        list.erase(std::remove(list.begin(),list.end(),entry.first),list.end());
+                    }
+                    for(auto& source:face) if(source==removed) source=static_cast<std::uint32_t>(kept);
                 }
-                auto proposedNeighbors=reconstructedAdjacency(mesh,faces,job);
+                for(const auto& entry:oldFaces) {
+                    const auto& face=sourceFaces[entry.first];
+                    for(std::size_t corner=0;corner<3u;++corner) {
+                        const auto key=edge(face[corner],face[(corner+1u)%3u]);
+                        oldEdges.emplace(key,incident[key]);
+                        auto& list=incident[key];
+                        const auto at=std::lower_bound(list.begin(),list.end(),entry.first);
+                        if(at==list.end() || *at!=entry.first) list.insert(at,entry.first);
+                    }
+                }
                 bool retained=true;
-                for(std::size_t face=0;face<faces.size() && retained;++face)
-                    for(std::size_t corner=0;corner<3u;++corner)
-                        if(proposedNeighbors[face][corner]!=neighbors[face][corner] &&
-                           proposedNeighbors[face][corner]!=mesh.faces[face].adjacentFaces[corner])
-                            retained=false;
+                std::map<std::pair<std::size_t,std::size_t>,std::int16_t> changed;
+                for(const auto& entry:oldEdges)
+                    for(const auto face:incident.at(entry.first))
+                        for(std::size_t corner=0;corner<3u;++corner) {
+                            if(edge(sourceFaces[face][corner],sourceFaces[face][(corner+1u)%3u])!=entry.first) continue;
+                            const auto neighbor=edgeNeighbor(mesh,incident.at(entry.first),face,sourceFaces.size());
+                            if(neighbors[face][corner]==mesh.faces[face].adjacentFaces[corner] &&
+                               neighbor!=neighbors[face][corner]) retained=false;
+                            changed[{face,corner}]=neighbor;
+                        }
                 if(retained) {
-                    const auto first=groups.find(candidates[i]),second=groups.find(candidates[j]);
-                    auto& merged=members[std::min(first,second)];auto& removed=members[std::max(first,second)];
-                    merged.insert(merged.end(),removed.begin(),removed.end());
-                    std::sort(merged.begin(),merged.end());removed.clear();
-                    groups=std::move(proposed);neighbors=std::move(proposedNeighbors);
+                    auto& merged=members[kept];auto& discarded=members[removed];
+                    merged.insert(merged.end(),discarded.begin(),discarded.end());
+                    std::sort(merged.begin(),merged.end());discarded.clear();
+                    groups.join(kept,removed);
+                    for(const auto& entry:changed) neighbors[entry.first.first][entry.first.second]=entry.second;
+                } else {
+                    for(const auto& entry:oldFaces) sourceFaces[entry.first]=entry.second;
+                    for(auto& entry:oldEdges) incident[entry.first]=std::move(entry.second);
                 }
             }
     };

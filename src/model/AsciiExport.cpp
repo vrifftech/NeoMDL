@@ -48,6 +48,7 @@ ReconstructedSmoothing Writer::smoothing(
     key.push_back(tangents!=nullptr);
     if(tangents) {
         key.push_back(tangents->useGeneratedWriters);
+        key.push_back(tangents->roundNormalScores);
         key.push_back(tangents->faceBases.size());
         for(const auto& basis:tangents->faceBases) {
             vector(basis.bitangent);vector(basis.tangent);vector(basis.normal);

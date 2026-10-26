@@ -33,8 +33,9 @@ struct ReconstructedSmoothing {
 struct TangentSmoothingSource {
     const std::vector<TangentBasis>& faceBases;
     const std::vector<std::size_t>& faceOrder;
-    const std::vector<std::array<std::int16_t,3>>& cornerRows;
+    const std::vector<std::array<std::uint16_t,3>>& cornerRows;
     bool useGeneratedWriters{true};
+    bool roundNormalScores{};
 };
 
 ReconstructedSmoothing reconstructSmoothing(
