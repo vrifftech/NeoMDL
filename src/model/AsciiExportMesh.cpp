@@ -1476,7 +1476,7 @@ void reconstructNormalPositionPrecision(Writer& out,const Model& model,const Mod
     };
     // Precision reconstruction may change the last few bits of an otherwise
     // unchanged unit normal. Score those float-rounding differences equally.
-    constexpr double rounding=32.0*std::numeric_limits<float>::epsilon();
+    constexpr double rounding=128.0*std::numeric_limits<float>::epsilon();
     const auto difference=[](Vec3 a,Vec3 b) {
         if(same(a,Vec3{}) || same(b,Vec3{})) return same(a,b)?0.0:1.0;
         const double x=double(a.x)-b.x,y=double(a.y)-b.y,z=double(a.z)-b.z;
@@ -1620,6 +1620,12 @@ void reconstructNormalPositionPrecision(Writer& out,const Model& model,const Mod
             }
             std::vector<std::size_t> coreFaces;
             for(std::size_t face=0;face<tipFaces.size();++face) if(!tipFaces[face]) coreFaces.push_back(face);
+            struct TipFit {
+                std::pair<double,double> score;
+                std::array<std::array<double,3>,3> positions;
+                std::array<std::uint8_t,2> rotations;
+            };
+            std::map<std::pair<std::size_t,bool>,TipFit> jointTipFits;
             const auto fitTips=[&](MeshReconstruction& trial) {
                 auto& positions=trial.preciseSourcePositions;
                 for(const auto& tip:tips) {
@@ -1651,11 +1657,17 @@ void reconstructNormalPositionPrecision(Writer& out,const Model& model,const Mod
                     };
                     auto best=score(trial.cornerRotations[tip.faces[0]],trial.cornerRotations[tip.faces[1]]);
                     auto bestPosition=positions[tip.source];
+                    const auto triangle=trial.topology.sourceFaces[tip.faces[0]];
+                    std::array<std::array<double,3>,3> bestPoints{
+                        positions[triangle[0]],positions[triangle[1]],positions[triangle[2]]};
                     std::array<std::uint8_t,2> bestRotations{trial.cornerRotations[tip.faces[0]],trial.cornerRotations[tip.faces[1]]};
                     const auto consider=[&] {
                         for(std::uint8_t a=0;a<3u;++a) for(std::uint8_t b=0;b<3u;++b) {
                             const auto value=score(a,b);
-                            if(value<best) {best=value;bestPosition=positions[tip.source];bestRotations={a,b};}
+                            if(value<best) {
+                                best=value;bestPosition=positions[tip.source];bestRotations={a,b};
+                                for(std::size_t c=0;c<3u;++c) bestPoints[c]=positions[triangle[c]];
+                            }
                         }
                     };
                     std::array<std::vector<double>,3> seeds;
@@ -1700,6 +1712,40 @@ void reconstructNormalPositionPrecision(Writer& out,const Model& model,const Mod
                         if(!(best<before)) break;
                     }
                     positions[tip.source]=bestPosition;
+                    // A cancelled tip depends on rounded products at all three
+                    // corners. Fit their residuals together when scalar tip
+                    // moves cannot recover the retained direction.
+                    if(best.second>2.0*std::acos(-1.0)/180.0) {
+                        const auto key=std::make_pair(tip.source,joined);
+                        const auto cached=jointTipFits.find(key);
+                        if(cached==jointTipFits.end()) {
+                            for(std::size_t sample=0u;sample<19683u && best.first>0.0;++sample) {
+                                auto code=sample;
+                                for(std::size_t c=0;c<3u;++c) for(std::size_t axis=0;axis<3u;++axis) {
+                                    const auto cell=intervals[triangle[c]][axis];
+                                    const auto part=code%3u;code/=3u;
+                                    positions[triangle[c]][axis]=part==1u?
+                                        double(component(trial.sourcePositions[triangle[c]],axis)):cell[part/2u];
+                                }
+                                consider();
+                            }
+                            constexpr std::array<std::size_t,9> primes{2u,3u,5u,7u,11u,13u,17u,19u,23u};
+                            for(std::size_t sample=1u;sample<=32768u && best.first>0.0;++sample) {
+                                for(std::size_t c=0;c<3u;++c) for(std::size_t axis=0;axis<3u;++axis) {
+                                    double value{},scale=1.0;
+                                    const auto prime=primes[c*3u+axis];
+                                    for(auto digit=sample;digit;digit/=prime) {scale/=prime;value+=double(digit%prime)*scale;}
+                                    const auto cell=intervals[triangle[c]][axis];
+                                    positions[triangle[c]][axis]=cell[0]+(cell[1]-cell[0])*value;
+                                }
+                                consider();
+                            }
+                            jointTipFits.emplace(key,TipFit{best,bestPoints,bestRotations});
+                        } else if(cached->second.score<best) {
+                            best=cached->second.score;bestPoints=cached->second.positions;bestRotations=cached->second.rotations;
+                        }
+                        for(std::size_t c=0;c<3u;++c) positions[triangle[c]]=bestPoints[c];
+                    }
                     trial.cornerRotations[tip.faces[0]]=bestRotations[0];
                     trial.cornerRotations[tip.faces[1]]=bestRotations[1];
                 }
