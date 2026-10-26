@@ -1,4 +1,5 @@
 #include <model/AsciiExportInternal.hpp>
+#include <model/AsciiExportTopology.hpp>
 #include <model/AsciiModelInternal.hpp>
 
 #include <algorithm>
@@ -416,9 +417,11 @@ void reconstructExportedNodeFrames(Model& model,const neoshared::bif::JobControl
 
 namespace neomdl::model {
 
-AsciiExportResult exportAsciiModel(const Model& model,const neoshared::bif::JobControl& job,
+AsciiExportResult exportAsciiModel(const Model& input,const neoshared::bif::JobControl& job,
                                   const AsciiExportOptions& options) {
     using namespace ascii_export;
+    Model model=input;
+    if(!options.advanced) for(auto& mesh:model.meshes) restoreCollapsedAuthoringFaces(mesh);
     Writer writer(model.game,job,options);
     const auto& name=model.name;
     // newmodel receives the complete command argument, not an sscanf token.

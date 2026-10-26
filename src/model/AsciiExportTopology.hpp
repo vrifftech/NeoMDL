@@ -4,6 +4,10 @@
 
 namespace neomdl::model::ascii_export {
 
+// Recover removed authored triangles retained by the compiler's unshifted
+// plane/neighbor prefix before reconstructing smoothing connectivity.
+void restoreCollapsedAuthoringFaces(Mesh& mesh);
+
 struct ReconstructedTopology {
     std::vector<std::size_t> sourceVertices;
     std::vector<std::array<std::uint32_t,3>> sourceFaces;

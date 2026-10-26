@@ -95,6 +95,101 @@ std::size_t changedAdjacency(const Mesh& mesh,
 
 } // namespace
 
+void restoreCollapsedAuthoringFaces(Mesh& mesh) {
+    const auto original=mesh.faces;
+    std::vector<MeshFace> authored;
+    authored.reserve(original.size());
+    const auto position=[&](std::int16_t row) {return mesh.vertices[static_cast<std::uint16_t>(row)].position;};
+    const auto planeFits=[&](const MeshFace& plane,const MeshFace& triangle) {
+        const auto a=position(triangle.indices[0]),b=position(triangle.indices[1]),c=position(triangle.indices[2]);
+        const Vec3 p{b.x-a.x,b.y-a.y,b.z-a.z},q{c.x-b.x,c.y-b.y,c.z-b.z};
+        auto n=ascii::normalizeTangentBasis({p.y*q.z-p.z*q.y,p.z*q.x-p.x*q.z,p.x*q.y-p.y*q.x});
+        const double x=double(n.x)-plane.normal.x,y=double(n.y)-plane.normal.y,z=double(n.z)-plane.normal.z;
+        return (x*x+y*y)+z*z<1e-10;
+    };
+    std::size_t geometry{};
+    for(std::size_t field=0;field<original.size();++field) {
+        const auto& metadata=original[field];
+        std::vector<MeshFace> collapsed;
+        if(same(metadata.normal,{1.0f,0.0f,0.0f}) && !planeFits(metadata,original[geometry]) &&
+           field+1u<original.size() && planeFits(original[field+1u],original[geometry])) {
+            for(std::size_t repeated=0;repeated<3u;++repeated) {
+                const auto other=(repeated+1u)%3u;
+                const auto neighbor=metadata.adjacentFaces[other];
+                if(metadata.adjacentFaces[repeated]!=-1 || neighbor<0 ||
+                   metadata.adjacentFaces[(other+1u)%3u]!=neighbor) continue;
+                const auto n=static_cast<std::size_t>(neighbor);
+                const auto& reference=n<authored.size()?authored[n]:original[n-(field-geometry)-1u];
+                for(std::size_t a=0;a<3u;++a) for(std::size_t b=0;b<3u;++b) {
+                    if(a==b) continue;
+                    auto face=metadata;
+                    face.indices[repeated]=face.indices[(repeated+1u)%3u]=reference.indices[a];
+                    face.indices[(repeated+2u)%3u]=reference.indices[b];
+                    if(position(face.indices[0]).x==-metadata.planeDistance) collapsed.push_back(face);
+                }
+            }
+        }
+        if(!collapsed.empty()) {
+            const auto score=[&](const MeshFace& face) {
+                std::size_t changed{};
+                for(std::size_t edgeIndex=0;edgeIndex<3u;++edgeIndex) {
+                    const auto a=position(face.indices[edgeIndex]),b=position(face.indices[(edgeIndex+1u)%3u]);
+                    std::int16_t match=-1;
+                    for(std::size_t j=0;j<original.size();++j) {
+                        if(j==field) continue;
+                        const auto& candidate=j<authored.size()?authored[j]:original[j-(field-geometry)-1u];
+                        bool joined=false;
+                        for(std::size_t c=0;c<3u;++c) for(std::size_t d=c+1u;d<3u;++d)
+                            joined=joined || (same(position(candidate.indices[c]),a) && same(position(candidate.indices[d]),b)) ||
+                                (same(position(candidate.indices[c]),b) && same(position(candidate.indices[d]),a));
+                        if(joined) {match=static_cast<std::int16_t>(j);if(match>=0) break;}
+                        else match=-1;
+                    }
+                    changed+=match!=face.adjacentFaces[edgeIndex];
+                }
+                for(std::size_t j=0;j<original.size();++j) {
+                    if(j==field) continue;
+                    const auto& candidate=j<authored.size()?authored[j]:original[j-(field-geometry)-1u];
+                    for(std::size_t e=0;e<3u;++e) {
+                        if(original[j].adjacentFaces[e]!=static_cast<std::int16_t>(field)) continue;
+                        const auto a=position(candidate.indices[e]),b=position(candidate.indices[(e+1u)%3u]);
+                        bool joined=false;
+                        for(std::size_t c=0;c<3u;++c) for(std::size_t d=c+1u;d<3u;++d)
+                            joined=joined || (same(position(face.indices[c]),a) && same(position(face.indices[d]),b)) ||
+                                (same(position(face.indices[c]),b) && same(position(face.indices[d]),a));
+                        changed+=!joined;
+                    }
+                }
+                return changed;
+            };
+            authored.push_back(*std::min_element(collapsed.begin(),collapsed.end(),[&](const auto& a,const auto& b) {
+                return score(a)<score(b);
+            }));
+        } else {
+            auto face=original[geometry++];
+            face.normal=metadata.normal;face.planeDistance=metadata.planeDistance;face.adjacentFaces=metadata.adjacentFaces;
+            authored.push_back(face);
+        }
+    }
+    if(geometry==original.size()) return;
+    for(;geometry<original.size();++geometry) {
+        auto face=original[geometry];
+        face.adjacentFaces={-1,-1,-1};
+        for(std::size_t e=0;e<3u;++e) {
+            const auto a=position(face.indices[e]),b=position(face.indices[(e+1u)%3u]);
+            for(std::size_t f=0;f<original.size();++f) {
+                bool joined=false;
+                for(std::size_t c=0;c<3u;++c) for(std::size_t d=c+1u;d<3u;++d)
+                    joined=joined || (same(position(authored[f].indices[c]),a) && same(position(authored[f].indices[d]),b)) ||
+                        (same(position(authored[f].indices[c]),b) && same(position(authored[f].indices[d]),a));
+                if(joined) {face.adjacentFaces[e]=static_cast<std::int16_t>(f);break;}
+            }
+        }
+        authored.push_back(face);
+    }
+    mesh.faces=std::move(authored);
+}
+
 std::vector<ReconstructedTopology> reconstructTopologies(
     const Mesh& mesh,
     const std::vector<Vertex>& compiledVertices,
