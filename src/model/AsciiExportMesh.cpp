@@ -4940,9 +4940,9 @@ void reconstructTangentPositionPrecision(Writer& out,const Model& model,const Mo
         // Joint samples cross product-rounding cells that scalar UV moves cannot
         // reach. Every coordinate remains inside its original float rounding cell.
         static const auto seeds=[] {
-            std::vector<std::array<double,9>> result(32768u);
-            const std::array<std::size_t,9> primes{2u,3u,5u,7u,11u,13u,17u,19u,23u};
-            for(std::size_t i=0;i<result.size();++i) for(std::size_t c=0;c<9u;++c) {
+            std::vector<std::array<double,15>> result(32768u);
+            const std::array<std::size_t,15> primes{2u,3u,5u,7u,11u,13u,17u,19u,23u,29u,31u,37u,41u,43u,47u};
+            for(std::size_t i=0;i<result.size();++i) for(std::size_t c=0;c<15u;++c) {
                 double value{},scale=1.0;
                 for(auto digit=i+1u;digit;digit/=primes[c]) {
                     scale/=primes[c];value+=double(digit%primes[c])*scale;
@@ -5194,8 +5194,28 @@ void reconstructTangentPositionPrecision(Writer& out,const Model& model,const Mo
                             const auto group=chosen[c];
                             candidate[group][axis]=lower[group][axis]+(upper[group][axis]-lower[group][axis])*seed[c*3u+axis];
                         }
+                        candidateUv=fittedUv;
                         consider();
+                        // Position and UV residuals can cross the required
+                        // product-rounding cells only when varied together.
+                        for(std::size_t c=0;c<3u;++c) for(std::size_t axis=0;axis<2u;++axis) {
+                            const auto cell=roundingCell(axis?faceUv[face][c].y:faceUv[face][c].x);
+                            candidateUv[c][axis]=cell[0]+(cell[1]-cell[0])*seed[9u+c*2u+axis];
+                        }
+                        consider();
+                        const auto sampledUv=candidateUv;
+                        // Shared coordinate planes are exact subspaces of the
+                        // rounding cells. Independent samples do not visit them.
+                        for(std::size_t c=1;c<3u;++c) for(std::size_t earlier=0;earlier<c;++earlier)
+                            for(std::size_t axis=0;axis<3u;++axis) {
+                                const auto a=facePositions[face][c],b=facePositions[face][earlier];
+                                const std::array<float,3> ac{a.x,a.y,a.z},bc{b.x,b.y,b.z};
+                                if(ac[axis]==bc[axis]) candidate[chosen[c]][axis]=candidate[chosen[earlier]][axis];
+                            }
+                        candidateUv=fittedUv;consider();
+                        candidateUv=sampledUv;consider();
                     }
+                    candidateUv=fittedUv;
                     for(std::size_t c=0;c<3u;++c) for(std::size_t axis=0;axis<2u;++axis) {
                         const std::array<Position,3> highPositions{positions[chosen[0]],positions[chosen[1]],positions[chosen[2]]};
                         const auto values=uvCandidates(face,c,axis,highPositions,fittedUv,true);
