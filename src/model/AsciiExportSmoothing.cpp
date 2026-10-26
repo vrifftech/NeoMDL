@@ -1077,7 +1077,8 @@ ReconstructedNormalStars reconstructNormalCornerStars(
     const SourceFaceNeighbors neighbors(mesh,sourceFaces,faceOrder);
     std::vector<ascii::NormalFaceCross> crosses(sourceFaces.size());
     for(std::size_t face=0;face<crosses.size();++face) crosses[face]=alternatives[face][current[face]];
-    const double rounding=precisePositions?32.0*std::numeric_limits<float>::epsilon():0.0;
+    // Match the position fit's allowance when repairing its remaining corners.
+    const double rounding=precisePositions?128.0*std::numeric_limits<float>::epsilon():0.0;
     const auto squaredError=[&](Vec3 a,Vec3 b) {
         if(precisePositions && (same(a,Vec3{}) || same(b,Vec3{}))) return same(a,b)?0.0:1.0;
         const double value=difference(a,b);
@@ -1153,29 +1154,35 @@ ReconstructedNormalStars reconstructNormalCornerStars(
         }
         return result;
     };
-    std::vector<std::vector<std::size_t>> domains;
-    if(movingFaces) domains.push_back(*movingFaces);
-    else {
-        // Disjoint smoothing groups have independent normal objectives.
-        // Fit each connected contributor set while retaining the other faces'
-        // slots; opposite sides of a two-sided mesh need not be permuted together.
-        std::set<std::vector<std::size_t>> seen;
-        for(const auto& star:incident) {
-            std::set<std::size_t> remaining;
-            for(const auto face:star) if(anchors[face]) remaining.insert(face);
-            while(!remaining.empty()) {
-                std::vector<std::size_t> connected{*remaining.begin()};
-                remaining.erase(remaining.begin());
-                for(std::size_t i=0;i<connected.size();++i)
-                    for(const auto group:faceGroups[connected[i]])
-                        for(const auto face:groups[group].faces)
-                            if(remaining.erase(face)) connected.push_back(face);
-                std::sort(connected.begin(),connected.end());
-                if(seen.insert(connected).second) domains.push_back(std::move(connected));
-            }
-        }
-    }
     const bool repairMode=movingFaces && baselineCornerNormals;
+    // Select contributors whose generated normals exceed the fixed limits.
+    // Already valid corners still constrain every proposed rotation.
+    std::vector<bool> repairing(sourceFaces.size());
+    if(repairMode) for(std::size_t group=0;group<groups.size();++group)
+        if(!evaluateGroup(group).accepted)
+            for(const auto face:groups[group].faces) repairing[face]=true;
+    std::vector<std::vector<std::size_t>> domains;
+    // Disjoint smoothing groups have independent normal objectives, including
+    // an explicitly supplied repair domain. Preserve their face-order slots
+    // while fitting each connected contributor set independently.
+    std::set<std::vector<std::size_t>> seen;
+    const auto appendDomains=[&](const std::vector<std::size_t>& faces) {
+        std::set<std::size_t> remaining;
+        for(const auto face:faces)
+            if((movingFaces || anchors[face]) && (!repairMode || repairing[face])) remaining.insert(face);
+        while(!remaining.empty()) {
+            std::vector<std::size_t> connected{*remaining.begin()};
+            remaining.erase(remaining.begin());
+            for(std::size_t i=0;i<connected.size();++i)
+                for(const auto group:faceGroups[connected[i]])
+                    for(const auto face:groups[group].faces)
+                        if(remaining.erase(face)) connected.push_back(face);
+            std::sort(connected.begin(),connected.end());
+            if(seen.insert(connected).second) domains.push_back(std::move(connected));
+        }
+    };
+    if(movingFaces) appendDomains(*movingFaces);
+    else for(const auto& star:incident) appendDomains(star);
     bool improved;
     do {
         improved=false;

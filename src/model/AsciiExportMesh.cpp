@@ -1708,22 +1708,26 @@ void reconstructNormalPositionPrecision(Writer& out,const Model& model,const Mod
                             const auto ends=intervals[tip.source][axis];
                             std::set<double> values{origin[axis],ends[0],ends[1]};
                             // Every product is monotone in one coordinate.
-                            // Visit both sides of its float rounding boundaries.
+                            // Visit the adjacent rounding boundary in each
+                            // direction, then continue from an improved fit.
+                            // Walking every float from zero to a nonzero
+                            // endpoint can enumerate millions of products
+                            // before another position fit is evaluated.
                             for(const auto face:tip.faces) for(std::size_t rotation=0;rotation<3u;++rotation)
                                 for(std::size_t term=0;term<2u;++term) for(std::size_t c=0;c<3u;++c) {
                                     const auto product=[&](double value) {
                                         positions[tip.source][axis]=value;
                                         return component(products(face,rotation)[term],c);
                                     };
-                                    double cursor=ends[0];const auto final=product(ends[1]);
-                                    while(product(cursor)!=final) {
-                                        out.job().check();const auto initial=product(cursor);
-                                        double inside=cursor,outside=ends[1];
+                                    const auto initial=product(origin[axis]);
+                                    for(const auto end:ends) if(product(end)!=initial) {
+                                        out.job().check();
+                                        double inside=origin[axis],outside=end;
                                         while(std::nextafter(inside,outside)!=outside) {
                                             const double middle=inside+(outside-inside)*0.5;
                                             if(product(middle)==initial) inside=middle;else outside=middle;
                                         }
-                                        values.insert(inside);values.insert(outside);cursor=outside;
+                                        values.insert(inside);values.insert(outside);
                                     }
                                 }
                             for(const auto value:values) {positions[tip.source]=origin;positions[tip.source][axis]=value;consider();}
