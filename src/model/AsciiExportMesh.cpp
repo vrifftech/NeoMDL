@@ -3675,6 +3675,9 @@ void reconstructTangentDirections(Writer& out,const Model& model,const Model& fr
         const auto derivative=[&](std::size_t face,const std::array<std::array<double,2>,3>& precise,std::size_t axis) {
             const auto& ids=existing.faces[face].indices;
             const auto a=source->generatedPositions[ids[0]],b=source->generatedPositions[ids[1]],c=source->generatedPositions[ids[2]];
+            if(!source->facePositions64.empty())
+                return ascii::tangentPositionDerivative({a,b,c},source->facePositions64[face],
+                    {source->generatedTexcoords[ids[0]],source->generatedTexcoords[ids[1]],source->generatedTexcoords[ids[2]]},precise,axis);
             const Vec3 p{b.x-a.x,b.y-a.y,b.z-a.z},q{c.x-a.x,c.y-a.y,c.z-a.z};
             return ascii::tangentUvDerivative(p,q,{source->generatedTexcoords[ids[0]],
                 source->generatedTexcoords[ids[1]],source->generatedTexcoords[ids[2]]},precise,axis);
@@ -4512,7 +4515,7 @@ void reconstructTangentDirections(Writer& out,const Model& model,const Model& fr
 }
 
 void reconstructCyclicTangentDirections(Writer& out,const Model& model,const Model& frames,
-                                        std::map<const Mesh*,MeshReconstruction>& plans,bool interior=false) {
+                                        std::map<const Mesh*,MeshReconstruction>& plans,bool interior=false,bool minimizeMaximum=false) {
     auto current=frames;auto rows=generateGeometry(current,model,plans,false,out.advanced(),out.job());
     auto best=measureTangentBasis(current,model,rows,plans,out.job());
     processAsciiSkinSeams(current,out.job());
@@ -4567,7 +4570,14 @@ void reconstructCyclicTangentDirections(Writer& out,const Model& model,const Mod
             const auto& plan=trial.at(&mesh);
             const auto& geometry=cache.prepare(mesh,model,frames,plan,out.advanced(),out.job());
             const auto rebuilt=cache.rebuild(geometry,plan,out.job());
-            return measureMeshTangents(rebuilt,mesh,geometry.rows,plan);
+            double maximum{};
+            if(minimizeMaximum) for(std::size_t f=0;f<mesh.faces.size();++f) for(std::size_t c=0;c<3u;++c) {
+                const auto& actual=rebuilt.vertices[geometry.rows[f][c]].tangentBasis;
+                const auto& target=plan.vertices()[mesh.faces[f].indices[c]].tangentBasis;
+                maximum=std::max({maximum,difference(actual.bitangent,target.bitangent),
+                    difference(actual.tangent,target.tangent),difference(actual.normal,target.normal)});
+            }
+            return std::make_pair(maximum,measureMeshTangents(rebuilt,mesh,geometry.rows,plan));
         };
         auto localBest=localError(plans);
         for(const auto face:selected) for(;;) {
@@ -4893,7 +4903,29 @@ void reconstructTangentPositionPrecision(Writer& out,const Model& model,const Mo
                     std::vector<TangentBasis> changedRaw(affectedFaces.size());
                     auto candidate=positions;
                     auto candidateUv=fittedUv;
-                    const auto& normalHints=faceNormalHints[face];
+                    // A smoothed row stores the sum of several face normals.
+                    // Remove its other contributors before fitting this face.
+                    auto normalHints=faceNormalHints[face];
+                    for(const auto row:readers[face]) {
+                        Vec3 sum{};std::size_t count{};
+                        for(const auto f:contributors[row]) {sum=add(sum,bases[f].normal);count+=f==face;}
+                        const auto value=bases[face].normal;
+                        const std::array<double,3> rest{double(sum.x)-count*value.x,
+                            double(sum.y)-count*value.y,double(sum.z)-count*value.z};
+                        const double radius=count*count*((double(value.x)*value.x+double(value.y)*value.y)+double(value.z)*value.z);
+                        for(const auto& target:targets[row]) {
+                            const auto n=normalize(target.normal);
+                            const std::array<double,3> direction{n.x,n.y,n.z};
+                            double projection{},squared{};
+                            for(std::size_t axis=0;axis<3u;++axis) {
+                                projection+=rest[axis]*direction[axis];squared+=rest[axis]*rest[axis];
+                            }
+                            const auto root=std::sqrt(std::max(0.0,projection*projection-squared+radius));
+                            for(const auto scale:{std::max(0.0,projection-root),std::max(0.0,projection+root)})
+                                normalHints.push_back({float((scale*direction[0]-rest[0])/count),
+                                    float((scale*direction[1]-rest[1])/count),float((scale*direction[2]-rest[2])/count)});
+                        }
+                    }
                     const auto roots=[&](auto projection,double low,double high,std::vector<double>& values) {
                         const auto left=projection(low),right=projection(high);
                         if((left<0.0 && right>0.0) || (left>0.0 && right<0.0)) {
@@ -4904,9 +4936,18 @@ void reconstructTangentPositionPrecision(Writer& out,const Model& model,const Mo
                             values.push_back(low);values.push_back(high);
                         }
                     };
+                    // Fit the cross direction after both axes have been rounded
+                    // and normalized. Near parallel axes amplify the difference
+                    // between this plane and a raw derivative projection.
                     const auto project=[&](std::size_t f,const std::array<Position,3>& high,const TangentFit& uv,std::size_t axis,Vec3 n) {
-                        const auto v=ascii::tangentPositionDerivative(facePositions[f],high,faceUv[f],uv,axis);
-                        return (double(v.x)*n.x+double(v.y)*n.y)+double(v.z)*n.z;
+                        const auto b=normalize(ascii::tangentPositionDerivative(facePositions[f],high,faceUv[f],uv,0u));
+                        const auto t=normalize(ascii::tangentPositionDerivative(facePositions[f],high,faceUv[f],uv,1u));
+                        const auto reference=axis?b:t;
+                        const auto normal=ascii::tangentBasisNormal(b,t,{});
+                        const double x=double(reference.y)*n.z-double(reference.z)*n.y;
+                        const double y=double(reference.z)*n.x-double(reference.x)*n.z;
+                        const double z=double(reference.x)*n.y-double(reference.y)*n.x;
+                        return (double(normal.x)*x+double(normal.y)*y)+double(normal.z)*z;
                     };
                     const auto uvCandidates=[&](std::size_t f,std::size_t corner,std::size_t axis,
                             const std::array<Position,3>& highPositions,const TangentFit& fit,bool local) {
@@ -5358,6 +5399,7 @@ void reconstructSkinSeamSmoothing(Writer& out,const Model& model) {
         reconstructTangentSmoothing(out,model,frames,out.meshReconstructions);
         reconstructCyclicTangentDirections(out,model,frames,out.meshReconstructions,true);
         reconstructTangentPositionPrecision(out,model,frames,out.meshReconstructions);
+        reconstructCyclicTangentDirections(out,model,frames,out.meshReconstructions,true,true);
         reconstructTangentSmoothing(out,model,frames,out.meshReconstructions,true);
         reconstructTangentCornerRows(out,model,frames,out.meshReconstructions);
         reconstructTangentSmoothing(out,model,frames,out.meshReconstructions,true);
@@ -5801,6 +5843,7 @@ void reconstructSkinSeamSmoothing(Writer& out,const Model& model) {
     reconstructRetainedSeamRows(out,model,frames,plans);
     reconstructCyclicTangentDirections(out,model,frames,plans,true);
     reconstructTangentPositionPrecision(out,model,frames,plans);
+    reconstructCyclicTangentDirections(out,model,frames,plans,true,true);
     reconstructTangentSmoothing(out,model,frames,plans,true);
     reconstructTangentCornerRows(out,model,frames,plans);
     reconstructTangentSmoothing(out,model,frames,plans,true);
