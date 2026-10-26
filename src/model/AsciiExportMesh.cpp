@@ -1416,50 +1416,6 @@ void reconstructNormalRoundingPass(Writer& out,const Model& model,const Model& f
     measureSeamNormals(current,model,rows,plans);
 }
 
-struct RoundedExpression {
-    std::string key;
-    double constant{};
-    bool literal{},negative{};
-};
-
-RoundedExpression expressionConstant(double value) {
-    const double magnitude=std::abs(value);
-    std::uint64_t word;
-    std::memcpy(&word,&magnitude,sizeof(word));
-    return {"c"+std::to_string(word),magnitude,true,value<0.0};
-}
-RoundedExpression expressionNegate(RoundedExpression value) {
-    if(!value.literal || value.constant!=0.0) value.negative=!value.negative;
-    return value;
-}
-RoundedExpression expressionAdd(RoundedExpression a,RoundedExpression b,bool narrowed) {
-    if(a.literal && a.constant==0.0) return b;
-    if(b.literal && b.constant==0.0) return a;
-    if(a.key==b.key && a.negative!=b.negative) return expressionConstant(0.0);
-    if(a.literal && b.literal) {
-        const double result=(a.negative?-a.constant:a.constant)+(b.negative?-b.constant:b.constant);
-        return expressionConstant(narrowed?double(static_cast<float>(result)):result);
-    }
-    if(b.key<a.key) std::swap(a,b);
-    const bool negative=a.negative;
-    if(negative) {a=expressionNegate(a);b=expressionNegate(b);}
-    return {std::string(narrowed?"f":"d")+"("+a.key+","+(b.negative?"-":"+")+b.key+")",0.0,false,negative};
-}
-RoundedExpression expressionProduct(RoundedExpression a,RoundedExpression b) {
-    if((a.literal && a.constant==0.0) || (b.literal && b.constant==0.0)) return expressionConstant(0.0);
-    if(a.literal && a.constant==1.0) return a.negative?expressionNegate(b):b;
-    if(b.literal && b.constant==1.0) return b.negative?expressionNegate(a):a;
-    if(a.literal && b.literal)
-        return expressionConstant((a.negative?-a.constant:a.constant)*(b.negative?-b.constant:b.constant));
-    const bool negative=a.negative!=b.negative;
-    if(b.key<a.key) std::swap(a,b);
-    return {"m("+a.key+","+b.key+")",0.0,false,negative};
-}
-RoundedExpression expressionNarrow(RoundedExpression value) {
-    if(value.literal) return expressionConstant(static_cast<float>(value.negative?-value.constant:value.constant));
-    value.key="n("+value.key+")";return value;
-}
-
 bool normalPrecisionMesh(const Mesh& mesh) {
     if(mesh.animated) return false;
     std::map<std::array<std::uint32_t,3>,std::uint32_t> positions;
@@ -1650,18 +1606,14 @@ void reconstructNormalPositionPrecision(Writer& out,const Model& model,const Mod
                 auto& positions=trial.preciseSourcePositions;
                 for(const auto& tip:tips) {
                     const auto initialPosition=positions[tip.source];
-                    const auto products=[&](std::size_t face,std::size_t rotation) {
+                    const auto crosses=[&](std::size_t face,std::size_t rotation) {
                         std::array<Vec3,3> low;
                         std::array<std::array<double,3>,3> precise;
                         for(std::size_t c=0;c<3u;++c) {
                             const auto source=trial.topology.sourceFaces[face][(rotation+c)%3u];
                             low[c]=trial.sourcePositions[source];precise[c]=positions[source];
                         }
-                        return ascii::normalPositionFaceProducts(low,precise);
-                    };
-                    const auto crosses=[&](std::size_t face,std::size_t rotation) {
-                        const auto p=products(face,rotation);
-                        return Vec3{p[0].x-p[1].x,p[0].y-p[1].y,p[0].z-p[1].z};
+                        return ascii::normalPositionFaceCross(low,precise);
                     };
                     const bool joined=(trial.smoothing.masks[tip.faces[0]]&trial.smoothing.masks[tip.faces[1]])!=0u;
                     const auto score=[&](std::size_t first,std::size_t second) {
@@ -1707,17 +1659,14 @@ void reconstructNormalPositionPrecision(Writer& out,const Model& model,const Mod
                             const auto origin=positions[tip.source];
                             const auto ends=intervals[tip.source][axis];
                             std::set<double> values{origin[axis],ends[0],ends[1]};
-                            // Every product is monotone in one coordinate.
-                            // Visit the adjacent rounding boundary in each
-                            // direction, then continue from an improved fit.
-                            // Walking every float from zero to a nonzero
-                            // endpoint can enumerate millions of products
-                            // before another position fit is evaluated.
+                            // Cross components are affine in one coordinate.
+                            // Visit adjacent float states in both directions,
+                            // continuing from each improved position fit.
                             for(const auto face:tip.faces) for(std::size_t rotation=0;rotation<3u;++rotation)
-                                for(std::size_t term=0;term<2u;++term) for(std::size_t c=0;c<3u;++c) {
+                                for(std::size_t c=0;c<3u;++c) {
                                     const auto product=[&](double value) {
                                         positions[tip.source][axis]=value;
-                                        return component(products(face,rotation)[term],c);
+                                        return component(crosses(face,rotation),c);
                                     };
                                     const auto initial=product(origin[axis]);
                                     for(const auto end:ends) if(product(end)!=initial) {
@@ -1879,8 +1828,9 @@ void reconstructNormalPositionPrecision(Writer& out,const Model& model,const Mod
             }
             return ascii::normalPositionFaceProducts(low,precise);
         };
-        const auto crossFrom=[](const std::array<Vec3,2>& product) {
-            return Vec3{product[0].x-product[1].x,product[0].y-product[1].y,product[0].z-product[1].z};
+        const auto crossFrom=[](const ascii::NormalPositionProducts& product) {
+            return Vec3{static_cast<float>(product[0][0]-product[1][0]),
+                static_cast<float>(product[0][1]-product[1][1]),static_cast<float>(product[0][2]-product[1][2])};
         };
         const auto enumerateAxis=[&](std::size_t source,std::size_t axis,std::size_t paired,
                                      const std::set<std::size_t>& affected,
@@ -1919,172 +1869,82 @@ void reconstructNormalPositionPrecision(Writer& out,const Model& model,const Mod
                 }
                 ends.push_back(end);
             }
-            // Keep the double expression tree and its rounded products intact.
-            const auto symbolicCross=[&](std::size_t face) {
-                std::array<std::array<RoundedExpression,3>,3> residual;
-                std::array<Vec3,3> low;
-                for(std::size_t corner=0;corner<3u;++corner) {
-                    const auto vertex=plan.topology.sourceFaces[face][plan.sourceCorner(face,corner)];
-                    low[corner]=plan.sourcePositions[vertex];
-                    for(std::size_t c=0;c<3u;++c) {
-                        auto authored=vertex==source && c==axis?RoundedExpression{"v",0.0,false,false}:
-                            expressionConstant(high[vertex][c]);
-                        if(vertex==paired && c==axis)
-                            authored=expressionAdd(expressionConstant(high[paired][axis]),
-                                expressionNegate(expressionAdd(RoundedExpression{"v",0.0,false,false},
-                                    expressionConstant(-initial),false)),false);
-                        residual[corner][c]=expressionAdd(authored,
-                            expressionConstant(-double(component(low[corner],c))),false);
-                    }
-                }
-                std::array<std::array<RoundedExpression,3>,2> edge;
-                for(std::size_t e=0;e<2u;++e)
-                    for(std::size_t c=0;c<3u;++c) {
-                        const float base=component(low[e+1u],c)-component(low[e],c);
-                        edge[e][c]=expressionAdd(expressionConstant(base),
-                            expressionAdd(residual[e+1u][c],expressionNegate(residual[e][c]),false),false);
-                    }
-                std::array<RoundedExpression,3> result;
-                for(std::size_t c=0;c<3u;++c) {
-                    const auto a=(c+1u)%3u,b=(c+2u)%3u;
-                    result[c]=expressionAdd(expressionNarrow(expressionProduct(edge[0][a],edge[1][b])),
-                        expressionNegate(expressionNarrow(expressionProduct(edge[0][b],edge[1][a]))),true);
-                }
-                return result;
+            // Search the stored cross states, rather than independently rounded
+            // products. Include the directional roots of every affected gather.
+            std::set<double> samples{initial};
+            const auto valueAt=[&](std::size_t face,double value,std::size_t rotation=3u) {
+                return crossFrom(products(face,source,axis,value,paired,rotation));
             };
-            const auto invariant=[&] {
-                for(const auto id:affected) {
-                    std::array<RoundedExpression,3> sum{{expressionConstant(0.0),expressionConstant(0.0),expressionConstant(0.0)}};
-                    for(const auto face:groups[id].faces) {
-                        const auto value=symbolicCross(face);
-                        for(std::size_t c=0;c<3u;++c) sum[c]=expressionAdd(sum[c],value[c],true);
-                    }
-                    if(!std::all_of(sum.begin(),sum.end(),[](const auto& value) {
-                        return value.literal && std::isfinite(value.constant);
-                    })) return false;
+            const auto root=[&](const auto& projection,double end) {
+                const auto left=projection(initial),right=projection(end);
+                if(right==0.0) samples.insert(end);
+                if(!((left<0.0 && right>0.0) || (left>0.0 && right<0.0))) return;
+                double inside=initial,outside=end;
+                while(std::nextafter(inside,outside)!=outside) {
+                    const double middle=inside+(outside-inside)*0.5;
+                    const double value=projection(middle);
+                    if(value==0.0) {samples.insert(middle);return;}
+                    if((value<0.0)==(left<0.0)) inside=middle;else outside=middle;
                 }
-                for(const auto end:ends)
-                    for(const auto id:affected) {
-                        std::array<float,3> magnitude{};
-                        for(const auto face:groups[id].faces) {
-                            const auto a=products(face,source,axis,initial,paired),
-                                b=products(face,source,axis,end,paired);
-                            for(std::size_t c=0;c<3u;++c) {
-                                const float first=std::max(std::abs(component(a[0],c)),std::abs(component(b[0],c))),
-                                    second=std::max(std::abs(component(a[1],c)),std::abs(component(b[1],c)));
-                                magnitude[c]+=first+second;
-                                if(!std::isfinite(component(a[0],c)) || !std::isfinite(component(a[1],c)) ||
-                                   !std::isfinite(component(b[0],c)) || !std::isfinite(component(b[1],c)) ||
-                                   !std::isfinite(magnitude[c])) return false;
-                            }
-                        }
-                    }
-                return true;
+                samples.insert(inside);samples.insert(outside);
             };
-            if(!cyclicStates && invariant()) return;
-            struct StateHash {
-                std::size_t operator()(const std::vector<std::uint32_t>& words) const {
-                    std::size_t hash{};
-                    for(const auto word:words) hash=(hash^word)*16777619u;
-                    return hash;
-                }
-            };
-            std::unordered_set<std::vector<std::uint32_t>,StateHash> visited;
-            struct AxisState {
-                double value;
-                std::vector<std::array<Vec3,2>> products;
-            };
-            const auto stride=cyclicStates?4u:1u;
-            const bool groupBounds=paired>=high.size() && !cyclicStates;
-            const auto state=[&](double value) {
-                AxisState result{value,{}};
-                result.products.reserve(pathFaces.size()*stride);
-                for(const auto face:pathFaces) {
-                    result.products.push_back(products(face,source,axis,value,paired));
-                    if(cyclicStates) for(std::size_t rotation=0;rotation<3u;++rotation)
-                        result.products.push_back(products(face,source,axis,value,paired,rotation));
-                }
-                return result;
-            };
-            auto proposed=localCrosses;
-            const auto emit=[&](const AxisState& value) {
-                std::vector<std::uint32_t> key;
-                key.reserve(pathFaces.size()*stride*3u);
-                for(std::size_t index=0;index<pathFaces.size();++index) {
-                    const auto face=pathFaces[index];
-                    const auto result=crossFrom(value.products[index*stride]);
-                    proposed[face]=result;
-                    key.push_back(rawBits(result.x));key.push_back(rawBits(result.y));key.push_back(rawBits(result.z));
-                    if(cyclicStates) for(std::size_t rotation=0;rotation<3u;++rotation) {
-                        const auto alternate=crossFrom(value.products[index*stride+rotation+1u]);
-                        key.push_back(rawBits(alternate.x));key.push_back(rawBits(alternate.y));
-                        key.push_back(rawBits(alternate.z));
-                    }
-                }
-                if(visited.insert(std::move(key)).second) consider(value.value,proposed);
-            };
-            const auto initialState=state(initial);
-            emit(initialState);
             for(const auto end:ends) {
-                auto lowerState=initialState;
-                std::vector<AxisState> upperStates;
-                upperStates.push_back(state(end));
-                emit(upperStates.back());
-                auto lowerCross=localCrosses,upperCross=localCrosses;
-                while(!upperStates.empty()) {
-                    out.job().check();
-                    const auto& upperState=upperStates.back();
-                    // Same-axis paths leave only one varying factor in each product.
-                    bool constant=true;
-                    for(std::size_t index=0;index<pathFaces.size();++index) {
-                        const auto face=pathFaces[index];
-                        if(cyclicStates) for(std::size_t rotation=0;rotation<3u;++rotation) {
-                            const auto& a=lowerState.products[index*stride+rotation+1u];
-                            const auto& b=upperState.products[index*stride+rotation+1u];
-                            for(std::size_t c=0;c<3u;++c) {
-                                const float lower=std::min(component(a[0],c),component(b[0],c))-
-                                    std::max(component(a[1],c),component(b[1],c));
-                                const float upper=std::max(component(a[0],c),component(b[0],c))-
-                                    std::min(component(a[1],c),component(b[1],c));
-                                constant=constant && rawBits(lower)==rawBits(upper);
-                            }
+                samples.insert(end);
+                for(std::size_t step=1u;step<16u;++step)
+                    samples.insert(initial+(end-initial)*(double(step)/16.0));
+                for(const auto face:pathFaces) for(std::size_t turn=0;turn<(cyclicStates?4u:1u);++turn) {
+                    const auto rotation=turn?turn-1u:3u;
+                    const auto first=valueAt(face,initial,rotation),last=valueAt(face,end,rotation);
+                    for(std::size_t c=0;c<3u;++c) {
+                        const auto origin=component(first,c);
+                        if(component(last,c)==origin) continue;
+                        double inside=initial,outside=end;
+                        while(std::nextafter(inside,outside)!=outside) {
+                            const double middle=inside+(outside-inside)*0.5;
+                            if(component(valueAt(face,middle,rotation),c)==origin) inside=middle;
+                            else outside=middle;
                         }
-                        const auto& a=lowerState.products[index*stride];
-                        const auto& b=upperState.products[index*stride];
-                        std::array<float,3> lows{},highs{};
-                        for(std::size_t c=0;c<3u;++c) {
-                            const float a0=component(a[0],c),a1=component(a[1],c),
-                                b0=component(b[0],c),b1=component(b[1],c);
-                            const float lower=std::min(a0,b0)-std::max(a1,b1),
-                                upper=std::max(a0,b0)-std::min(a1,b1);
-                            lows[c]=lower;highs[c]=upper;
-                            constant=constant && rawBits(lower)==rawBits(upper);
-                        }
-                        lowerCross[face]={lows[0],lows[1],lows[2]};
-                        upperCross[face]={highs[0],highs[1],highs[2]};
-                        if(!constant && !groupBounds) break;
+                        samples.insert(inside);samples.insert(outside);
                     }
-                    if(!constant && groupBounds) {
-                        constant=true;
-                        for(const auto id:affected) {
-                            Vec3 lower{},upper{};
-                            for(const auto face:groups[id].faces) {
-                                const auto a=lowerCross[face],b=upperCross[face];
-                                lower={lower.x+a.x,lower.y+a.y,a.z+lower.z};
-                                upper={upper.x+b.x,upper.y+b.y,b.z+upper.z};
-                            }
-                            constant=constant && rawBits(lower.x)==rawBits(upper.x) &&
-                                rawBits(lower.y)==rawBits(upper.y) && rawBits(lower.z)==rawBits(upper.z);
-                            if(!constant) break;
-                        }
-                    }
-                    if(constant || std::nextafter(lowerState.value,upperState.value)==upperState.value) {
-                        emit(upperState);
-                        lowerState=std::move(upperStates.back());upperStates.pop_back();continue;
-                    }
-                    const double middle=lowerState.value+(upperState.value-lowerState.value)*0.5;
-                    upperStates.push_back(state(middle));
                 }
+                for(const auto id:affected) {
+                    const auto gather=[&](double value) {
+                        Vec3 sum{};
+                        for(const auto face:groups[id].faces) {
+                            const auto cross=valueAt(face,value);
+                            sum={sum.x+cross.x,sum.y+cross.y,sum.z+cross.z};
+                        }
+                        return sum;
+                    };
+                    std::set<std::array<float,3>> targets;
+                    for(const auto corner:groups[id].corners) {
+                        const auto target=plan.vertices()[mesh.faces[corner/3u].indices[corner%3u]].normal;
+                        targets.insert({target.x,target.y,target.z});
+                    }
+                    for(const auto& target:targets) for(std::size_t c=0;c<3u;++c) {
+                        root([&](double value) {
+                            const auto sum=gather(value);
+                            if(target==std::array<float,3>{}) return double(component(sum,c));
+                            const auto first=(c+1u)%3u,second=(c+2u)%3u;
+                            return double(component(sum,first))*target[second]-
+                                double(component(sum,second))*target[first];
+                        },end);
+                    }
+                }
+            }
+            std::set<std::vector<std::uint32_t>> visited;
+            auto proposed=localCrosses;
+            for(const auto value:samples) {
+                std::vector<std::uint32_t> key;
+                for(const auto face:pathFaces) {
+                    const auto cross=valueAt(face,value);proposed[face]=cross;
+                    key.insert(key.end(),{rawBits(cross.x),rawBits(cross.y),rawBits(cross.z)});
+                    if(cyclicStates) for(std::size_t rotation=0;rotation<3u;++rotation) {
+                        const auto alternate=valueAt(face,value,rotation);
+                        key.insert(key.end(),{rawBits(alternate.x),rawBits(alternate.y),rawBits(alternate.z)});
+                    }
+                }
+                if(visited.insert(std::move(key)).second) consider(value,proposed);
             }
         };
         const auto unresolvedSources=[&] {

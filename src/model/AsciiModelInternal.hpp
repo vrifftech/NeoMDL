@@ -250,7 +250,8 @@ inline Vec3 normalizeVertexNormal(Vec3 value) {
     }
     return value;
 }
-std::array<Vec3,2> normalPositionFaceProducts(const std::array<Vec3,3>& positions,
+using NormalPositionProducts=std::array<std::array<double,3>,2>;
+NormalPositionProducts normalPositionFaceProducts(const std::array<Vec3,3>& positions,
     const std::array<std::array<double,3>,3>& precise);
 Vec3 normalPositionFaceCross(const std::array<Vec3,3>& positions,
     const std::array<std::array<double,3>,3>& precise);

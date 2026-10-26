@@ -1388,7 +1388,7 @@ void buildMesh(Model& model,RawNode& raw,std::size_t nodeIndex,
     }
 }
 
-std::array<Vec3,2> normalPositionFaceProducts(const std::array<Vec3,3>& positions,
+NormalPositionProducts normalPositionFaceProducts(const std::array<Vec3,3>& positions,
         const std::array<std::array<double,3>,3>& precise) {
     // Retain rounded edges and add only authored sub-float position residuals.
     const auto edge=[&](std::size_t first,std::size_t second) {
@@ -1403,15 +1403,17 @@ std::array<Vec3,2> normalPositionFaceProducts(const std::array<Vec3,3>& position
         return result;
     };
     const auto p=edge(0u,1u),q=edge(1u,2u);
-    return {{
-        {static_cast<float>(p[1]*q[2]),static_cast<float>(p[2]*q[0]),static_cast<float>(p[0]*q[1])},
-        {static_cast<float>(p[2]*q[1]),static_cast<float>(p[0]*q[2]),static_cast<float>(p[1]*q[0])}}};
+    return {{{p[1]*q[2],p[2]*q[0],p[0]*q[1]},
+        {p[2]*q[1],p[0]*q[2],p[1]*q[0]}}};
 }
 
 Vec3 normalPositionFaceCross(const std::array<Vec3,3>& positions,
         const std::array<std::array<double,3>,3>& precise) {
-    const auto products=normalPositionFaceProducts(positions,precise);
-    return {products[0].x-products[1].x,products[0].y-products[1].y,products[0].z-products[1].z};
+    // Keep authored products precise until their difference is stored. Rounding
+    // each product first erases residual directions between opposing faces.
+    const auto p=normalPositionFaceProducts(positions,precise);
+    return {static_cast<float>(p[0][0]-p[1][0]),static_cast<float>(p[0][1]-p[1][1]),
+        static_cast<float>(p[0][2]-p[1][2])};
 }
 
 std::vector<TangentComponent> singularTangentComponents(const std::vector<TangentFace>& faces,
