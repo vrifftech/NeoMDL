@@ -5238,6 +5238,29 @@ void reconstructTangentCornerRows(Writer& out,const Model& model,const Model& fr
                 best=error;plans.at(&mesh)=std::move(changed.at(&mesh));
                 current=std::move(rebuilt);rows=std::move(generated);improved=true;
             };
+            // A one-bit normal difference can split a compiled row and select
+            // a different last tangent writer. Fit the normal precision and
+            // tangent positions together from the packed coordinates: residuals
+            // fitted for the split rows no longer describe the shared row.
+            std::map<std::size_t,std::size_t> sharedRows;
+            bool splitRows=false;
+            for(std::size_t face=0;face<mesh.faces.size();++face)
+                for(std::size_t corner=0;corner<3u;++corner) {
+                    const auto original=mesh.faces[face].indices[corner];
+                    const auto p=plan.vertices()[original].position;
+                    if(!points.count({p.x,p.y,p.z})) continue;
+                    const auto row=rows[index][face][corner];
+                    const auto shared=sharedRows.emplace(original,row);
+                    splitRows=splitRows || shared.first->second!=row;
+                }
+            if(splitRows) {
+                auto candidate=plan;
+                candidate.preciseSourcePositions.clear();
+                for(const auto p:candidate.sourcePositions)
+                    candidate.preciseSourcePositions.push_back({p.x,p.y,p.z});
+                candidate.tangentSourcePositions=candidate.preciseSourcePositions;
+                consider(std::move(candidate));
+            }
             std::set<std::vector<std::size_t>> planarGroups;
             for(const auto& entry:incident) for(const auto seed:entry.second) {
                 std::vector<std::size_t> group;
