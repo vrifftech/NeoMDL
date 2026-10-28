@@ -4,6 +4,7 @@
 #include "render/LightSubmission.hpp"
 #include <model/SceneOrdering.hpp>
 #include <model/AsciiModel.hpp>
+#include <model/EngineCpuSkin.hpp>
 #include <model/LightningControl.hpp>
 #include "core/EmitterBucket.hpp"
 #include "core/CreatureLipSync.hpp"
@@ -46,6 +47,9 @@
 #endif
 
 namespace neomdl::ui {
+
+wxDEFINE_EVENT(EVT_MODEL_NODE_PICKED, wxCommandEvent);
+
 namespace {
 struct DetectionCaptureExhausted : std::runtime_error {
     using std::runtime_error::runtime_error;
@@ -484,6 +488,8 @@ ModelCanvas::~ModelCanvas() {
 void ModelCanvas::setLoading(bool loading) {
     if(loading_==loading)return;
     loading_=loading;
+    selectionStart_.reset();
+    meshPick_.reset();
     if(sceneAudioProvider_)try {sceneAudioProvider_->setSuspended(loading);}
     catch(const std::exception& error) {
         // This is the editor's modal-job boundary. A failed external device
@@ -1828,6 +1834,8 @@ void ModelCanvas::refreshMaterials() {
 }
 
 void ModelCanvas::setDocument(const ModelDocument* document, bool preserveCamera) {
+    selectionStart_.reset();
+    meshPick_.reset();
     if (preserveCamera && authoredCameraActive()) useViewerCamera(false);
     stopDialogue();
     clearWorldClock();
@@ -3281,6 +3289,7 @@ void ModelCanvas::onPaint(wxPaintEvent&) {
     else glClearColor(0.075f,0.085f,0.10f,1.0f);
     glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT | GL_STENCIL_BUFFER_BIT);
     applyProjection(width, height);
+    if (meshPick_) meshPick_->depth = sceneFarClip_;
     drawScene();
     advanceSceneAudio();
     if(dialogueRuntime_.running()&&dialogueRuntime_.dialogue().conversationType.value_or(0)!=1) {
@@ -3297,6 +3306,14 @@ void ModelCanvas::onPaint(wxPaintEvent&) {
     meshRenderer_.flushRetiredGeometry();
     glFlush();
     SwapBuffers();
+    if (meshPick_) {
+        const auto node = meshPick_->node;
+        meshPick_.reset();
+        wxCommandEvent selection(EVT_MODEL_NODE_PICKED, GetId());
+        selection.SetEventObject(this);
+        selection.SetInt(node ? static_cast<int>(*node) : -1);
+        ProcessWindowEvent(selection);
+    }
 }
 
 void ModelCanvas::onSize(wxSizeEvent& event) {
@@ -3331,6 +3348,22 @@ void ModelCanvas::onMouse(wxMouseEvent& event) {
         }
         return;
     }
+    if (event.LeftDown() && !event.RightIsDown() && !event.MiddleIsDown())
+        selectionStart_ = event.GetPosition();
+    if (selectionStart_ && (event.Dragging() || event.LeftUp())) {
+        const auto delta = event.GetPosition() - *selectionStart_;
+        if (std::abs(delta.x) > FromDIP(4) || std::abs(delta.y) > FromDIP(4))
+            selectionStart_.reset();
+    }
+    if (event.RightDown() || event.MiddleDown() || event.GetWheelRotation() != 0)
+        selectionStart_.reset();
+    if (event.LeftUp()) {
+        if (selectionStart_ && !event.ControlDown()) {
+            meshPick_ = MeshPick{event.GetPosition(), 0.0f, {}};
+            Refresh(false);
+        }
+        selectionStart_.reset();
+    }
     if (authoredCameraActive()) {
         resetCameraInput();
         event.Skip();
@@ -3354,7 +3387,7 @@ void ModelCanvas::onMouse(wxMouseEvent& event) {
         const auto current = event.GetPosition();
         const auto delta = current - lastMouse_;
         lastMouse_ = current;
-        if (draggingRotate_) {
+        if (draggingRotate_ && !selectionStart_) {
             yaw_ += static_cast<float>(delta.x) * 0.5f;
             pitch_ = std::clamp(pitch_ + static_cast<float>(delta.y) * 0.5f, -89.0f, 89.0f);
         }
@@ -3388,6 +3421,106 @@ void ModelCanvas::onMouse(wxMouseEvent& event) {
     }
 }
 
+void ModelCanvas::considerMeshPick(const render::MeshSubmission& submission) {
+    const auto& mesh = *submission.mesh;
+    const auto& parameters = submission.parameters;
+    const auto& projection = parameters.projection.values;
+    const auto& viewport = pickingCamera_->viewport;
+    const auto scale = GetContentScaleFactor();
+    const model::Vec3 direction{
+        static_cast<float>((2.0 * meshPick_->position.x * scale / viewport.width - 1.0) / projection[0]),
+        static_cast<float>((1.0 - 2.0 * meshPick_->position.y * scale / viewport.height) / projection[5]),
+        -1.0f};
+    const auto nearPlane = pickingCamera_->nearClip;
+    const model::Vec3 start{direction.x * nearPlane, direction.y * nearPlane, -nearPlane};
+    model::Vec3 end{direction.x * meshPick_->depth, direction.y * meshPick_->depth, -meshPick_->depth};
+
+    // Consume the posed drawing stream, including the separate CPU skin pools.
+    // This runs only for a click, after the render owner has updated its pose.
+    auto modelView = parameters.modelView;
+    std::optional<model::EngineCpuSkinSource> cpuSource;
+    std::vector<model::RenderVertex> cpuVertices;
+    if (parameters.engineCpuSkin && parameters.material.k2PartTriMeshState) {
+        cpuSource = model::decodeEngineCpuSkinSource(mesh);
+        model::EngineCpuSkinPools pools;
+        cpuVertices = pools.execute(mesh, *submission.deformed, *cpuSource, false, 0.0f);
+        modelView = model::multiply(modelView, submission.deformed->skinPartFrame);
+    }
+    const bool k1Draw = !mesh.animated && parameters.material.k2PartTriMeshState &&
+        parameters.material.engineGame == material::EngineMaterialGame::Kotor1;
+    const auto& indices = cpuSource ? cpuSource->indices : k1Draw ? mesh.engineDrawIndices : mesh.indices;
+    std::vector<model::Vec3> positions;
+    positions.reserve(mesh.vertices.size());
+    for (std::size_t i = 0; i < mesh.vertices.size(); ++i) {
+        const auto& position = cpuSource ? cpuVertices[i].position :
+            submission.deformed ? submission.deformed->positions[i] : mesh.vertices[i].position;
+        positions.push_back(model::transformPoint(modelView, position));
+    }
+    bool hit = false;
+    const bool clockwise = model::transformHandedness(modelView) < 0.0f;
+    const auto triangleAt = [&](std::size_t a, std::size_t b, std::size_t c) {
+        std::array<model::Vec3, 3> triangle{{positions[indices[a]], positions[indices[b]], positions[indices[c]]}};
+        if (clockwise) std::swap(triangle[1], triangle[2]);
+        if (engineHitTriangle(triangle, start, end)) hit = true;
+        else if (!parameters.cullBackfaces) {
+            std::swap(triangle[1], triangle[2]);
+            if (engineHitTriangle(triangle, start, end)) hit = true;
+        }
+    };
+    if (mesh.animated || cpuSource || k1Draw) {
+        const auto& batches = cpuSource ? cpuSource->draws : mesh.engineDraws;
+        for (const auto& batch : batches) {
+            const auto first = batch.firstIndex;
+            const auto limit = first + batch.indexCount;
+            switch (batch.primitive) {
+                case 3: // triangles
+                    for (auto i = first; i + 2 < limit; i += 3) triangleAt(i, i + 1, i + 2);
+                    break;
+                case 4: // triangle strip
+                    for (auto i = first; i + 2 < limit; ++i)
+                        if ((i - first) % 2) triangleAt(i + 1, i, i + 2);
+                        else triangleAt(i, i + 1, i + 2);
+                    break;
+                case 5: // triangle fan
+                case 8: // polygon
+                    for (auto i = first + 1; i + 1 < limit; ++i) triangleAt(first, i, i + 1);
+                    break;
+                case 6: // quads
+                    for (auto i = first; i + 3 < limit; i += 4) {
+                        triangleAt(i, i + 1, i + 2); triangleAt(i, i + 2, i + 3);
+                    }
+                    break;
+                case 7: // quad strip
+                    for (auto i = first; i + 3 < limit; i += 2) {
+                        triangleAt(i, i + 1, i + 3); triangleAt(i, i + 3, i + 2);
+                    }
+                    break;
+            }
+        }
+    } else {
+        for (std::size_t i = 0; i + 2 < indices.size(); i += 3) triangleAt(i, i + 1, i + 2);
+    }
+    if (hit && -end.z < meshPick_->depth) {
+        meshPick_->depth = -end.z;
+        meshPick_->node.reset();
+        const auto contains = [&](const model::Model& asset) {
+            return std::any_of(asset.meshes.begin(), asset.meshes.end(),
+                [&](const auto& candidate) { return &candidate == &mesh; });
+        };
+        if (contains(document_->model())) meshPick_->node = mesh.nodeIndex;
+        else {
+            const auto& references = document_->references();
+            for (std::size_t i = 0; i < references.size(); ++i) {
+                if (!contains(references[i].model)) continue;
+                auto root = i;
+                while (references[root].parentInstance) root = *references[root].parentInstance;
+                meshPick_->node = references[root].parentNodeIndex;
+                break;
+            }
+        }
+    }
+}
+
 void ModelCanvas::onKey(wxKeyEvent& event) {
     advanceCamera();
     constexpr std::array<int, 6> keys{{'D', 'A', 'E', 'Q', 'S', 'W'}};
@@ -3408,11 +3541,13 @@ void ModelCanvas::onKey(wxKeyEvent& event) {
 }
 
 void ModelCanvas::onFocusLost(wxFocusEvent& event) {
+    selectionStart_.reset();
     resetCameraInput();
     event.Skip();
 }
 
 void ModelCanvas::onCaptureLost(wxMouseCaptureLostEvent&) {
+    selectionStart_.reset();
     resetCameraInput();
 }
 
@@ -4528,6 +4663,10 @@ bool ModelCanvas::prepareSubmission(const render::MeshSubmission& submission,
         shadowScene_.updateFocusContainer(lightScene_);
         return true;
     }
+    if (meshPick_ && submission.drawPrimary &&
+        parameters.primitive == render::PrimitiveTopology::Triangles &&
+        !parameters.particlePass && !parameters.lightsaberPass)
+        considerMeshPick(submission);
     if(submission.sceneOwner&&(submission.ownerModelClassification&8u)) {
         if(!sceneQueryError_.empty()){error=sceneQueryError_;return false;}
         render::applyEngineDoorAlpha(parameters,sceneQueries_.owner(submission.sceneOwner-1u)->doorAlpha);

@@ -504,6 +504,11 @@ public:
             changed_();
             event.Skip();
         });
+        canvas_->Bind(EVT_MODEL_NODE_PICKED, [this](wxCommandEvent& event) {
+            const auto item = event.GetInt() < 0 ? tree_->GetRootItem() : nodeItems_[event.GetInt()];
+            tree_->SelectItem(item);
+            tree_->EnsureVisible(item);
+        });
         animationChoice_->Bind(wxEVT_CHOICE, [this](wxCommandEvent&) {
             if (advancedAnimation_->IsCollapsed()) previewSelectedAnimation();
             updateAnimationControls();
@@ -5608,6 +5613,7 @@ private:
                 return;
             case ID_CameraControls:
                 wxMessageBox(
+                    "Left click: select a mesh; click empty space to clear selection\n\n"
                     "Orbit\n"
                     "  Left drag: rotate around the pivot\n"
                     "  Right or middle drag: pan\n"

@@ -44,6 +44,8 @@
 
 namespace neomdl::ui {
 
+wxDECLARE_EVENT(EVT_MODEL_NODE_PICKED, wxCommandEvent);
+
 std::string triggerDetectionReport(const TriggerDetectionResult&);
 
 struct DialogueActorAnimation {
@@ -486,6 +488,7 @@ private:
     void onKey(wxKeyEvent& event);
     void onFocusLost(wxFocusEvent& event);
     void onCaptureLost(wxMouseCaptureLostEvent& event);
+    void considerMeshPick(const neomdl::render::MeshSubmission& submission);
     void resetCameraInput();
     void advanceCamera();
     model::Vec3 cameraOffset(model::Vec3 local) const;
@@ -686,6 +689,13 @@ private:
     bool glInitialized_{};
     bool draggingRotate_{};
     bool draggingPan_{};
+    std::optional<wxPoint> selectionStart_;
+    struct MeshPick {
+        wxPoint position;
+        float depth{};
+        std::optional<std::size_t> node;
+    };
+    std::optional<MeshPick> meshPick_;
     bool freeFly_{};
     std::array<bool, 6> flyMovement_{};
     std::chrono::steady_clock::time_point cameraTick_{std::chrono::steady_clock::now()};
