@@ -6010,6 +6010,9 @@ void reconstructSkinSeamSmoothing(Writer& out,const Model& model) {
             }
     } while(best<previous);
 
+    // Resolve shared-row contributors before the broad seam search. The final
+    // retained-row pass also fits the later cyclic and precision refinements.
+    reconstructRetainedSeamRows(out,model,frames,plans);
     double bestTangent{};
     reconstructTangentSmoothing(out,model,frames,plans);
     for(;;) {
