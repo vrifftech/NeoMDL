@@ -8,6 +8,8 @@ struct BinaryMeshEdit {
     std::array<std::optional<std::string>,2> textures;
     // Common mesh header bytes +309..+313, in stored order.
     std::array<std::optional<bool>,5> flags;
+    std::optional<bool> tangentBasis;
+    bool regenerateTangents{};
 };
 
 struct BinaryModelFile {
@@ -23,6 +25,7 @@ BinaryModelFile readBinaryModelFile(const std::filesystem::path& path,
     const neoshared::bif::JobControl& job = {});
 std::string binaryMeshTexture(const BinaryModelFile& file, std::size_t node, std::size_t channel);
 std::vector<CollisionOutput> binaryEditOutputs(const BinaryModelFile& file,
-    const std::map<std::size_t,BinaryMeshEdit>& edits, const std::filesystem::path& output);
+    const std::map<std::size_t,BinaryMeshEdit>& edits, const std::filesystem::path& output,
+    const neoshared::bif::JobControl& job = {});
 
 } // namespace neomdl

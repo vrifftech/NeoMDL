@@ -69,7 +69,10 @@ AsciiEditor::AsciiEditor(wxWindow* parent, std::shared_ptr<const ModelDocument> 
     });
     search_->Bind(wxEVT_TEXT_ENTER, [this](wxCommandEvent&) { findNext(); });
     search_->Bind(wxEVT_SEARCHCTRL_SEARCH_BTN, [this](wxCommandEvent&) { findNext(); });
-    update_->Bind(wxEVT_BUTTON, [this](wxCommandEvent&) { updatePreview(); });
+    update_->Bind(wxEVT_BUTTON, [this](wxCommandEvent&) {
+        if (ready_) updatePreview();
+        else generateAscii(format_->GetSelection()==1);
+    });
     format_->Bind(wxEVT_CHOICE, [this](wxCommandEvent&) {
         generateAscii(format_->GetSelection() == 1);
         changed_();
@@ -90,7 +93,11 @@ AsciiEditor::AsciiEditor(wxWindow* parent, std::shared_ptr<const ModelDocument> 
         installText(*source_->originalAscii());
         setSavePath(source_->path());
         status_->ChangeValue("Preview current. Edits update after a 0.5-second typing pause.");
-    } else generateAscii(false);
+    } else {
+        update_->SetLabel("Generate ASCII");
+        update_->Enable(true);
+        status_->ChangeValue("Binary model loaded. Generate ASCII only when you want to edit its source text.");
+    }
 }
 
 AsciiEditor::~AsciiEditor() { cancelAndWait(); }
@@ -157,6 +164,7 @@ void AsciiEditor::poll() {
         try {
             auto result = worker_.get();
             if (generated) {
+                update_->SetLabel("Update Preview");
                 advanced_ = generationAdvanced_;
                 format_->SetSelection(advanced_ ? 1 : 0);
                 format_->Enable(true);

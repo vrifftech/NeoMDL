@@ -4,7 +4,8 @@
 
 namespace neomdl::ui {
 
-void editBinaryMeshFields(wxWindow* parent, const AuthoringJob& runJob);
+std::optional<std::filesystem::path> editBinaryMeshFields(wxWindow* parent, const AuthoringJob& runJob,
+    const std::filesystem::path& input = {}, std::optional<std::size_t> selectedOffset = {});
 void inspectBinaryFile(wxWindow* parent, const AuthoringJob& runJob);
 void analyzeBinaryFiles(wxWindow* parent, const AuthoringJob& runJob);
 void compareBinaryFiles(wxWindow* parent, const AuthoringJob& runJob);

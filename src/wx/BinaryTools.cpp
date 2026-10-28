@@ -28,22 +28,30 @@
 
 namespace neomdl::ui {
 
-void editBinaryMeshFields(wxWindow* parent, const AuthoringJob& runJob) {
-    wxFileDialog open(parent,"Edit Binary Mesh Fields",{},{},"Binary MDL (*.mdl)|*.mdl;*.MDL",
-                      wxFD_OPEN | wxFD_FILE_MUST_EXIST);
-    if (open.ShowModal() != wxID_OK) return;
+std::optional<std::filesystem::path> editBinaryMeshFields(wxWindow* parent, const AuthoringJob& runJob,
+    const std::filesystem::path& input, std::optional<std::size_t> selectedOffset) {
+    auto path=input;
+    if (path.empty()) {
+        wxFileDialog open(parent,"Edit Binary Mesh Fields",{},{},"Binary MDL (*.mdl)|*.mdl;*.MDL",
+                          wxFD_OPEN | wxFD_FILE_MUST_EXIST);
+        if (open.ShowModal() != wxID_OK) return {};
+        path=neosettings::pathFromWx(open.GetPath());
+    }
+    std::optional<std::filesystem::path> saved;
     try {
         BinaryModelFile file;
         if (!runJob("Reading binary mesh fields",[&](const auto& job) {
-            file = readBinaryModelFile(neosettings::pathFromWx(open.GetPath()),job);
-        })) return;
-        wxDialog dialog(parent,wxID_ANY,"Binary Mesh Fields — " + open.GetFilename(),
+            file = readBinaryModelFile(path,job);
+        })) return {};
+        wxDialog dialog(parent,wxID_ANY,"Binary Mesh Fields — " + neosettings::pathToWx(path.filename()),
             wxDefaultPosition,wxDefaultSize,wxDEFAULT_DIALOG_STYLE | wxRESIZE_BORDER);
         auto* layout = new wxBoxSizer(wxVERTICAL);
         auto* select = new wxChoice(&dialog,wxID_ANY);
         std::vector<std::size_t> nodes;
+        int selection=0;
         for (std::size_t i = 0; i < file.model.nodes.size(); ++i) if (file.model.nodes[i].mesh) {
             const auto& node = file.model.nodes[i]; nodes.push_back(i);
+            if (node.packedOffset==selectedOffset) selection=static_cast<int>(nodes.size()-1);
             select->Append(wxui::toWx(node.name) + wxString::Format("  [0x%zX]",*node.packedOffset));
         }
         layout->Add(select,0,wxEXPAND | wxALL,dialog.FromDIP(10));
@@ -61,11 +69,14 @@ void editBinaryMeshFields(wxWindow* parent, const AuthoringJob& runJob) {
         for (std::size_t i = 0; i < flags.size(); ++i) {
             flags[i] = new wxCheckBox(fields,wxID_ANY,flagLabels[i]); grid->Add(flags[i]); grid->AddSpacer(1);
         }
+        auto* tangent = new wxCheckBox(fields,wxID_ANY,"Has tangent basis");
+        grid->Add(tangent); grid->AddSpacer(1);
+        auto* regenerate = new wxCheckBox(fields,wxID_ANY,"Regenerate tangent basis");
+        grid->Add(regenerate); grid->AddSpacer(1);
         fields->SetSizer(grid); layout->Add(fields,0,wxEXPAND | wxALL,dialog.FromDIP(10));
         auto* note = new wxStaticText(&dialog,wxID_ANY,
-            "Edits the selected file on disk. Unsaved ASCII edits are not included.\n"
-            "Texture names change references only; texture images, UVs and tangents stay as stored.\n"
-            "Save Copy retains all other MDL bytes and copies existing MDX/collision companions unchanged.");
+            "Edit texture references, mesh flags and tangent basis directly in the binary model.\n"
+            "Save Copy opens the edited model in the viewport.");
         note->Wrap(dialog.FromDIP(590)); layout->Add(note,0,wxALL,dialog.FromDIP(10));
         auto* buttons = new wxBoxSizer(wxHORIZONTAL);
         auto* save = new wxButton(&dialog,wxID_ANY,"Save Copy...");
@@ -78,10 +89,16 @@ void editBinaryMeshFields(wxWindow* parent, const AuthoringJob& runJob) {
             const auto index = nodes[select->GetSelection()];
             const auto base = *file.model.nodes[index].packedOffset + 80;
             const auto& edit = edits[index];
+            const auto& node=file.model.nodes[index];
+            const auto& mesh=file.model.meshes[*node.mesh];
             for (std::size_t i = 0; i < textures.size(); ++i)
                 textures[i]->ChangeValue(wxui::toWx(edit.textures[i].value_or(binaryMeshTexture(file,index,i))));
             for (std::size_t i = 0; i < flags.size(); ++i)
                 flags[i]->SetValue(edit.flags[i].value_or(file.mdl[base+309+i] != 0));
+            tangent->SetValue(edit.tangentBasis.value_or((mesh.mdxBitmap&0x80u)!=0));
+            tangent->Enable(file.mdx.has_value() && !node.lightsaber && !mesh.animated && !mesh.vertices.empty());
+            regenerate->SetValue(edit.regenerateTangents);
+            regenerate->Enable(tangent->IsEnabled() && tangent->GetValue());
         };
         for (std::size_t i = 0; i < textures.size(); ++i) textures[i]->Bind(wxEVT_TEXT,[&,i](wxCommandEvent&) {
             const auto index = nodes[select->GetSelection()]; const auto value = wxui::toStd(textures[i]->GetValue());
@@ -92,6 +109,18 @@ void editBinaryMeshFields(wxWindow* parent, const AuthoringJob& runJob) {
             const auto value = flags[i]->GetValue();
             edits[index].flags[i] = value == (file.mdl[base+309+i] != 0) ? std::nullopt : std::optional<bool>{value};
         });
+        tangent->Bind(wxEVT_CHECKBOX,[&](wxCommandEvent&) {
+            const auto index=nodes[select->GetSelection()];
+            const auto& mesh=file.model.meshes[*file.model.nodes[index].mesh];
+            const auto value=tangent->GetValue();
+            auto& edit=edits[index];
+            edit.tangentBasis=value==((mesh.mdxBitmap&0x80u)!=0) ? std::nullopt : std::optional<bool>{value};
+            if (!value) {edit.regenerateTangents=false;regenerate->SetValue(false);}
+            regenerate->Enable(value);
+        });
+        regenerate->Bind(wxEVT_CHECKBOX,[&](wxCommandEvent&) {
+            edits[nodes[select->GetSelection()]].regenerateTangents=regenerate->GetValue();
+        });
         select->Bind(wxEVT_CHOICE,[&](wxCommandEvent&) { load(); });
         save->Bind(wxEVT_BUTTON,[&](wxCommandEvent&) {
             wxFileDialog output(&dialog,"Save Edited Binary Copy",neosettings::pathToWx(file.path.parent_path()),
@@ -101,7 +130,7 @@ void editBinaryMeshFields(wxWindow* parent, const AuthoringJob& runJob) {
                 std::vector<CollisionOutput> outputs;
                 const auto destination = neosettings::pathFromWx(output.GetPath());
                 if (!runJob("Preparing binary copy",[&](const auto& job) {
-                    job.check(); outputs = binaryEditOutputs(file,edits,destination);
+                    job.check(); outputs = binaryEditOutputs(file,edits,destination,job);
                 })) return;
                 auto reserved = file.inputs;
                 std::vector<std::filesystem::path> companions;
@@ -113,13 +142,14 @@ void editBinaryMeshFields(wxWindow* parent, const AuthoringJob& runJob) {
                 if (runJob("Saving binary copy",[&](const auto& job) {
                     job.check();
                     for (const auto& item : outputs) neoshared::texture::writeFileBytes(item.path,item.bytes);
-                })) note->SetLabel("Saved " + output.GetPath());
+                })) {saved=destination;dialog.EndModal(wxID_OK);}
             } catch (const std::exception& error) { wxui::showError(&dialog,error); }
         });
         fields->Enable(!nodes.empty()); save->Enable(!nodes.empty());
-        if (!nodes.empty()) { select->SetSelection(0); load(); }
+        if (!nodes.empty()) { select->SetSelection(selection); load(); }
         wxui::applyTheme(&dialog,wxui::currentDarkMode()); dialog.ShowModal();
     } catch (const std::exception& error) { wxui::showError(parent,error); }
+    return saved;
 }
 
 namespace {

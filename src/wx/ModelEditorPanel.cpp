@@ -407,7 +407,7 @@ public:
         auto* detailsLayout = new wxBoxSizer(wxVERTICAL);
         detailedDiagnostics_ = new wxCheckBox(detailsPanel, wxID_ANY, "Detailed diagnostics");
         editNode_ = new wxButton(detailsPanel, wxID_ANY, "Edit Selected Node...");
-        editNode_->SetToolTip("Select a uniquely named node after the ASCII preview is current.");
+        editNode_->SetToolTip("Edit the selected node's properties.");
         editNode_->Enable(false);
         editVertices_ = new wxButton(detailsPanel, wxID_ANY, "Vertices...");
         editControllers_ = new wxButton(detailsPanel, wxID_ANY, "Controllers...");
@@ -486,7 +486,10 @@ public:
         detailedDiagnostics_->Bind(wxEVT_CHECKBOX, [this](wxCommandEvent&) {
             updateDetails(selectedNode_);
         });
-        editNode_->Bind(wxEVT_BUTTON, [this](wxCommandEvent&) { editSelectedNode(); });
+        editNode_->Bind(wxEVT_BUTTON, [this](wxCommandEvent&) {
+            wxCommandEvent command(wxEVT_MENU,ID_NodeProperties);
+            ProcessWindowEvent(command);
+        });
         editVertices_->Bind(wxEVT_BUTTON, [this](wxCommandEvent&) { editSelectedVertices(); });
         editControllers_->Bind(wxEVT_BUTTON, [this](wxCommandEvent&) { editSelectedControllers(); });
         advancedAnimation_->Bind(wxEVT_COLLAPSIBLEPANE_CHANGED,
@@ -630,6 +633,22 @@ public:
         if (!asciiEditor_ || !asciiEditor_->previewCurrent() || !selectedNode_ || !canvas_->areaScene().empty()) return false;
         return (asciiEditor_->advanced() && (!document_->sourceModel().asciiBuilt ||
             document_->model().nodes[*selectedNode_].asciiIdentity)) || selectedNameIsUnique();
+    }
+    bool canEditBinaryMesh() const {
+        return selectedNode_ && !document_->sourceModel().asciiBuilt && !document_->path().empty() &&
+            canvas_->areaScene().empty() && document_->model().nodes[*selectedNode_].mesh &&
+            !asciiEditor_->modified();
+    }
+    std::size_t selectedPackedOffset() const {
+        return *document_->model().nodes[*selectedNode_].packedOffset;
+    }
+    void selectPackedNode(std::size_t offset) {
+        for (std::size_t i=0;i<document_->model().nodes.size();++i)
+            if (document_->model().nodes[i].packedOffset==offset) {
+                tree_->SelectItem(nodeItems_[i]);
+                tree_->EnsureVisible(nodeItems_[i]);
+                break;
+            }
     }
     void editSelectedNode() {
         const auto sourceIndex = document_->model().partSourceNodes[*selectedNode_];
@@ -876,7 +895,7 @@ public:
 
 private:
     void updateEditingControls() {
-        editNode_->Enable(canEditNode());
+        editNode_->Enable(canEditNode() || canEditBinaryMesh());
         editVertices_->Enable(canEditVertices());
         editControllers_->Enable(canEditNode());
     }
@@ -2081,6 +2100,24 @@ private:
         dialog.SetYesNoLabels("Save ASCII", "Discard");
         const auto answer = dialog.ShowModal();
         return answer == wxID_NO || (answer == wxID_YES && page->asciiEditor()->save());
+    }
+
+    void editBinaryMesh() {
+        auto* page=activePage();
+        const bool selected=page && page->canEditBinaryMesh();
+        const auto offset=selected ? std::optional<std::size_t>{page->selectedPackedOffset()} : std::nullopt;
+        const auto saved=editBinaryMeshFields(this,
+            [this](const wxString& title,const auto& work) {return runJob(title,work);},
+            selected ? page->document().path() : std::filesystem::path{},offset);
+        if (!saved) return;
+        auto document=std::make_unique<ModelDocument>();
+        const auto resources=selected ? page->document().resourceResolver() : captureHostResolver();
+        if (!runJob("Loading edited binary model",[&](const auto& job) {
+            document->openFile(*saved,resources,job);
+        })) return;
+        const auto session=selected ? page->resourceSession() : std::shared_ptr<GameResourceSession>{};
+        addDocument(std::move(document),session,resources,selected ? page : nullptr);
+        if (offset) activePage()->selectPackedNode(*offset);
     }
 
     void reloadModel(ResourceResolver resources, std::shared_ptr<GameResourceSession> session) {
@@ -4004,7 +4041,7 @@ private:
         file->Append(ID_QuickConvert, "Quick Convert Files...", "Read model files and write their opposite format.");
         file->Append(ID_BatchDecompile, "Batch Decompile...", "Convert selected model files to ASCII.");
         file->Append(ID_BatchCompile, "Batch Compile...", "Compile selected model files to binary MDL/MDX.");
-        file->Append(ID_BinaryMeshFields, "Edit Binary Mesh Fields...", "Save fixed-size texture and flag edits to a binary copy without rebuilding geometry.");
+        file->Append(ID_BinaryMeshFields, "Edit Binary Mesh Fields...", "Edit binary mesh textures, flags and tangent basis directly.");
         file->AppendSeparator();
         file->Append(ID_CloseModel, "&Close Model\tCtrl+W");
         file->Append(ID_CloseAll, "Close &All");
@@ -4013,7 +4050,7 @@ private:
         bar->Append(file, "&File");
 
         auto* edit = new wxMenu;
-        edit->Append(ID_NodeProperties, "Selected Node Properties...", "Edit the selected node through its ASCII source.");
+        edit->Append(ID_NodeProperties, "Selected Node Properties...", "Edit the selected node's properties.");
         edit->Append(ID_VertexProperties, "Selected Mesh Vertex Properties...", "Edit vertex values and corner assignments in source-index tables.");
         edit->Append(ID_ReplaceMesh, "Replace Selected Mesh...", "Queue mesh replacements from donor models.");
         edit->Append(ID_ConvertMesh, "Convert Selected Mesh to Trimesh", "Bake a skin at its constructed bind pose, or retain a lightsaber's stationary blade pieces. Undoable ASCII edit.");
@@ -5499,7 +5536,10 @@ private:
                     event.GetId()==ID_BatchCompile?ConversionMode::Binary:ConversionMode::Opposite,
                     [this](const wxString& title,const auto& work){return runJob(title,work);});return;
             case ID_ConversionNaming: chooseConversionNaming(this);return;
-            case ID_NodeProperties: activePage()->editSelectedNode(); return;
+            case ID_NodeProperties:
+                if (activePage()->canEditBinaryMesh()) editBinaryMesh();
+                else activePage()->editSelectedNode();
+                return;
             case ID_VertexProperties: activePage()->editSelectedVertices(); return;
             case ID_ReplaceMesh:
                 activePage()->replaceSelectedMesh([this](const wxString& title, const auto& work) {
@@ -5511,7 +5551,7 @@ private:
             case ID_RecalculateNormals:
                 activePage()->recalculateSelectedNormals([this](const wxString& title,const auto& work) {return runJob(title,work);});return;
             case ID_BinaryMeshFields:
-                editBinaryMeshFields(this,[this](const wxString& title,const auto& work) {return runJob(title,work);});return;
+                editBinaryMesh();return;
             case ID_InspectBinary:
                 inspectBinaryFile(this,[this](const wxString& title,const auto& work) {return runJob(title,work);});return;
             case ID_AnalyzeBinaries:
@@ -5679,7 +5719,7 @@ private:
         enableModuleCommand(ID_AsciiEditor,editor&&!area);
         enableModuleCommand(ID_ExportAscii,editor&&editor->ready());
         enableModuleCommand(ID_ExportPacked,editor&&editor->ready());
-        enableModuleCommand(ID_NodeProperties,active&&active->canEditNode());
+        enableModuleCommand(ID_NodeProperties,active&&(active->canEditNode()||active->canEditBinaryMesh()));
         enableModuleCommand(ID_VertexProperties,active&&active->canEditVertices());
         enableModuleCommand(ID_ReplaceMesh,active&&active->canReplaceMesh());
         enableModuleCommand(ID_ConvertMesh,active&&active->canConvertMesh());
