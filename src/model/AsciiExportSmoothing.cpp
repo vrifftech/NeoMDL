@@ -957,9 +957,20 @@ std::vector<std::size_t> reconstructNormalFaceOrder(
     };
     struct Error {std::size_t corner;double squared,angle;};
     std::vector<std::map<std::vector<std::size_t>,std::vector<Error>>> orderedErrors(sources.size());
+    std::vector<std::size_t> incident,incidentRanks;
     const auto errors=[&](std::size_t source,const auto& rank) -> const std::vector<Error>& {
-        auto incident=sources[source].faces;
-        std::sort(incident.begin(),incident.end(),[&](std::size_t a,std::size_t b){return rank(a)<rank(b);});
+        incident=sources[source].faces;incidentRanks.resize(incident.size());
+        for(std::size_t i=0;i<incident.size();++i) incidentRanks[i]=rank(incident[i]);
+        // Proposals move one or two faces in the current local order. Reuse
+        // the buffers and evaluate each proposed rank once while inserting
+        // those faces, rather than sorting from source order for every move.
+        for(std::size_t i=1u;i<incident.size();++i) {
+            const auto face=incident[i],slot=incidentRanks[i];auto at=i;
+            while(at && incidentRanks[at-1u]>slot) {
+                incident[at]=incident[at-1u];incidentRanks[at]=incidentRanks[at-1u];--at;
+            }
+            incident[at]=face;incidentRanks[at]=slot;
+        }
         // Absolute face slots do not affect a vertex's ordered contribution sum.
         // Reuse its exact errors across moves of unrelated faces.
         const auto inserted=orderedErrors[source].try_emplace(incident);
@@ -996,6 +1007,8 @@ std::vector<std::size_t> reconstructNormalFaceOrder(
     const auto baseline=current;
     for(;;) {
         const auto rank=SourceFaceNeighbors::ranks(order);
+        for(auto& source:sources)
+            std::sort(source.faces.begin(),source.faces.end(),[&](std::size_t a,std::size_t b){return rank[a]<rank[b];});
         auto bestOrder=order;
         std::vector<Error> bestErrors;
         double improvement{};

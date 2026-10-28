@@ -5729,7 +5729,19 @@ void reconstructRetainedSeamRows(Writer& out,const Model& model,const Model& fra
                 candidates.push_back({&mesh,{point.x+position.x,point.y+position.y,point.z+position.z},candidate.masks});
             }
         }
+        const auto state=[](const Plans& source) {
+            std::vector<std::vector<std::uint32_t>> masks;
+            masks.reserve(source.size());
+            for(const auto& entry:source) masks.push_back(entry.second.smoothing.masks);
+            return masks;
+        };
+        // Several affected seam points can propose the same complete mesh
+        // state. Their footprints remain distinct for pairing, but their
+        // geometry and ordered seam output only need evaluation once.
+        std::set<std::vector<std::vector<std::uint32_t>>> evaluated;
+        evaluated.insert(state(plans));
         const auto consider=[&](Plans trial) {
+            if(!evaluated.insert(state(trial)).second) return;
             auto rebuilt=frames;
             const auto generated=generateGeometry(rebuilt,model,trial,false,out.advanced(),out.job());
             if(!preservesSkinChannels(model,generated,trial)) return;
@@ -5941,11 +5953,14 @@ void reconstructSkinSeamSmoothing(Writer& out,const Model& model) {
     }
     alternatives.push_back(std::move(retained));
 
-    struct PreparedPrecursor {Model geometry;CornerRows rows;};
+    struct PreparedPrecursor {Model geometry;CornerRows rows;std::vector<bool> skinPreserved;};
     const auto prepare=[&](const Plans& candidate) {
         auto geometry=frames;
         auto rows=generateGeometry(geometry,model,candidate,false,out.advanced(),out.job());
-        return PreparedPrecursor{std::move(geometry),std::move(rows)};
+        std::vector<bool> skinPreserved(model.meshes.size(),true);
+        for(const auto& mesh:model.meshes) if(mesh.skinned)
+            skinPreserved[static_cast<std::size_t>(&mesh-model.meshes.data())]=preservesSkinChannels(model,rows,candidate,&mesh);
+        return PreparedPrecursor{std::move(geometry),std::move(rows),std::move(skinPreserved)};
     };
     // These alternatives stay immutable while individual meshes are selected.
     // Generate their geometric precursors once; seams still run on every trial.
@@ -5954,22 +5969,23 @@ void reconstructSkinSeamSmoothing(Writer& out,const Model& model) {
     for(const auto& alternative:alternatives) prepared.push_back(prepare(alternative));
     auto baseline=prepared.front().geometry;
     auto baselineRows=prepared.front().rows;
+    auto baselineSkin=prepared.front().skinPreserved;
     initializeAsciiSkinSeamPools(baseline);
     processAsciiSkinSeams(baseline,out.job(),seamCache);
     auto best=measureSeamNormals(baseline,model,baselineRows,plans);
-    const auto consider=[&](Plans trial,Model rebuilt,CornerRows rows,const Mesh* changed=nullptr) {
+    const auto consider=[&](Plans trial,Model rebuilt,CornerRows rows,std::vector<bool> skinPreserved) {
         initializeAsciiSkinSeamPools(rebuilt);
         processAsciiSkinSeams(rebuilt,out.job(),seamCache);
         // NodeVertex equality excludes skin influences. Changed smoothing
         // may create new welds, which must still retain every corner's weights.
-        if(!preservesSkinChannels(model,rows,plans,changed)) return;
+        if(std::find(skinPreserved.begin(),skinPreserved.end(),false)!=skinPreserved.end()) return;
         const auto error=measureSeamNormals(rebuilt,model,rows,trial);
         if(error<best) {
-            best=error;plans=std::move(trial);baseline=std::move(rebuilt);baselineRows=std::move(rows);
+            best=error;plans=std::move(trial);baseline=std::move(rebuilt);baselineRows=std::move(rows);baselineSkin=std::move(skinPreserved);
         }
     };
     for(std::size_t i=1u;i<alternatives.size();++i)
-        consider(alternatives[i],prepared[i].geometry,prepared[i].rows);
+        consider(alternatives[i],prepared[i].geometry,prepared[i].rows,prepared[i].skinPreserved);
     // Precursor fits can help one mesh and hurt another. Select them
     // individually, scoring the complete ordered seam pass each time.
     double previous;
@@ -5977,7 +5993,7 @@ void reconstructSkinSeamSmoothing(Writer& out,const Model& model) {
         previous=best;
         auto refined=precursor(plans,true,PrecursorFit::RefineExisting);
         auto geometry=prepare(refined);
-        consider(std::move(refined),std::move(geometry.geometry),std::move(geometry.rows));
+        consider(std::move(refined),std::move(geometry.geometry),std::move(geometry.rows),std::move(geometry.skinPreserved));
         for(const auto& mesh:model.meshes)
             for(std::size_t i=0;i<alternatives.size();++i) {
                 const auto& alternative=alternatives[i];
@@ -5993,7 +6009,8 @@ void reconstructSkinSeamSmoothing(Writer& out,const Model& model) {
                 const auto index=static_cast<std::size_t>(&mesh-model.meshes.data());
                 auto rebuilt=baseline;rebuilt.meshes[index]=prepared[i].geometry.meshes[index];
                 auto rows=baselineRows;rows[index]=prepared[i].rows[index];
-                consider(std::move(trial),std::move(rebuilt),std::move(rows),&mesh);
+                auto skin=baselineSkin;skin[index]=prepared[i].skinPreserved[index];
+                consider(std::move(trial),std::move(rebuilt),std::move(rows),std::move(skin));
             }
     } while(best<previous);
 
