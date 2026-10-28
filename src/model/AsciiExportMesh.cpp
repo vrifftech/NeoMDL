@@ -4650,7 +4650,14 @@ void reconstructCyclicTangentDirections(Writer& out,const Model& model,const Mod
                         if(std::none_of(normalTargets.begin(),normalTargets.end(),[&](Vec3 n){return same(n,value);}))
                             normalTargets.push_back(value);
                     }
-                    if(!anchored.empty()) {
+                    std::vector<std::size_t> neighbors;
+                    for(const auto neighbor:selected) if(neighbor!=face) {
+                        bool shares=false;
+                        for(const auto a:mesh.faces[face].indices) for(const auto b:mesh.faces[neighbor].indices)
+                            shares=shares || same(mesh.vertices[a].position,mesh.vertices[b].position);
+                        if(shares) neighbors.push_back(neighbor);
+                    }
+                    if(!anchored.empty() && neighbors.size()>1u) {
                         // A stored corner constrains the sum of its contributors.
                         // Project that sum onto the requested direction and subtract
                         // the other faces before fitting this face's raw cross.
@@ -4683,13 +4690,6 @@ void reconstructCyclicTangentDirections(Writer& out,const Model& model,const Mod
                                     normalTargets.push_back(value);
                             }
                         }
-                    }
-                    std::vector<std::size_t> neighbors;
-                    for(const auto neighbor:selected) if(neighbor!=face) {
-                        bool shares=false;
-                        for(const auto a:mesh.faces[face].indices) for(const auto b:mesh.faces[neighbor].indices)
-                            shares=shares || same(mesh.vertices[a].position,mesh.vertices[b].position);
-                        if(shares) neighbors.push_back(neighbor);
                     }
                     if(!neighbors.empty()) for(const auto& target:normalTargets) {
                         auto coordinated=trial;
