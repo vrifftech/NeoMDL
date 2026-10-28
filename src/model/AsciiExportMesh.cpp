@@ -3937,6 +3937,15 @@ void reconstructTangentDirections(Writer& out,const Model& model,const Model& fr
                 const auto& ids=existing.faces[face].indices;
                 const auto a=source->generatedPositions[ids[0]],b=source->generatedPositions[ids[1]],c=source->generatedPositions[ids[2]];
                 const Vec3 p{b.x-a.x,b.y-a.y,b.z-a.z},q{c.x-a.x,c.y-a.y,c.z-a.z};
+                std::array<double,3> productP{p.x,p.y,p.z},productQ{q.x,q.y,q.z};
+                if(!source->facePositions64.empty()) {
+                    const auto& high=source->facePositions64[face];
+                    for(std::size_t i=0;i<3u;++i) {
+                        const double origin=high[0][i]-component(a,i);
+                        productP[i]+=(high[1][i]-component(b,i))-origin;
+                        productQ[i]+=(high[2][i]-component(c,i))-origin;
+                    }
+                }
                 for(std::size_t axis=0;axis<2u;++axis) {
                     std::unordered_set<std::array<std::uint32_t,3>,DirectionHash> seen;
                     const auto remember=[&](Coordinates values) {
@@ -4003,13 +4012,26 @@ void reconstructTangentDirections(Writer& out,const Model& model,const Model& fr
                                 lower[1]+(upper[1]-lower[1])*seed[1],
                                 lower[2]+(upper[2]-lower[2])*seed[2]});
                     }
-                    if(!interior && (!mesh.render || faceTarget || source->faceSmoothing[face]==0u) && low[1]==low[2] && low[0]!=low[1]) {
+                    const bool directTarget=std::any_of(affectedByFace[face].begin(),affectedByFace[face].end(),
+                        [&](std::size_t row) {
+                            return std::any_of(contributorsByRow[row].begin(),contributorsByRow[row].end(),
+                                [&](std::size_t neighbor) {
+                                    return std::any_of(affectedByFace[neighbor].begin(),affectedByFace[neighbor].end(),
+                                        [&](std::size_t target){return contributorsByRow[target].size()==1u;});
+                                });
+                        });
+                    if((interior?directTarget:
+                        (!mesh.render || faceTarget || source->faceSmoothing[face]==0u)) && low[1]==low[2] && low[0]!=low[1]) {
                         // Rounded product cells depend on packed edge/UV
                         // inputs and, for hidden meshes, their directional
                         // limits. Reuse the exact witnesses across face fits.
                         const bool limited=!faceTarget && !mesh.render;
                         std::vector<std::uint32_t> productKey{static_cast<std::uint32_t>(axis),limited?1u:0u,
                             rawBits(p.x),rawBits(p.y),rawBits(p.z),rawBits(q.x),rawBits(q.y),rawBits(q.z)};
+                        for(const auto& edge:{productP,productQ}) for(const auto value:edge) {
+                            std::uint64_t word;std::memcpy(&word,&value,sizeof(word));
+                            productKey.insert(productKey.end(),{static_cast<std::uint32_t>(word),static_cast<std::uint32_t>(word>>32u)});
+                        }
                         for(const auto value:low) productKey.push_back(rawBits(static_cast<float>(value)));
                         if(limited) for(const auto row:affectedByFace[face])
                             if(contributorsByRow[row].size()==1u) for(const auto& target:targets[row]) {
@@ -4033,12 +4055,12 @@ void reconstructTangentDirections(Writer& out,const Model& model,const Model& fr
                             // products. Enumerate their cells together, retaining
                             // a shared first-corner residual that realizes both.
                             const float base=float(low[1])-float(low[0]);
-                            const auto coefficients=[&](Vec3 vector,std::size_t corner) {
+                            const auto coefficients=[&](const std::array<double,3>& vector,std::size_t corner) {
                                 const double first=base+(lower[corner]-low[corner])-(upper[0]-low[0]);
                                 const double last=base+(upper[corner]-low[corner])-(lower[0]-low[0]);
                                 std::set<double> boundaries{first,last};
                                 for(std::size_t axis=0;axis<3u;++axis) {
-                                    const auto product=[&](double value){return float(component(vector,axis)*value);};
+                                    const auto product=[&](double value){return float(vector[axis]*value);};
                                     double cursor=first;
                                     const auto final=product(last);
                                     while(product(cursor)!=final) {
@@ -4047,7 +4069,7 @@ void reconstructTangentDirections(Writer& out,const Model& model,const Model& fr
                                         // locally, then retain the exact adjacent
                                         // double witnesses used by the search.
                                         const double midpoint=(double(value)+std::nextafter(value,final))*0.5;
-                                        const double seed=std::clamp(midpoint/component(vector,axis),cursor,last);
+                                        const double seed=std::clamp(midpoint/vector[axis],cursor,last);
                                         const bool within=product(seed)==value;
                                         const double limit=within?last:cursor;
                                         double near=seed,far=std::nextafter(seed,limit),step=std::abs(far-seed);
@@ -4066,8 +4088,8 @@ void reconstructTangentDirections(Writer& out,const Model& model,const Model& fr
                                 std::vector<std::pair<double,double>> result;
                                 std::map<std::array<std::uint32_t,3>,std::size_t> cells;
                                 const auto append=[&](double value) {
-                                    const auto key=std::array<std::uint32_t,3>{bits(float(vector.x*value)),
-                                        bits(float(vector.y*value)),bits(float(vector.z*value))};
+                                    const auto key=std::array<std::uint32_t,3>{bits(float(vector[0]*value)),
+                                        bits(float(vector[1]*value)),bits(float(vector[2]*value))};
                                     const auto entry=cells.emplace(key,result.size());
                                     if(entry.second) result.push_back({value,value});
                                     else {auto& cell=result[entry.first->second];cell.first=std::min(cell.first,value);cell.second=std::max(cell.second,value);}
@@ -4076,24 +4098,24 @@ void reconstructTangentDirections(Writer& out,const Model& model,const Model& fr
                                 for(const auto value:boundaries) {append(previous+(value-previous)*0.5);append(value);previous=value;}
                                 return result;
                             };
-                            const auto first=coefficients(q,1u),second=coefficients(p,2u);
+                            const auto first=coefficients(productQ,1u),second=coefficients(productP,2u);
                             // Prune product cells with the independent rounded-axis
                             // limits before enumerating their joint UV residuals.
                             struct ProductRange {std::size_t begin,end,left{},right{};Vec3 low,high;};
                             const double residualError=8.0*std::numeric_limits<double>::epsilon()*
                                 std::max({std::abs(low[0]),std::abs(low[1]),std::abs(low[2])});
-                            const auto productBounds=[&](Vec3 vector,double begin,double end) {
+                            const auto productBounds=[&](const std::array<double,3>& vector,double begin,double end) {
                                 std::array<float,3> lo{},hi{};
                                 for(std::size_t i=0;i<3u;++i) {
-                                    const auto a=float(component(vector,i)*(begin-residualError));
-                                    const auto b=float(component(vector,i)*(end+residualError));
+                                    const auto a=float(vector[i]*(begin-residualError));
+                                    const auto b=float(vector[i]*(end+residualError));
                                     lo[i]=std::min(a,b);hi[i]=std::max(a,b);
                                 }
                                 return std::make_pair(Vec3{lo[0],lo[1],lo[2]},Vec3{hi[0],hi[1],hi[2]});
                             };
                             std::vector<ProductRange> products;products.reserve(second.size()*2u);
                             const auto build=[&](const auto& self,std::size_t begin,std::size_t end)->std::size_t {
-                                const auto id=products.size();const auto bounds=productBounds(p,second[begin].first,second[end-1u].second);
+                                const auto id=products.size();const auto bounds=productBounds(productP,second[begin].first,second[end-1u].second);
                                 products.push_back({begin,end,0u,0u,bounds.first,bounds.second});
                                 if(end-begin>1u) {
                                     const auto middle=begin+(end-begin)/2u;
@@ -4104,7 +4126,7 @@ void reconstructTangentDirections(Writer& out,const Model& model,const Model& fr
                             };
                             build(build,0u,second.size());
                             for(const auto& u:first) {
-                                const auto ub=productBounds(q,u.first,u.second);
+                                const auto ub=productBounds(productQ,u.first,u.second);
                                 const auto visit=[&](const auto& self,std::size_t id)->void {
                                     const auto& node=products[id];
                                     if(!faceTarget && !mesh.render) {
@@ -4566,12 +4588,35 @@ void reconstructCyclicTangentDirections(Writer& out,const Model& model,const Mod
                     select(face);
             }
         }
+        std::set<std::size_t> anchored;
+        if(interior) {
+            // A directly constrained face also contributes to shared corners
+            // already below the limit. Fit their other contributors together
+            // so correcting its cross can retain the shared sum's direction.
+            std::vector<std::vector<std::size_t>> contributors(existing.vertices.size());
+            for(const auto& triangle:existing.faces) for(const auto corner:triangle.indices) {
+                const auto row=static_cast<std::size_t>(corner);
+                auto& incident=contributors[row];
+                if(!incident.empty()) continue;
+                const auto writer=topology.writers[row],group=topology.vertexPositions[row];
+                incident.push_back(writer);
+                for(auto at=topology.offsets[group];at<topology.offsets[group+1u];++at) {
+                    const auto face=topology.incident[at].first;
+                    if(face!=writer && (source.faceSmoothing[writer]&source.faceSmoothing[face])) incident.push_back(face);
+                }
+                if(incident.size()==1u && selected.count(found->second.faceOrder[source.authoredFaceIndices[writer]]))
+                    anchored.insert(writer);
+            }
+            for(const auto& incident:contributors)
+                if(std::any_of(incident.begin(),incident.end(),[&](std::size_t face){return anchored.count(face);}))
+                    for(const auto face:incident) select(face);
+        }
         const auto localError=[&](const auto& trial) {
             const auto& plan=trial.at(&mesh);
             const auto& geometry=cache.prepare(mesh,model,frames,plan,out.advanced(),out.job());
             const auto rebuilt=cache.rebuild(geometry,plan,out.job());
             double maximum{};
-            if(minimizeMaximum) for(std::size_t f=0;f<mesh.faces.size();++f) for(std::size_t c=0;c<3u;++c) {
+            if(minimizeMaximum || !anchored.empty()) for(std::size_t f=0;f<mesh.faces.size();++f) for(std::size_t c=0;c<3u;++c) {
                 const auto& actual=rebuilt.vertices[geometry.rows[f][c]].tangentBasis;
                 const auto& target=plan.vertices()[mesh.faces[f].indices[c]].tangentBasis;
                 maximum=std::max({maximum,difference(actual.bitangent,target.bitangent),
@@ -4605,6 +4650,40 @@ void reconstructCyclicTangentDirections(Writer& out,const Model& model,const Mod
                         if(std::none_of(normalTargets.begin(),normalTargets.end(),[&](Vec3 n){return same(n,value);}))
                             normalTargets.push_back(value);
                     }
+                    if(!anchored.empty()) {
+                        // A stored corner constrains the sum of its contributors.
+                        // Project that sum onto the requested direction and subtract
+                        // the other faces before fitting this face's raw cross.
+                        const auto& geometry=cache.prepare(mesh,model,frames,trial.at(&mesh),out.advanced(),out.job());
+                        const auto fitted=cache.rebuild(geometry,trial.at(&mesh),out.job());
+                        auto bases=ascii::tangentFaceBases(fitted,out.job());
+                        ascii::orientSingularTangentComponents(geometry.topology.singular,bases,out.job());
+                        const auto& tangentSource=*fitted.asciiTangentSource;
+                        std::size_t fittedFace{};
+                        while(trial.at(&mesh).faceOrder[tangentSource.authoredFaceIndices[fittedFace]]!=face) ++fittedFace;
+                        for(std::size_t corner=0;corner<3u;++corner) {
+                            const auto row=geometry.rows[face][corner];
+                            const auto writer=geometry.topology.writers[row],group=geometry.topology.vertexPositions[row];
+                            Vec3 sum=bases[writer].normal,rest=writer==fittedFace?Vec3{}:sum;
+                            bool contributes=writer==fittedFace;
+                            for(auto at=geometry.topology.offsets[group];at<geometry.topology.offsets[group+1u];++at) {
+                                const auto other=geometry.topology.incident[at].first;
+                                if(other==writer || !(tangentSource.faceSmoothing[writer]&tangentSource.faceSmoothing[other])) continue;
+                                const auto n=bases[other].normal;
+                                sum={sum.x+n.x,sum.y+n.y,sum.z+n.z};
+                                if(other==fittedFace) contributes=true;
+                                else rest={rest.x+n.x,rest.y+n.y,rest.z+n.z};
+                            }
+                            if(contributes) {
+                                const auto target=trial.at(&mesh).vertices()[mesh.faces[face].indices[corner]].tangentBasis.normal;
+                                const double scale=((double(sum.x)*target.x+double(sum.y)*target.y)+double(sum.z)*target.z)/
+                                    ((double(target.x)*target.x+double(target.y)*target.y)+double(target.z)*target.z);
+                                const Vec3 value{float(scale*target.x-rest.x),float(scale*target.y-rest.y),float(scale*target.z-rest.z)};
+                                if(std::none_of(normalTargets.begin(),normalTargets.end(),[&](Vec3 n){return same(n,value);}))
+                                    normalTargets.push_back(value);
+                            }
+                        }
+                    }
                     std::vector<std::size_t> neighbors;
                     for(const auto neighbor:selected) if(neighbor!=face) {
                         bool shares=false;
@@ -4626,7 +4705,8 @@ void reconstructCyclicTangentDirections(Writer& out,const Model& model,const Mod
                 if(!(proposedError<localBest)) continue;
                 auto rebuilt=frames;auto generated=generateGeometry(rebuilt,model,trial,false,out.advanced(),out.job());
                 const auto error=measureTangentBasis(rebuilt,model,generated,trial,out.job());
-                if(!(mesh.render?error<best:rank(error)<rank(best)) || !preservesSkinChannels(model,generated,plans)) continue;
+                if((anchored.empty() && !(mesh.render?error<best:rank(error)<rank(best))) ||
+                   !preservesSkinChannels(model,generated,plans)) continue;
                 processAsciiSkinSeams(rebuilt,out.job());
                 bool retained=true;
                 for(std::size_t i=0;i<model.meshes.size() && retained;++i) {
