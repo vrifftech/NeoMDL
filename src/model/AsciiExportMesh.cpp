@@ -5388,6 +5388,309 @@ void reconstructTangentCornerRows(Writer& out,const Model& model,const Model& fr
     measureSeamNormals(current,model,rows,plans);
 }
 
+// Cancelled bitangents retain useful exact constraints even when their normal
+// sums are ill-conditioned. Keep those bitangents, enumerate adjacent rounded
+// tangent directions with their cyclic witnesses, and fit the shared sums.
+void reconstructCancelledTangentSums(Writer& out,const Model& model,const Model& frames,
+                                    std::map<const Mesh*,MeshReconstruction>& plans) {
+    auto current=frames;
+    auto rows=generateGeometry(current,model,plans,false,out.advanced(),out.job());
+    measureTangentBasis(current,model,rows,plans,out.job());
+    processAsciiSkinSeams(current,out.job());
+    constexpr double oneDegree=0.00030460968721752167;
+    const auto difference=[](Vec3 a,Vec3 b) {
+        const double x=double(a.x)-b.x,y=double(a.y)-b.y,z=double(a.z)-b.z;return (x*x+y*y)+z*z;
+    };
+    const auto add=[](Vec3 a,Vec3 b){return Vec3{a.x+b.x,a.y+b.y,a.z+b.z};};
+    const auto component=[](Vec3 v,std::size_t axis){return axis==0u?v.x:axis==1u?v.y:v.z;};
+    using Coordinates=std::array<double,3>;
+    using PreciseUv=std::array<std::array<double,2>,3>;
+    struct Choice {TangentBasis basis;PreciseUv uv;std::uint8_t rotation{};double cost{};};
+    struct Plane {std::size_t row;Vec3 direction;double fixed{},rounding{};};
+    struct Node {std::size_t begin,end,left{},right{};std::vector<double> low,high;double cost;};
+    struct Variable {std::size_t face;std::vector<Choice> choices;std::vector<std::size_t> order;std::vector<Node> nodes;};
+    for(std::size_t index=0;index<model.meshes.size();++index) {
+        const auto& mesh=model.meshes[index];const auto found=plans.find(&mesh);
+        if(found==plans.end() || !tangentPrecisionMesh(mesh)) continue;
+        const auto& plan=found->second;
+        const auto& existing=current.meshes[index];const auto& source=*existing.asciiTangentSource;
+        const auto topology=ascii::prepareTangentBasis(existing,out.job());
+        auto bases=ascii::tangentFaceBases(existing,out.job());
+        ascii::orientSingularTangentComponents(topology.singular,bases,out.job());
+        std::vector<std::vector<TangentBasis>> targets(existing.vertices.size());
+        for(std::size_t face=0;face<mesh.faces.size();++face) for(std::size_t corner=0;corner<3u;++corner)
+            targets[rows[index][face][corner]].push_back(plan.vertices()[mesh.faces[face].indices[corner]].tangentBasis);
+        std::vector<std::vector<std::size_t>> contributors(targets.size());
+        std::set<std::size_t> selected;
+        for(std::size_t row=0;row<targets.size();++row) if(!targets[row].empty()) {
+            const auto writer=topology.writers[row],group=topology.vertexPositions[row];
+            auto& incident=contributors[row];incident.push_back(writer);
+            for(auto at=topology.offsets[group];at<topology.offsets[group+1u];++at) {
+                const auto other=topology.incident[at].first;
+                if(other!=writer && (source.faceSmoothing[writer]&source.faceSmoothing[other])) incident.push_back(other);
+            }
+            for(const auto& target:targets[row])
+                if(difference(existing.vertices[row].tangentBasis.normal,target.normal)>oneDegree)
+                    selected.insert(incident.begin(),incident.end());
+        }
+        if(selected.empty()) continue;
+        const auto original=selected;
+        for(const auto& incident:contributors)
+            if(std::any_of(incident.begin(),incident.end(),[&](std::size_t face){return original.count(face);}))
+                selected.insert(incident.begin(),incident.end());
+        std::vector<bool> singular(existing.faces.size());
+        for(const auto& group:topology.singular) for(const auto face:group.faces) singular[face]=true;
+        std::vector<Variable> variables;
+        for(const auto face:selected) {
+            if(!singular[face]) continue;
+            const auto& ids=existing.faces[face].indices;
+            const auto ua=source.generatedTexcoords[ids[0]],ub=source.generatedTexcoords[ids[1]],uc=source.generatedTexcoords[ids[2]];
+            if((ua.x==ub.x && ua.x==uc.x) || (ua.y==ub.y && ua.y==uc.y)) continue;
+            auto& variable=variables.emplace_back();variable.face=face;
+            PreciseUv initial;
+            for(std::size_t c=0;c<3u;++c) {
+                const auto uv=source.generatedTexcoords[ids[c]];
+                initial[c]=source.faceTexcoords64.empty()?std::array<double,2>{uv.x,uv.y}:source.faceTexcoords64[face][c];
+            }
+            variable.choices.push_back({bases[face],initial,0u,0.0});
+            for(std::uint8_t rotation=0;rotation<3u;++rotation) {
+                std::array<Vec3,3> positions;
+                std::array<std::array<double,3>,3> precisePositions;
+                std::array<Vec2,3> uv;
+                PreciseUv precise;
+                for(std::size_t c=0;c<3u;++c) {
+                    const auto corner=(c+rotation)%3u;
+                    positions[c]=source.generatedPositions[ids[corner]];uv[c]=source.generatedTexcoords[ids[corner]];
+                    const auto p=positions[c];
+                    precisePositions[c]=source.facePositions64.empty()?std::array<double,3>{p.x,p.y,p.z}:source.facePositions64[face][corner];
+                    precise[c]=initial[corner];
+                }
+                std::array<double,3> p,q;
+                for(std::size_t axis=0;axis<3u;++axis) {
+                    const float a=component(positions[0],axis),b=component(positions[1],axis),c=component(positions[2],axis);
+                    p[axis]=double(b-a)+((precisePositions[1][axis]-b)-(precisePositions[0][axis]-a));
+                    q[axis]=double(c-a)+((precisePositions[2][axis]-c)-(precisePositions[0][axis]-a));
+                }
+                const auto axisChoices=[&](std::size_t axis,Vec3 target,bool exact) {
+                    std::vector<std::pair<Vec3,Coordinates>> result;
+                    std::set<std::array<std::uint32_t,3>> seen;
+                    Coordinates low,lower,upper,base{0.0,0.0,0.0},currentAxis;
+                    for(std::size_t c=0;c<3u;++c) {
+                        const float value=axis?uv[c].y:uv[c].x;low[c]=value;currentAxis[c]=precise[c][axis];
+                        lower[c]=std::nextafter((double(value)+std::nextafter(value,-std::numeric_limits<float>::infinity()))*0.5,double(value));
+                        upper[c]=std::nextafter((double(value)+std::nextafter(value,std::numeric_limits<float>::infinity()))*0.5,double(value));
+                        if(value==0.0f) (std::signbit(value)?upper[c]:lower[c])=double(value);
+                    }
+                    base[1]=float(low[1])-float(low[0]);base[2]=float(low[2])-float(low[0]);
+                    const auto remember=[&](Coordinates values) {
+                        auto fitted=precise;
+                        for(std::size_t c=0;c<3u;++c) fitted[c][axis]=values[c];
+                        const auto direction=ascii::normalizeTangentBasis(ascii::tangentPositionDerivative(positions,precisePositions,uv,fitted,axis));
+                        if(exact && !same(direction,target)) return;
+                        if(seen.insert({bits(direction.x),bits(direction.y),bits(direction.z)}).second) result.push_back({direction,values});
+                    };
+                    remember(currentAxis);
+                    if(exact && !result.empty()) return result;
+                    const auto dominant=std::abs(base[1])>=std::abs(base[2])?1u:2u,other=3u-dominant;
+                    std::vector<double> ratios;
+                    for(std::size_t i=0;i<3u;++i) for(std::size_t j=i+1u;j<3u;++j)
+                        for(int di=exact?0:-2;di<=(exact?0:2);++di) for(int dj=exact?0:-2;dj<=(exact?0:2);++dj) {
+                            const float ti=component(target,i),tj=component(target,j);
+                            const double ui=std::nextafter(std::abs(ti),std::numeric_limits<float>::infinity())-std::abs(ti);
+                            const double uj=std::nextafter(std::abs(tj),std::numeric_limits<float>::infinity())-std::abs(tj);
+                            const double x=double(ti)+di*ui,y=double(tj)+dj*uj;
+                            const double a=q[i]*y-q[j]*x,b=p[i]*y-p[j]*x;
+                            const double denominator=dominant==1u?b:a,numerator=dominant==1u?a:b;
+                            if(denominator!=0.0) ratios.push_back(numerator/denominator);
+                        }
+                    Coordinates coefficients{0.0,base[1]+((currentAxis[1]-low[1])-(currentAxis[0]-low[0])),
+                        base[2]+((currentAxis[2]-low[2])-(currentAxis[0]-low[0]))};
+                    ratios.push_back(coefficients[other]/coefficients[dominant]);
+                    const auto bounds=std::minmax_element(ratios.begin(),ratios.end());const double left=*bounds.first,right=*bounds.second;
+                    for(std::size_t step=0;step<=32u;++step) ratios.push_back(left+(right-left)*(double(step)/32.0));
+                    for(const auto ratio:ratios) {
+                        Coordinates direction{};direction[dominant]=1.0;direction[other]=ratio;
+                        double first=-std::numeric_limits<double>::infinity(),last=std::numeric_limits<double>::infinity();bool feasible=true;
+                        for(std::size_t i=0;i<3u;++i) for(std::size_t j=i+1u;j<3u;++j) {
+                            const double d=direction[i]-direction[j],b=base[i]-base[j];
+                            const double lo=(lower[i]-low[i])-(upper[j]-low[j])+b;
+                            const double hi=(upper[i]-low[i])-(lower[j]-low[j])+b;
+                            if(d==0.0) feasible=feasible && lo<=0.0 && hi>=0.0;
+                            else {first=std::max(first,std::min(lo/d,hi/d));last=std::min(last,std::max(lo/d,hi/d));}
+                        }
+                        if(!feasible || first>last) continue;
+                        for(std::size_t step=0;step<=1024u;++step) {
+                            out.job().check();const double scale=first+(last-first)*(double(step)/1024.0);
+                            Coordinates shifts,values;double lo=-std::numeric_limits<double>::infinity(),hi=std::numeric_limits<double>::infinity();
+                            for(std::size_t c=0;c<3u;++c) {
+                                shifts[c]=scale*direction[c]-base[c];
+                                lo=std::max(lo,lower[c]-low[c]-shifts[c]);hi=std::min(hi,upper[c]-low[c]-shifts[c]);
+                            }
+                            const double origin=lo+(hi-lo)*0.5;
+                            for(std::size_t c=0;c<3u;++c) values[c]=std::clamp(low[c]+origin+shifts[c],lower[c],upper[c]);
+                            remember(values);
+                            if(exact && !result.empty()) return result;
+                        }
+                    }
+                    return result;
+                };
+                const auto bitangents=axisChoices(0u,bases[face].bitangent,true);
+                if(bitangents.empty()) continue;
+                const auto tangents=axisChoices(1u,bases[face].tangent,false);
+                std::array<float,3> lower,upper;
+                for(std::size_t c=0;c<3u;++c) {
+                    lower[c]=upper[c]=component(bases[face].tangent,c);
+                    for(std::size_t step=0;step<2u;++step) {
+                        lower[c]=std::nextafter(lower[c],-std::numeric_limits<float>::infinity());
+                        upper[c]=std::nextafter(upper[c],std::numeric_limits<float>::infinity());
+                    }
+                }
+                std::set<std::array<std::uint32_t,3>> seen;
+                for(const auto& tangent:tangents) {
+                    TangentBasis value;value.bitangent=bases[face].bitangent;value.tangent=tangent.first;
+                    value.normal=ascii::tangentBasisNormal(value.bitangent,value.tangent,{});
+                    const auto normal=existing.vertices[ids[rotation]].normal;
+                    if((value.normal.x*normal.x+value.normal.y*normal.y)+value.normal.z*normal.z<0.0f) {
+                        value.tangent={-value.tangent.x,-value.tangent.y,-value.tangent.z};value.normal={-value.normal.x,-value.normal.y,-value.normal.z};
+                    }
+                    bool adjacent=true;
+                    for(std::size_t c=0;c<3u;++c) adjacent=adjacent && component(value.tangent,c)>=lower[c] && component(value.tangent,c)<=upper[c];
+                    if(!adjacent || !seen.insert({bits(value.tangent.x),bits(value.tangent.y),bits(value.tangent.z)}).second) continue;
+                    PreciseUv fitted;
+                    for(std::size_t c=0;c<3u;++c) fitted[c]={bitangents.front().second[c],tangent.second[c]};
+                    value.valid=true;variable.choices.push_back({value,fitted,rotation,difference(value.tangent,bases[face].tangent)});
+                }
+            }
+        }
+        std::vector<std::size_t> variableIds(existing.faces.size(),std::numeric_limits<std::size_t>::max());
+        for(std::size_t i=0;i<variables.size();++i) variableIds[variables[i].face]=i;
+        std::vector<Plane> planes;
+        for(std::size_t row=0;row<targets.size();++row) {
+            if(std::none_of(contributors[row].begin(),contributors[row].end(),[&](std::size_t face){return variableIds[face]!=std::numeric_limits<std::size_t>::max();})) continue;
+            std::set<std::array<std::uint32_t,3>> seen;
+            for(const auto& target:targets[row]) {
+                if(!seen.insert({bits(target.normal.x),bits(target.normal.y),bits(target.normal.z)}).second) continue;
+                const auto n=ascii::normalizeTangentBasis(target.normal);
+                std::size_t axis=0u;for(std::size_t c=1;c<3u;++c) if(std::abs(component(n,c))<std::abs(component(n,axis))) axis=c;
+                Vec3 unit{};if(axis==0u) unit.x=1.0f;else if(axis==1u) unit.y=1.0f;else unit.z=1.0f;
+                const auto u=ascii::normalizeTangentBasis(ascii::tangentBasisNormal(n,unit,{}));
+                const auto v=ascii::tangentBasisNormal(n,u,{});
+                const double radius=std::tan(std::acos(-1.0)/180.0)*std::cos(std::acos(-1.0)/8.0);
+                for(std::size_t side=0;side<8u;++side) {
+                    const double angle=side*std::acos(-1.0)/4.0;
+                    const Vec3 direction{float(u.x*std::cos(angle)+v.x*std::sin(angle)-radius*n.x),
+                        float(u.y*std::cos(angle)+v.y*std::sin(angle)-radius*n.y),
+                        float(u.z*std::cos(angle)+v.z*std::sin(angle)-radius*n.z)};
+                    auto& plane=planes.emplace_back();plane.row=row;plane.direction=direction;
+                    std::array<double,3> bound{},rounding{};
+                    for(const auto face:contributors[row]) {
+                        const auto id=variableIds[face];
+                        for(std::size_t c=0;c<3u;++c) {
+                            double magnitude=std::abs(component(bases[face].normal,c));
+                            if(id!=std::numeric_limits<std::size_t>::max())
+                                for(const auto& choice:variables[id].choices) magnitude=std::max(magnitude,double(std::abs(component(choice.basis.normal,c))));
+                            bound[c]+=magnitude;
+                            const float rounded=std::nextafter(float(bound[c]),std::numeric_limits<float>::infinity());
+                            rounding[c]+=double(std::nextafter(rounded,std::numeric_limits<float>::infinity()))-rounded;bound[c]=rounded;
+                        }
+                        if(id==std::numeric_limits<std::size_t>::max()) plane.fixed+=(double(direction.x)*bases[face].normal.x+double(direction.y)*bases[face].normal.y)+double(direction.z)*bases[face].normal.z;
+                    }
+                    for(std::size_t c=0;c<3u;++c) plane.rounding+=std::abs(component(direction,c))*rounding[c];
+                }
+            }
+        }
+        for(auto& variable:variables) {
+            variable.order.resize(variable.choices.size());std::iota(variable.order.begin(),variable.order.end(),0u);
+            const auto build=[&](const auto& self,std::size_t begin,std::size_t end)->std::size_t {
+                const auto id=variable.nodes.size();
+                variable.nodes.push_back({begin,end,0u,0u,std::vector<double>(planes.size(),std::numeric_limits<double>::infinity()),
+                    std::vector<double>(planes.size(),-std::numeric_limits<double>::infinity()),std::numeric_limits<double>::infinity()});
+                auto low=variable.choices[variable.order[begin]].basis.normal,high=low;
+                for(auto at=begin;at<end;++at) {
+                    const auto& choice=variable.choices[variable.order[at]];const auto n=choice.basis.normal;
+                    low={std::min(low.x,n.x),std::min(low.y,n.y),std::min(low.z,n.z)};high={std::max(high.x,n.x),std::max(high.y,n.y),std::max(high.z,n.z)};
+                    auto& node=variable.nodes[id];node.cost=std::min(node.cost,choice.cost);
+                    for(std::size_t p=0;p<planes.size();++p) {
+                        const auto& plane=planes[p];const auto count=std::count(contributors[plane.row].begin(),contributors[plane.row].end(),variable.face);
+                        const double value=count*((double(plane.direction.x)*n.x+double(plane.direction.y)*n.y)+double(plane.direction.z)*n.z);
+                        node.low[p]=std::min(node.low[p],value);node.high[p]=std::max(node.high[p],value);
+                    }
+                }
+                if(end-begin>1u) {
+                    std::size_t axis=0u;for(std::size_t c=1;c<3u;++c) if(component(high,c)-component(low,c)>component(high,axis)-component(low,axis)) axis=c;
+                    const auto middle=begin+(end-begin)/2u;
+                    std::nth_element(variable.order.begin()+begin,variable.order.begin()+middle,variable.order.begin()+end,[&](std::size_t a,std::size_t b) {
+                        const auto x=component(variable.choices[a].basis.normal,axis),y=component(variable.choices[b].basis.normal,axis);return x<y || (x==y && a<b);
+                    });
+                    variable.nodes[id].left=self(self,begin,middle);variable.nodes[id].right=self(self,middle,end);
+                }
+                return id;
+            };
+            build(build,0u,variable.order.size());
+        }
+        std::vector<std::size_t> nodes(variables.size());
+        const auto consider=[&]() {
+            auto proposed=bases;
+            for(std::size_t i=0;i<variables.size();++i) proposed[variables[i].face]=variables[i].choices[variables[i].order[variables[i].nodes[nodes[i]].begin]].basis;
+            for(std::size_t row=0;row<targets.size();++row) if(!targets[row].empty()) {
+                TangentBasis value;
+                for(const auto face:contributors[row]) {value.bitangent=add(value.bitangent,proposed[face].bitangent);value.tangent=add(value.tangent,proposed[face].tangent);value.normal=add(value.normal,proposed[face].normal);}
+                value.bitangent=ascii::normalizeTangentBasis(value.bitangent);value.tangent=ascii::normalizeTangentBasis(value.tangent);value.normal=ascii::normalizeTangentBasis(value.normal);
+                for(const auto& target:targets[row])
+                    if(std::max({difference(value.bitangent,target.bitangent),difference(value.tangent,target.tangent),difference(value.normal,target.normal)})>=oneDegree) return false;
+            }
+            auto trial=plans;auto& fitted=trial.at(&mesh);
+            if(fitted.preciseFaceTexcoords.empty()) {
+                fitted.preciseFaceTexcoords.resize(mesh.faces.size());
+                for(std::size_t face=0;face<mesh.faces.size();++face) for(std::size_t c=0;c<3u;++c) {
+                    const auto uv=fitted.vertices()[mesh.faces[face].indices[c]].texcoord0;fitted.preciseFaceTexcoords[face][c]={uv.x,uv.y};
+                }
+            }
+            for(std::size_t i=0;i<variables.size();++i) {
+                const auto& variable=variables[i];const auto& choice=variable.choices[variable.order[variable.nodes[nodes[i]].begin]];
+                const auto face=fitted.faceOrder[source.authoredFaceIndices[variable.face]];
+                fitted.cornerRotations[face]=std::uint8_t((fitted.cornerRotations[face]+choice.rotation)%3u);
+                for(std::size_t c=0;c<3u;++c) fitted.preciseFaceTexcoords[face][fitted.sourceCorner(face,c)]=choice.uv[c];
+            }
+            auto rebuilt=frames;const auto generated=generateGeometry(rebuilt,model,trial,false,out.advanced(),out.job());
+            if(!preservesSkinChannels(model,generated,trial)) return false;
+            measureTangentBasis(rebuilt,model,generated,trial,out.job());
+            for(std::size_t face=0;face<mesh.faces.size();++face) for(std::size_t c=0;c<3u;++c) {
+                const auto& value=rebuilt.meshes[index].vertices[generated[index][face][c]].tangentBasis;
+                const auto& target=plan.vertices()[mesh.faces[face].indices[c]].tangentBasis;
+                if(std::max({difference(value.bitangent,target.bitangent),difference(value.tangent,target.tangent),difference(value.normal,target.normal)})>=oneDegree) return false;
+            }
+            processAsciiSkinSeams(rebuilt,out.job());
+            if(!improvesReconstructedShading(model,plans,current,rows,rebuilt,generated,true,32.0*std::numeric_limits<float>::epsilon(),true)) return false;
+            plans=std::move(trial);current=std::move(rebuilt);rows=generated;return true;
+        };
+        const auto search=[&](const auto& self)->bool {
+            out.job().check();std::size_t split=variables.size(),critical=planes.size();double pressure=-std::numeric_limits<double>::infinity();
+            for(std::size_t p=0;p<planes.size();++p) {
+                double low=planes[p].fixed,high=low;
+                for(std::size_t i=0;i<variables.size();++i) {const auto& node=variables[i].nodes[nodes[i]];low+=node.low[p];high+=node.high[p];}
+                if(low>planes[p].rounding) return false;
+                if(high-planes[p].rounding>pressure) {pressure=high-planes[p].rounding;critical=p;}
+            }
+            double widest=-1.0;
+            for(std::size_t i=0;i<variables.size();++i) {
+                const auto& node=variables[i].nodes[nodes[i]];
+                if(node.end-node.begin==1u) continue;
+                const double width=critical==planes.size()?double(node.end-node.begin):node.high[critical]-node.low[critical];
+                if(width>widest) {widest=width;split=i;}
+            }
+            if(split==variables.size()) return consider();
+            auto& variable=variables[split];const auto id=nodes[split];const auto& node=variable.nodes[id];
+            auto first=node.left,second=node.right;
+            if(variable.nodes[second].cost<variable.nodes[first].cost) std::swap(first,second);
+            nodes[split]=first;if(self(self)) return true;
+            nodes[split]=second;if(self(self)) return true;
+            nodes[split]=id;return false;
+        };
+        search(search);
+    }
+}
+
 void reconstructRetainedSeamRows(Writer& out,const Model& model,const Model& frames,
                                 std::map<const Mesh*,MeshReconstruction>& plans) {
     using Plans=std::map<const Mesh*,MeshReconstruction>;
@@ -5506,6 +5809,7 @@ void reconstructSkinSeamSmoothing(Writer& out,const Model& model) {
         reconstructTangentSmoothing(out,model,frames,out.meshReconstructions,true);
         reconstructTangentCornerRows(out,model,frames,out.meshReconstructions);
         reconstructTangentSmoothing(out,model,frames,out.meshReconstructions,true);
+        reconstructCancelledTangentSums(out,model,frames,out.meshReconstructions);
         return;
     }
     using Plans=std::map<const Mesh*,MeshReconstruction>;
@@ -5950,6 +6254,7 @@ void reconstructSkinSeamSmoothing(Writer& out,const Model& model) {
     reconstructTangentSmoothing(out,model,frames,plans,true);
     reconstructTangentCornerRows(out,model,frames,plans);
     reconstructTangentSmoothing(out,model,frames,plans,true);
+    reconstructCancelledTangentSums(out,model,frames,plans);
 }
 
 ReconstructedMesh writeMesh(Writer& out,const Model& model,const Node& node,const Mesh& mesh) {
