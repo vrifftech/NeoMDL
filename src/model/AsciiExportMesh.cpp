@@ -5691,9 +5691,10 @@ void reconstructCancelledTangentSums(Writer& out,const Model& model,const Model&
     }
 }
 
-void reconstructRetainedSeamRows(Writer& out,const Model& model,const Model& frames,
+bool reconstructRetainedSeamRows(Writer& out,const Model& model,const Model& frames,
                                 std::map<const Mesh*,MeshReconstruction>& plans) {
     using Plans=std::map<const Mesh*,MeshReconstruction>;
+    bool changed=false;
     for(;;) {
         auto current=frames;
         const auto rows=generateGeometry(current,model,plans,false,out.advanced(),out.job());
@@ -5746,6 +5747,7 @@ void reconstructRetainedSeamRows(Writer& out,const Model& model,const Model& fra
             const auto normal=measureSeamNormals(rebuilt,model,generated,trial);
             if(normal<=best && tangent<=bestTangent && (normal<best || tangent<bestTangent)) {
                 best=normal;bestTangent=tangent;plans=std::move(trial);
+                changed=true;
             }
         };
         // Fit shared-row contributors after the existing precision and ordering
@@ -5770,6 +5772,7 @@ void reconstructRetainedSeamRows(Writer& out,const Model& model,const Model& fra
             }
         if(std::make_pair(best,bestTangent)==initial) break;
     }
+    return changed;
 }
 
 } // namespace
@@ -6010,9 +6013,6 @@ void reconstructSkinSeamSmoothing(Writer& out,const Model& model) {
             }
     } while(best<previous);
 
-    // Resolve shared-row contributors before the broad seam search. The final
-    // retained-row pass also fits the later cyclic and precision refinements.
-    reconstructRetainedSeamRows(out,model,frames,plans);
     double bestTangent{};
     reconstructTangentSmoothing(out,model,frames,plans);
     for(;;) {
@@ -6220,7 +6220,11 @@ void reconstructSkinSeamSmoothing(Writer& out,const Model& model) {
         refineSeamJoins(false);
         const bool tangentRefitted=reconstructTangentSmoothing(out,model,frames,plans);
         if(!refitted && !tangentRefitted) {
-            refineSeamJoins(true);
+            // Close retained-row contributors once the local fits settle,
+            // before wider joins and cyclic candidates. An accepted fit
+            // restarts with fresh geometry; precision work has its final fit.
+            refitted=reconstructRetainedSeamRows(out,model,frames,plans);
+            if(!refitted) refineSeamJoins(true);
             if(refitted) continue;
             // A shared contributor set can require different cyclic starts.
             // Judge that combined reconstruction before rejecting the join.
