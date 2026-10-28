@@ -799,6 +799,39 @@ std::vector<SeamSmoothingCandidate> retainedRowSmoothingCandidates(
                 for(const auto source:affected) proposals.emplace(candidate,source);
             }
         };
+        // Equal compiled rows shared their complete geometric precursor.
+        // A join constrained at one corner can also occur at another corner,
+        // so close these equalities across the mesh before fitting the seam.
+        const auto fixed=work.relations.size();
+        std::vector<std::size_t> parents(fixed+1u);
+        std::iota(parents.begin(),parents.end(),0u);
+        const auto root=[&](std::size_t relation) {
+            while(parents[relation]!=relation) {
+                parents[relation]=parents[parents[relation]];relation=parents[relation];
+            }
+            return relation;
+        };
+        const auto join=[&](std::size_t a,std::size_t b){parents[root(a)]=root(b);};
+        for(const auto& point:retainedRows) for(const auto& row:point.second) {
+            const auto& faces=row.second.faces;
+            for(std::size_t a=0;a<faces.size();++a) for(std::size_t b=a+1u;b<faces.size();++b)
+                join(relationIds.at(std::minmax(faces[a],faces[b])),fixed);
+            for(const auto other:incident.at(point.first)) {
+                if(std::find(faces.begin(),faces.end(),other)!=faces.end()) continue;
+                for(std::size_t i=1u;i<faces.size();++i)
+                    join(relationIds.at(std::minmax(faces.front(),other)),
+                         relationIds.at(std::minmax(faces[i],other)));
+            }
+        }
+        std::vector<std::array<std::size_t,2>> votes(fixed+1u);
+        for(std::size_t i=0;i<fixed;++i) ++votes[root(i)][initial[i]!=0u];
+        auto shared=initial;
+        const auto required=root(fixed);
+        for(std::size_t i=0;i<fixed;++i) {
+            const auto group=root(i);
+            shared[i]=group==required || votes[group][1]>=votes[group][0];
+        }
+        propose(shared);
         for(const auto& fit:fits) {
             auto wanted=initial;
             // Ordered seams can give distinct final normals to rows that
