@@ -784,17 +784,42 @@ std::vector<SeamSmoothingCandidate> retainedRowSmoothingCandidates(
             work.relations.push_back({a,b,{}});
         }
         const auto initial=work.intersections(masks);
+        const auto propose=[&](const std::vector<std::uint8_t>& wanted) {
+            auto candidate=work.encode(wanted);
+            if(candidate!=masks && work.intersections(candidate)==wanted) {
+                // A changed join affects every source shared by the two
+                // faces, including a seam away from the retained-row anchor.
+                std::set<std::size_t> affected;
+                for(std::size_t i=0;i<wanted.size();++i) if(wanted[i]!=initial[i]) {
+                    const auto& relation=work.relations[i];
+                    for(const auto a:sourceFaces[relation.first])
+                        for(const auto b:sourceFaces[relation.second])
+                            if(a==b) affected.insert(a);
+                }
+                for(const auto source:affected) proposals.emplace(candidate,source);
+            }
+        };
         for(const auto& fit:fits) {
             auto wanted=initial;
+            // Ordered seams can give distinct final normals to rows that
+            // had one shared geometric precursor. Fit the retained group
+            // and its incident complement together before the seam pass.
+            const auto& neighbors=incident.at(fit.source);
+            for(auto a=neighbors.begin();a!=neighbors.end();++a)
+                for(auto b=std::next(a);b!=neighbors.end();++b) {
+                    const bool first=std::find(fit.faces.begin(),fit.faces.end(),*a)!=fit.faces.end();
+                    const bool second=std::find(fit.faces.begin(),fit.faces.end(),*b)!=fit.faces.end();
+                    wanted[relationIds.at(std::minmax(*a,*b))]=first==second;
+                }
+            propose(wanted);
+            wanted=initial;
             for(std::size_t a=0;a<fit.faces.size();++a)
                 for(std::size_t b=a+1u;b<fit.faces.size();++b)
                     wanted[relationIds.at(std::minmax(fit.faces[a],fit.faces[b]))]=1u;
             const auto visit=[&](const auto& self,std::size_t depth)->void {
                 job.check();
                 if(depth==fit.mixed.size()) {
-                    auto candidate=work.encode(wanted);
-                    if(candidate!=masks && work.intersections(candidate)==wanted)
-                        proposals.emplace(std::move(candidate),fit.source);
+                    propose(wanted);
                     return;
                 }
                 for(const auto joined:{0u,1u}) {
