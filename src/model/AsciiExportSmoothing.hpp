@@ -71,7 +71,6 @@ std::vector<SeamSmoothingCandidate> retainedRowSmoothingCandidates(
     const Mesh&, const std::vector<Vertex>& compiledVertices,
     const std::vector<std::array<std::uint32_t,3>>& sourceFaces,
     const std::vector<std::uint32_t>& masks,
-    const std::vector<bool>& seamCorners,
     const neoshared::bif::JobControl&);
 
 bool preservesSourceFaceNeighbors(

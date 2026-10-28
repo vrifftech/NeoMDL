@@ -5708,13 +5708,9 @@ void reconstructRetainedSeamRows(Writer& out,const Model& model,const Model& fra
             const auto& mesh=model.meshes[index];const auto found=plans.find(&mesh);
             if(found==plans.end() || mesh.animated || !found->second.hasNormals ||
                found->second.explicitNormals || mesh.asciiNormalPositionSource) continue;
-            std::vector<bool> seamCorners;
-            for(const auto& face:rows[index]) for(const auto row:face)
-                seamCorners.push_back(!same(current.meshes[index].vertices[row].normal,
-                    current.meshes[index].normalAt(row)));
             const auto& plan=found->second;
             const auto fitted=retainedRowSmoothingCandidates(mesh,plan.vertices(),plan.topology.sourceFaces,
-                plan.smoothing.masks,seamCorners,out.job());
+                plan.smoothing.masks,out.job());
             Vec3 position{};Quaternion orientation{};
             auto ancestor=std::optional<std::size_t>{mesh.nodeIndex};
             while(ancestor) {

@@ -726,9 +726,9 @@ bool SourceFaceNeighbors::preserves(const std::vector<std::size_t>& order,
 std::vector<SeamSmoothingCandidate> retainedRowSmoothingCandidates(
     const Mesh& mesh,const std::vector<Vertex>& vertices,
     const std::vector<std::array<std::uint32_t,3>>& sourceFaces,
-    const std::vector<std::uint32_t>& masks,const std::vector<bool>& seamCorners,
+    const std::vector<std::uint32_t>& masks,
     const neoshared::bif::JobControl& job) {
-    struct Group {std::vector<std::size_t> faces;bool seam{};};
+    struct Group {std::vector<std::size_t> faces;};
     std::set<std::pair<std::vector<std::uint32_t>,std::size_t>> proposals;
     // Corners sharing a compiled row shared one geometric precursor.
     // Recover equal contributor sets, including removing a surplus join:
@@ -741,14 +741,15 @@ std::vector<SeamSmoothingCandidate> retainedRowSmoothingCandidates(
             const auto row=static_cast<std::size_t>(mesh.faces[face].indices[corner]);
             auto& group=retainedRows[source][row];
             if(group.faces.empty() || group.faces.back()!=face) group.faces.push_back(face);
-            group.seam=group.seam || seamCorners[face*3u+corner];
             incident[source].insert(face);
         }
     struct RowFit {std::size_t source;std::vector<std::size_t> faces,mixed;};
     std::vector<RowFit> fits;
     for(const auto& point:retainedRows) for(const auto& entry:point.second) {
         const auto& group=entry.second;
-        if(!group.seam || group.faces.size()<2u) continue;
+        // A shared row away from a seam can constrain the same face's joins
+        // at its seam corner. Retain that evidence before scoring final seams.
+        if(group.faces.size()<2u) continue;
         RowFit fit{point.first,group.faces,{}};
         bool missing=false;
         for(std::size_t a=0;a<group.faces.size();++a)
@@ -784,7 +785,11 @@ std::vector<SeamSmoothingCandidate> retainedRowSmoothingCandidates(
             work.relations.push_back({a,b,{}});
         }
         const auto initial=work.intersections(masks);
+        // Unchanged relations affect no source, and different retained rows
+        // can request the same fit. Encode each changing pattern only once.
+        std::set<std::vector<std::uint8_t>> evaluated{initial};
         const auto propose=[&](const std::vector<std::uint8_t>& wanted) {
+            if(!evaluated.insert(wanted).second) return;
             auto candidate=work.encode(wanted);
             if(candidate!=masks && work.intersections(candidate)==wanted) {
                 // A changed join affects every source shared by the two
