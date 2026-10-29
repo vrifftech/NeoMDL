@@ -368,6 +368,7 @@ public:
     const std::set<std::size_t>& hiddenMeshNodes() const noexcept {return hiddenNodes_;}
     const std::optional<std::set<std::size_t>>& isolatedMeshNodes() const noexcept {return isolatedNodes_;}
     void setMeshVisibility(std::set<std::size_t> hidden,std::optional<std::set<std::size_t>> isolated);
+    void copyCameraFrom(const ModelCanvas& source);
     // Compatibility single-run entry point used by hosts that only need the
     // historical animation picker. The K2 run API below exposes the recovered
     // Gob/AnimRun priority list directly.

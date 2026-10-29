@@ -2237,6 +2237,16 @@ void ModelCanvas::setMeshVisibility(std::set<std::size_t> hidden,std::optional<s
     Refresh(false);
 }
 
+void ModelCanvas::copyCameraFrom(const ModelCanvas& source) {
+    yaw_=source.yaw_;pitch_=source.pitch_;distance_=source.distance_;center_=source.center_;
+    freeFly_=source.freeFly_;flyPosition_=source.flyPosition_;flySpeed_=source.flySpeed_;
+    cameraScene_.deactivate();resetCameraInput();
+    if (const auto& attachment=source.cameraScene_.activeAttachment()) {
+        synchronizeCameraScene();cameraScene_.activate(*attachment);bindExternalCameraControl();
+    }
+    ++sceneEffects_.historyEpoch;Refresh(false);
+}
+
 bool ModelCanvas::meshVisible(std::size_t node) const {
     return !hiddenNodes_.count(node) && (!isolatedNodes_ || isolatedNodes_->count(node));
 }

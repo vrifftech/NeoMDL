@@ -705,6 +705,14 @@ public:
     void isolateSelectedMeshes(bool enabled) {canvas_->isolateSelectedMeshes(enabled);}
     void showAllMeshes() {canvas_->showAllMeshes();}
     bool meshesIsolated() const {return canvas_->meshesIsolated();}
+    void copyEditingContext(const ModelPage& source) {
+        showAscii(source.asciiVisible());
+        detailedDiagnostics_->SetValue(source.detailedDiagnostics_->GetValue());
+        outputGame_=source.outputGame_;
+        canvas_->copyCameraFrom(*source.canvas_);
+        canvas_->setMeshVisibility(source.canvas_->hiddenMeshNodes(),source.canvas_->isolatedMeshNodes());
+        updateDetails(selectedNode_);
+    }
     void editSelectedNode() {
         const auto sourceIndex = document_->model().partSourceNodes[*selectedNode_];
         asciiEditor_->editNode(document_->sourceModel(), sourceIndex);
@@ -2200,14 +2208,20 @@ private:
             selected ? page->document().path() : std::filesystem::path{},offset,initialPage,
             selected ? page->selectedPackedOffsets(true) : std::set<std::size_t>{});
         if (!saved) return;
-        auto document=std::make_unique<ModelDocument>();
-        const auto resources=selected ? page->document().resourceResolver() : captureHostResolver();
-        if (!runJob("Loading edited binary model",[&](const auto& job) {
-            document->openFile(saved->path,resources,job);
-        })) return;
-        const auto session=selected ? page->resourceSession() : std::shared_ptr<GameResourceSession>{};
-        addDocument(std::move(document),session,resources,selected ? page : nullptr);
-        activePage()->selectPackedNodes(offsets,saved->nodeOffset);
+        try {
+            auto document=std::make_unique<ModelDocument>();
+            const auto resources=selected ? page->document().resourceResolver() : captureHostResolver();
+            if (!runJob("Loading edited binary model",[&](const auto& job) {
+                document->openFile(saved->path,resources,job);
+            })) return;
+            const auto session=selected ? page->resourceSession() : std::shared_ptr<GameResourceSession>{};
+            addDocument(std::move(document),session,resources,selected ? page : nullptr,selected);
+            activePage()->selectPackedNodes(offsets,saved->nodeOffset);
+        } catch (const std::exception& error) {
+            wxMessageBox("The binary copy was saved to:\n"+neosettings::pathToWx(saved->path)+
+                "\n\nIt could not be opened:\n"+wxui::toWx(error.what()),
+                "Saved Copy Could Not Be Opened",wxOK|wxICON_ERROR,this);
+        }
     }
 
     void reloadModel(ResourceResolver resources, std::shared_ptr<GameResourceSession> session) {
@@ -4022,7 +4036,7 @@ private:
     }
 
     void addDocument(std::unique_ptr<ModelDocument> document, std::shared_ptr<GameResourceSession> session = {},
-                     ResourceResolver fileResources = {}, ModelPage* replacement = nullptr) {
+                     ResourceResolver fileResources = {}, ModelPage* replacement = nullptr,bool preserveEditingContext=false) {
         const auto title = wxui::toWx(document->title());
         auto* page = new ModelPage(tabs_, std::move(document), replacement ? replacement->options() : options_,
                                    context_.compact, [this] { updateState(); });
@@ -4034,6 +4048,7 @@ private:
             page->Destroy();
             throw std::runtime_error("Unable to create a NeoMDL document tab.");
         }
+        if (preserveEditingContext) page->copyEditingContext(*replacement);
         if (replacement) tabs_->DeletePage(index + 1u);
         updateState();
     }
