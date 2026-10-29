@@ -191,12 +191,14 @@ CreatureAppearanceState readCreatureAppearance(const GffStruct& data,bool useEqu
     if(const auto* list=typed<GffList>(data,"Equip_ItemList"))for(std::size_t i=0;i<list->count();++i) {
         job.update(i,list->count(),"Reading creature equipment");
         const auto& entry=*list->GetStruct(i);
-        // ReadItemsFromGff 0x624710 selects UTI vs inline strictly from its
-        // caller flag. A failed template item is deleted and the loop continues.
+        // ReadItemsFromGff selects LoadFromTemplate or LoadItem. LoadItem
+        // resolves EquippedRes before InventoryRes, then reads embedded data.
         try {
             Tables tables{resolver,{}};
-            equipment.push_back(useEquipmentTemplates?loadItem(resref(entry,"EquippedRes"),entry.typeid_,tables,game)
-                :readItem(entry,entry.typeid_,tables,game));
+            if(useEquipmentTemplates)equipment.push_back(loadItem(resref(entry,"EquippedRes"),entry.typeid_,tables,game));
+            else if(const auto* reference=typed<GffResRefField>(entry,"EquippedRes"))equipment.push_back(loadItem(reference->GetString(),entry.typeid_,tables,game));
+            else if(const auto* reference=typed<GffResRefField>(entry,"InventoryRes"))equipment.push_back(loadItem(reference->GetString(),entry.typeid_,tables,game));
+            else equipment.push_back(readItem(entry,entry.typeid_,tables,game));
         } catch(const neoshared::bif::JobCancelled&) {throw;
         } catch(const std::exception& error) {
             diagnostics.push_back("Equipped item["+std::to_string(i)+"] was not loaded: "+error.what());
