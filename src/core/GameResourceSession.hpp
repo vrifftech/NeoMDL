@@ -22,6 +22,12 @@ struct ModuleScope {
     std::vector<std::filesystem::path> archives;
 };
 
+struct GameResourceEntry {
+    std::string resref;
+    std::uint16_t type{};
+    std::string source;
+};
+
 class GameResourceSession final {
 public:
     GameResourceSession();
@@ -43,6 +49,7 @@ public:
     const ModuleScope* moduleScope() const noexcept;
     const std::string& scopeIdentity() const noexcept;
     std::vector<std::string> areaResrefs() const;
+    std::vector<GameResourceEntry> resources(const std::vector<std::uint16_t>& types) const;
     void clear() noexcept;
 
     bool isOpen() const noexcept;

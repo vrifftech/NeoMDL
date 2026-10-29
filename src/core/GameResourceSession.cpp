@@ -302,6 +302,26 @@ std::vector<std::string> GameResourceSession::areaResrefs() const {
     if(state_&&state_->module) for(const auto& r:state_->mount.catalog.resources()) if(r.type==0x7dc) names.insert(lower(r.resref));
     return {names.begin(),names.end()};
 }
+std::vector<GameResourceEntry> GameResourceSession::resources(const std::vector<std::uint16_t>& types) const {
+    std::map<Key,GameResourceEntry> entries;
+    const auto add=[&](const std::string& name,std::uint16_t type,const std::string& source) {
+        if(std::find(types.begin(),types.end(),type)!=types.end())
+            entries.emplace(Key{lower(name),type},GameResourceEntry{lower(name),type,source});
+    };
+    const auto mount=[&](const Mount& mounted) {
+        for(std::size_t i=0;i<mounted.indices.size();++i)for(const auto& [key,indices]:mounted.indices[i])
+            add(key.first,key.second,neoshared::pathToUtf8(mounted.paths[i]));
+    };
+    const auto& base=*state_->base;
+    mount(base.overrides);
+    if(state_->module)mount(state_->mount);
+    mount(base.globals);
+    for(const auto& resource:base.key.resources())if(std::find(types.begin(),types.end(),resource.type)!=types.end())
+        add(resource.resref,resource.type,neoshared::pathToUtf8(base.key.bifs().at(resource.bifIndex).resolvedPath));
+    std::vector<GameResourceEntry> result;result.reserve(entries.size());
+    for(auto& [key,entry]:entries)result.push_back(std::move(entry));
+    return result;
+}
 ResourceResolver GameResourceSession::resolver() const {
     const auto state=state_;
     if(!state) return {};

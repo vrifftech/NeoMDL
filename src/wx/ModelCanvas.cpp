@@ -3283,6 +3283,26 @@ void ModelCanvas::setSelectedAreaOwners(std::set<LightOwnerId> owners) {
     Refresh(false);
 }
 
+std::optional<model::Vec3> ModelCanvas::areaPlacementPoint(wxPoint position,std::optional<float> planeZ) const {
+    const auto& camera=pickingCamera_.value();
+    const auto scale=GetContentScaleFactor();
+    const auto ray=engineCameraHitSegment(camera,static_cast<int>(std::lround(position.x*scale)),
+        camera.viewport.height-static_cast<int>(std::lround(position.y*scale)),document_->model().game);
+    if(!ray)return {};
+    if(planeZ) {
+        const auto dz=ray->end.z-ray->start.z;
+        if(dz==0.0f)return {};
+        const auto t=(*planeZ-ray->start.z)/dz;
+        if(t<0.0f||t>1.0f)return {};
+        return model::Vec3{ray->start.x+(ray->end.x-ray->start.x)*t,
+            ray->start.y+(ray->end.y-ray->start.y)*t,*planeZ};
+    }
+    if(!sceneQueryError_.empty())throw std::runtime_error(sceneQueryError_);
+    SceneHitInfo hit;hit.surfaceMask=0xbfffffffu;hit.includeClassificationOne=true;
+    if(sceneQueries_.hit(ray->start,ray->end,hit))return hit.position;
+    return {};
+}
+
 model::Vec3 ModelCanvas::cameraOffset(model::Vec3 local) const {
     constexpr float radians = 3.14159265358979323846f / 180.0f;
     const auto sy = std::sin(yaw_ * radians), cy = std::cos(yaw_ * radians);

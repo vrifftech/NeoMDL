@@ -364,6 +364,7 @@ public:
     void setSelectedNodes(std::set<std::size_t> nodes);
     void setSelectedAreaOwners(std::set<LightOwnerId> owners);
     void framePosition(model::Vec3 position, float extent);
+    std::optional<model::Vec3> areaPlacementPoint(wxPoint position,std::optional<float> planeZ={}) const;
     void hideSelectedMeshes();
     void isolateSelectedMeshes(bool enabled);
     void showAllMeshes();
