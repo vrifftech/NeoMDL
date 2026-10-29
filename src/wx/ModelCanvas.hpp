@@ -48,6 +48,18 @@ namespace neomdl::ui {
 wxDECLARE_EVENT(EVT_MODEL_NODE_PICKED, wxCommandEvent);
 wxDECLARE_EVENT(EVT_AREA_OWNER_PICKED, wxCommandEvent);
 
+enum class AreaGizmoMode {None, Move, Rotate};
+enum class AreaGizmoPhase {Begin, Preview, Commit, Cancel};
+class AreaGizmoEvent : public wxCommandEvent {
+public:
+    using wxCommandEvent::wxCommandEvent;
+    wxEvent* Clone() const override {return new AreaGizmoEvent(*this);}
+    AreaGizmoPhase phase{AreaGizmoPhase::Preview};
+    model::Vec3 position;
+    float heading{}; // Degrees around world Z.
+};
+wxDECLARE_EVENT(EVT_AREA_GIZMO, AreaGizmoEvent);
+
 std::string triggerDetectionReport(const TriggerDetectionResult&);
 
 struct DialogueActorAnimation {
@@ -365,6 +377,11 @@ public:
     void setSelectedAreaOwners(std::set<LightOwnerId> owners);
     void framePosition(model::Vec3 position, float extent);
     std::optional<model::Vec3> areaPlacementPoint(wxPoint position,std::optional<float> planeZ={}) const;
+    void setAreaGizmo(AreaGizmoMode mode,model::Vec3 position={},float heading=0.0f);
+    bool areaGizmoDragging() const noexcept {return gizmoDrag_.has_value();}
+    void cancelAreaGizmo();
+    void previewAreaTrigger(std::size_t sourceIndex,model::Vec3 position,float headingDelta);
+    void previewAreaCamera(std::size_t sourceIndex,model::Vec3 position);
     void hideSelectedMeshes();
     void isolateSelectedMeshes(bool enabled);
     void showAllMeshes();
@@ -539,6 +556,11 @@ private:
     bool drawEngineLensFlares();
     void drawMeshProjectionInspection();
     void drawGridAndAxes();
+    void drawAreaGizmo();
+    bool handleAreaGizmo(wxMouseEvent& event);
+    model::Vec3 gizmoScreenPoint(model::Vec3 position) const;
+    std::optional<model::Vec3> gizmoConstraint(wxPoint position,int handle,model::Vec3 origin) const;
+    void emitAreaGizmo(AreaGizmoPhase phase);
     void queueAreaRooms();
     bool prepareSubmission(const render::MeshSubmission& submission,
                            render::MeshDrawParameters& parameters, std::string& error);
@@ -715,6 +737,15 @@ private:
     };
     std::optional<MeshPick> meshPick_;
     std::set<LightOwnerId> selectedAreaOwners_;
+    AreaGizmoMode gizmoMode_{AreaGizmoMode::None};
+    model::Vec3 gizmoPosition_{};
+    float gizmoHeading_{},gizmoSize_{};
+    struct GizmoDrag {
+        int handle{}; // X, Y, Z, XY plane, heading ring.
+        model::Vec3 position,anchor;
+        float heading{},angle{},rotation{};
+    };
+    std::optional<GizmoDrag> gizmoDrag_;
     bool freeFly_{};
     std::array<bool, 6> flyMovement_{};
     std::chrono::steady_clock::time_point cameraTick_{std::chrono::steady_clock::now()};

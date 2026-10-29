@@ -50,6 +50,7 @@ namespace neomdl::ui {
 
 wxDEFINE_EVENT(EVT_MODEL_NODE_PICKED, wxCommandEvent);
 wxDEFINE_EVENT(EVT_AREA_OWNER_PICKED, wxCommandEvent);
+wxDEFINE_EVENT(EVT_AREA_GIZMO, AreaGizmoEvent);
 
 namespace {
 struct DetectionCaptureExhausted : std::runtime_error {
@@ -559,6 +560,7 @@ void ModelCanvas::installArea(AreaScene pending,PreparedSceneAudioPlayback sound
     Refresh(false);
 }
 void ModelCanvas::clearArea() {
+    cancelAreaGizmo();gizmoMode_=AreaGizmoMode::None;
     selectedAreaOwners_.clear();
     stopDialogue();
     clearWorldClock();
@@ -1836,6 +1838,7 @@ void ModelCanvas::refreshMaterials() {
 }
 
 void ModelCanvas::setDocument(const ModelDocument* document, bool preserveCamera) {
+    cancelAreaGizmo();gizmoMode_=AreaGizmoMode::None;
     selectedAreaOwners_.clear();
     selectionStart_.reset();
     meshPick_.reset();
@@ -3283,6 +3286,183 @@ void ModelCanvas::setSelectedAreaOwners(std::set<LightOwnerId> owners) {
     Refresh(false);
 }
 
+void ModelCanvas::setAreaGizmo(AreaGizmoMode mode,model::Vec3 position,float heading) {
+    gizmoMode_=mode;gizmoPosition_=position;gizmoHeading_=heading;Refresh(false);
+}
+
+void ModelCanvas::previewAreaTrigger(std::size_t sourceIndex,model::Vec3 position,float headingDelta) {
+    auto records=areaScene_.triggers();const auto angle=headingDelta*0.01745329252f;
+    for(auto& record:records)if(record.sourceIndex==sourceIndex) {
+        for(auto& point:record.worldFootprint) {
+            const auto x=point.x-record.position.x,y=point.y-record.position.y;
+            point={position.x+x*std::cos(angle)-y*std::sin(angle),
+                position.y+x*std::sin(angle)+y*std::cos(angle),position.z+point.z-record.position.z};
+        }
+        record.position=position;
+        if(record.runtimeInstance) {
+            const auto heading=std::atan2(-record.orientation.x,record.orientation.y)+angle;
+            setSceneOwnerWorld(*record.runtimeInstance,gitBearingTransform(position,heading));
+        }
+    }
+    std::string error;
+    if(!triggerScene_.replaceAreaTriggers(records,error))throw std::runtime_error(error);
+    updateSceneBounds();Refresh(false);
+}
+
+void ModelCanvas::previewAreaCamera(std::size_t sourceIndex,model::Vec3 position) {
+    auto records=areaScene_.cameras();
+    for(auto& record:records)if(record.sourceIndex==sourceIndex)record.position=position;
+    std::string error;
+    if(!cameraScene_.setAreaCameras(records,error))throw std::runtime_error(error);
+    Refresh(false);
+}
+
+model::Vec3 ModelCanvas::gizmoScreenPoint(model::Vec3 position) const {
+    const auto eye=model::transformPoint(cameraView_,position);
+    const auto& camera=pickingCamera_.value();
+    const auto focal=camera.viewport.height/(2.0f*std::tan(camera.viewAngle*0.00872664626f));
+    const auto scale=GetContentScaleFactor();
+    return {(camera.viewport.width*0.5f-eye.x*focal/eye.z)/float(scale),
+        (camera.viewport.height*0.5f+eye.y*focal/eye.z)/float(scale),-eye.z};
+}
+
+std::optional<model::Vec3> ModelCanvas::gizmoConstraint(wxPoint position,int handle,model::Vec3 origin) const {
+    const auto& camera=pickingCamera_.value();
+    const auto scale=GetContentScaleFactor();
+    const auto ray=engineCameraHitSegment(camera,static_cast<int>(std::lround(position.x*scale)),
+        camera.viewport.height-static_cast<int>(std::lround(position.y*scale)),document_->model().game);
+    if(!ray)return {};
+    const model::Vec3 d{ray->end.x-ray->start.x,ray->end.y-ray->start.y,ray->end.z-ray->start.z};
+    if(handle<3) {
+        const float direction[]={d.x,d.y,d.z};
+        const model::Vec3 v{ray->start.x-origin.x,ray->start.y-origin.y,ray->start.z-origin.z};
+        const float offset[]={v.x,v.y,v.z};
+        const auto squared=d.x*d.x+d.y*d.y+d.z*d.z;
+        const auto denominator=squared-direction[handle]*direction[handle];
+        if(denominator<=squared*0.000001f)return {};
+        return model::Vec3{(offset[handle]*squared-direction[handle]*(v.x*d.x+v.y*d.y+v.z*d.z))/denominator,0,0};
+    }
+    if(std::abs(d.z)<=std::hypot(d.x,d.y)*0.000001f)return {};
+    const auto t=(origin.z-ray->start.z)/d.z;
+    if(t<0.0f||t>1.0f)return {};
+    return model::Vec3{ray->start.x+d.x*t,ray->start.y+d.y*t,origin.z};
+}
+
+void ModelCanvas::emitAreaGizmo(AreaGizmoPhase phase) {
+    AreaGizmoEvent event(EVT_AREA_GIZMO,GetId());event.SetEventObject(this);
+    event.phase=phase;event.position=gizmoPosition_;event.heading=gizmoHeading_;
+    ProcessWindowEvent(event);
+}
+
+void ModelCanvas::cancelAreaGizmo() {
+    if(!gizmoDrag_)return;
+    gizmoPosition_=gizmoDrag_->position;gizmoHeading_=gizmoDrag_->heading;gizmoDrag_.reset();
+    if(HasCapture())ReleaseMouse();
+    emitAreaGizmo(AreaGizmoPhase::Cancel);Refresh(false);
+}
+
+bool ModelCanvas::handleAreaGizmo(wxMouseEvent& event) {
+    if(gizmoDrag_) {
+        if(event.RightDown()) {cancelAreaGizmo();return true;}
+        if(event.Dragging()||event.LeftUp()) {
+            const auto hit=gizmoConstraint(event.GetPosition(),gizmoDrag_->handle,gizmoDrag_->position);
+            if(hit) {
+                const auto& drag=*gizmoDrag_;
+                gizmoPosition_=drag.position;
+                if(drag.handle<3) {
+                    const auto delta=hit->x-drag.anchor.x;
+                    if(drag.handle==0)gizmoPosition_.x+=delta;
+                    if(drag.handle==1)gizmoPosition_.y+=delta;
+                    if(drag.handle==2)gizmoPosition_.z+=delta;
+                } else if(drag.handle==3) {
+                    gizmoPosition_.x+=hit->x-drag.anchor.x;gizmoPosition_.y+=hit->y-drag.anchor.y;
+                } else {
+                    const auto angle=std::atan2(hit->y-drag.position.y,hit->x-drag.position.x);
+                    gizmoDrag_->rotation+=std::remainder(angle-drag.angle,6.28318530718f);
+                    gizmoDrag_->angle=angle;gizmoHeading_=drag.heading+gizmoDrag_->rotation*57.2957795131f;
+                }
+                emitAreaGizmo(AreaGizmoPhase::Preview);Refresh(false);
+            }
+            if(event.LeftUp()) {
+                gizmoDrag_.reset();if(HasCapture())ReleaseMouse();emitAreaGizmo(AreaGizmoPhase::Commit);
+            }
+        }
+        return true;
+    }
+    if(!event.LeftDown()||event.ControlDown()||event.RightIsDown()||event.MiddleIsDown()||
+        gizmoMode_==AreaGizmoMode::None||!pickingCamera_||gizmoSize_==0.0f)return false;
+    const auto origin=gizmoScreenPoint(gizmoPosition_);
+    if(origin.z<=pickingCamera_->nearClip)return false;
+    const auto point=event.GetPosition();
+    auto best=float(FromDIP(9));int handle=-1;
+    const auto segment=[&](model::Vec3 a,model::Vec3 b,int candidate) {
+        a=gizmoScreenPoint(a);b=gizmoScreenPoint(b);
+        const auto dx=b.x-a.x,dy=b.y-a.y,squared=dx*dx+dy*dy;
+        if(squared<1.0f)return;
+        const auto t=std::clamp(((point.x-a.x)*dx+(point.y-a.y)*dy)/squared,0.0f,1.0f);
+        const auto distance=std::hypot(point.x-a.x-dx*t,point.y-a.y-dy*t);
+        if(distance<best) {best=distance;handle=candidate;}
+    };
+    if(gizmoMode_==AreaGizmoMode::Move) {
+        for(int axis=0;axis<3;++axis) {
+            auto a=gizmoPosition_,b=gizmoPosition_;
+            if(axis==0) {a.x+=gizmoSize_*0.2f;b.x+=gizmoSize_;}
+            if(axis==1) {a.y+=gizmoSize_*0.2f;b.y+=gizmoSize_;}
+            if(axis==2) {a.z+=gizmoSize_*0.2f;b.z+=gizmoSize_;}
+            segment(a,b,axis);
+        }
+        if(std::hypot(point.x-origin.x,point.y-origin.y)<FromDIP(9))handle=3;
+    } else for(int i=0;i<64;++i) {
+        const auto a=i*0.09817477042f,b=(i+1)*0.09817477042f;
+        segment({gizmoPosition_.x+std::cos(a)*gizmoSize_,gizmoPosition_.y+std::sin(a)*gizmoSize_,gizmoPosition_.z},
+            {gizmoPosition_.x+std::cos(b)*gizmoSize_,gizmoPosition_.y+std::sin(b)*gizmoSize_,gizmoPosition_.z},4);
+    }
+    if(handle<0)return false;
+    const auto anchor=gizmoConstraint(point,handle,gizmoPosition_);
+    if(!anchor)return false;
+    selectionStart_.reset();resetCameraInput();SetFocus();
+    gizmoDrag_=GizmoDrag{handle,gizmoPosition_,*anchor,gizmoHeading_,
+        std::atan2(anchor->y-gizmoPosition_.y,anchor->x-gizmoPosition_.x),0.0f};
+    CaptureMouse();emitAreaGizmo(AreaGizmoPhase::Begin);return true;
+}
+
+void ModelCanvas::drawAreaGizmo() {
+    gizmoSize_=0.0f;
+    if(gizmoMode_==AreaGizmoMode::None)return;
+    const auto eye=model::transformPoint(cameraView_,gizmoPosition_);
+    const auto& camera=pickingCamera_.value();
+    if(-eye.z<=camera.nearClip)return;
+    gizmoSize_=-eye.z*2.0f*std::tan(camera.viewAngle*0.00872664626f)*
+        FromDIP(85)*float(GetContentScaleFactor())/camera.viewport.height;
+    glPushAttrib(GL_ENABLE_BIT|GL_LINE_BIT|GL_POINT_BIT|GL_CURRENT_BIT|GL_DEPTH_BUFFER_BIT);
+    glDisable(GL_DEPTH_TEST);glDisable(GL_LIGHTING);glDisable(GL_TEXTURE_2D);glDisable(GL_BLEND);glDisable(GL_CULL_FACE);
+    glDepthMask(GL_FALSE);glLineWidth(3.0f*float(GetContentScaleFactor()));
+    glPushMatrix();glLoadMatrixf(cameraView_.values.data());
+    glTranslatef(gizmoPosition_.x,gizmoPosition_.y,gizmoPosition_.z);
+    glScalef(gizmoSize_,gizmoSize_,gizmoSize_);
+    const auto color=[&](int handle,float r,float g,float b) {
+        if(gizmoDrag_&&gizmoDrag_->handle==handle)glColor3f(1.0f,0.8f,0.15f);else glColor3f(r,g,b);
+    };
+    if(gizmoMode_==AreaGizmoMode::Move) {
+        const float colors[3][3]={{1.0f,0.25f,0.25f},{0.25f,1.0f,0.35f},{0.3f,0.6f,1.0f}};
+        for(int axis=0;axis<3;++axis) {
+            color(axis,colors[axis][0],colors[axis][1],colors[axis][2]);
+            float end[3]={},left[3]={},right[3]={};end[axis]=1.0f;left[axis]=right[axis]=0.8f;
+            left[(axis+1)%3]=0.07f;right[(axis+1)%3]=-0.07f;
+            glBegin(GL_LINES);glVertex3f(0,0,0);glVertex3fv(end);
+            glVertex3fv(end);glVertex3fv(left);glVertex3fv(end);glVertex3fv(right);glEnd();
+        }
+        color(3,1.0f,1.0f,1.0f);glPointSize(11.0f*float(GetContentScaleFactor()));
+        glBegin(GL_POINTS);glVertex3f(0,0,0);glEnd();
+    } else {
+        color(4,0.3f,0.6f,1.0f);drawCircle(64,1.0f,0);
+        const auto angle=gizmoHeading_*0.01745329252f;
+        glColor3f(1.0f,0.8f,0.15f);glBegin(GL_LINES);glVertex3f(0,0,0);
+        glVertex3f(-std::sin(angle),std::cos(angle),0);glEnd();
+    }
+    glPopMatrix();glPopAttrib();
+}
+
 std::optional<model::Vec3> ModelCanvas::areaPlacementPoint(wxPoint position,std::optional<float> planeZ) const {
     const auto& camera=pickingCamera_.value();
     const auto scale=GetContentScaleFactor();
@@ -3410,6 +3590,7 @@ void ModelCanvas::onSize(wxSizeEvent& event) {
 void ModelCanvas::onErase(wxEraseEvent&) {}
 
 void ModelCanvas::onMouse(wxMouseEvent& event) {
+    if(handleAreaGizmo(event))return;
     advanceCamera();
     if (event.ButtonDown()) SetFocus();
     if(event.LeftDown()&&event.ControlDown()&&pickingCamera_&&document_&&document_->isOpen()) {
@@ -3607,6 +3788,7 @@ void ModelCanvas::considerMeshPick(const render::MeshSubmission& submission) {
 }
 
 void ModelCanvas::onKey(wxKeyEvent& event) {
+    if(gizmoDrag_) {if(event.GetKeyCode()==WXK_ESCAPE)cancelAreaGizmo();return;}
     advanceCamera();
     constexpr std::array<int, 6> keys{{'D', 'A', 'E', 'Q', 'S', 'W'}};
     const auto key = std::find(keys.begin(), keys.end(), event.GetKeyCode());
@@ -3626,12 +3808,14 @@ void ModelCanvas::onKey(wxKeyEvent& event) {
 }
 
 void ModelCanvas::onFocusLost(wxFocusEvent& event) {
+    cancelAreaGizmo();
     selectionStart_.reset();
     resetCameraInput();
     event.Skip();
 }
 
 void ModelCanvas::onCaptureLost(wxMouseCaptureLostEvent&) {
+    cancelAreaGizmo();
     selectionStart_.reset();
     resetCameraInput();
 }
@@ -4386,6 +4570,7 @@ void ModelCanvas::drawScene() {
     drawAabbDebugQueue();
     drawNodeHelpers(transforms);
     drawAreaCameraGlyphs();
+    drawAreaGizmo();
     glPolygonMode(GL_FRONT_AND_BACK, GL_FILL);
     glDisable(GL_BLEND);
     glDepthMask(GL_TRUE);
