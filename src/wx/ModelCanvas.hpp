@@ -46,6 +46,7 @@
 namespace neomdl::ui {
 
 wxDECLARE_EVENT(EVT_MODEL_NODE_PICKED, wxCommandEvent);
+wxDECLARE_EVENT(EVT_AREA_OWNER_PICKED, wxCommandEvent);
 
 std::string triggerDetectionReport(const TriggerDetectionResult&);
 
@@ -270,7 +271,7 @@ public:
     // Snapshot on the UI thread, populate the returned CPU scene on a worker,
     // then install on the UI thread after the worker has joined.
     AreaScene prepareAreaLoad();
-    void installArea(AreaScene pending,PreparedSceneAudioPlayback sounds={});
+    void installArea(AreaScene pending,PreparedSceneAudioPlayback sounds={},bool preserveCamera=false);
     void clearArea();
     void configureSceneAudio(std::optional<ExoRandom::State> capturedState);
     void ensureSceneAudioProvider();
@@ -361,6 +362,8 @@ public:
     void setOptions(RenderOptions options);
     const RenderOptions& options() const noexcept { return options_; }
     void setSelectedNodes(std::set<std::size_t> nodes);
+    void setSelectedAreaOwners(std::set<LightOwnerId> owners);
+    void framePosition(model::Vec3 position, float extent);
     void hideSelectedMeshes();
     void isolateSelectedMeshes(bool enabled);
     void showAllMeshes();
@@ -707,8 +710,10 @@ private:
         float depth{};
         std::optional<std::size_t> node;
         bool additive{};
+        std::optional<LightOwnerId> areaOwner;
     };
     std::optional<MeshPick> meshPick_;
+    std::set<LightOwnerId> selectedAreaOwners_;
     bool freeFly_{};
     std::array<bool, 6> flyMovement_{};
     std::chrono::steady_clock::time_point cameraTick_{std::chrono::steady_clock::now()};

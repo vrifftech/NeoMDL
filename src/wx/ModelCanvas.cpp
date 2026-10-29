@@ -49,6 +49,7 @@
 namespace neomdl::ui {
 
 wxDEFINE_EVENT(EVT_MODEL_NODE_PICKED, wxCommandEvent);
+wxDEFINE_EVENT(EVT_AREA_OWNER_PICKED, wxCommandEvent);
 
 namespace {
 struct DetectionCaptureExhausted : std::runtime_error {
@@ -520,7 +521,7 @@ AreaScene ModelCanvas::prepareAreaLoad() {
     pending.prepareRuntime({&particleScene_.windManager(),&particleScene_.runtimeRandom(),&sceneQueries_,document_->model().game});
     return pending;
 }
-void ModelCanvas::installArea(AreaScene pending,PreparedSceneAudioPlayback sounds) {
+void ModelCanvas::installArea(AreaScene pending,PreparedSceneAudioPlayback sounds,bool preserveCamera) {
     // Validate external visual registries before releasing the current area.
     // Both installations are deterministic and repeated after the area swap.
     {
@@ -554,10 +555,11 @@ void ModelCanvas::installArea(AreaScene pending,PreparedSceneAudioPlayback sound
     synchronizeEngineQueries();
     pendingGpuReset_ = true;
     updateSceneBounds();
-    frameModel();
+    if (!preserveCamera) frameModel();
     Refresh(false);
 }
 void ModelCanvas::clearArea() {
+    selectedAreaOwners_.clear();
     stopDialogue();
     clearWorldClock();
     for(auto it=dialogueParticipantStates_.begin();it!=dialogueParticipantStates_.end();)
@@ -1834,6 +1836,7 @@ void ModelCanvas::refreshMaterials() {
 }
 
 void ModelCanvas::setDocument(const ModelDocument* document, bool preserveCamera) {
+    selectedAreaOwners_.clear();
     selectionStart_.reset();
     meshPick_.reset();
     if (preserveCamera && authoredCameraActive()) useViewerCamera(false);
@@ -3267,6 +3270,19 @@ void ModelCanvas::frameModel() {
     Refresh(false);
 }
 
+void ModelCanvas::framePosition(model::Vec3 position, float extent) {
+    useViewerCamera(false);
+    center_=position;
+    distance_=extent*2.1f;
+    flySpeed_=extent*0.5f;
+    Refresh(false);
+}
+
+void ModelCanvas::setSelectedAreaOwners(std::set<LightOwnerId> owners) {
+    selectedAreaOwners_=std::move(owners);
+    Refresh(false);
+}
+
 model::Vec3 ModelCanvas::cameraOffset(model::Vec3 local) const {
     constexpr float radians = 3.14159265358979323846f / 180.0f;
     const auto sy = std::sin(yaw_ * radians), cy = std::cos(yaw_ * radians);
@@ -3350,12 +3366,19 @@ void ModelCanvas::onPaint(wxPaintEvent&) {
     if (meshPick_) {
         const auto node = meshPick_->node;
         const bool additive=meshPick_->additive;
+        const auto owner=meshPick_->areaOwner;
         meshPick_.reset();
         wxCommandEvent selection(EVT_MODEL_NODE_PICKED, GetId());
         selection.SetEventObject(this);
         selection.SetInt(node ? static_cast<int>(*node) : -1);
         selection.SetExtraLong(additive ? 1 : 0);
         ProcessWindowEvent(selection);
+        if(!areaScene_.empty()) {
+            wxCommandEvent areaSelection(EVT_AREA_OWNER_PICKED,GetId());
+            areaSelection.SetEventObject(this);
+            areaSelection.SetString(owner?wxString::Format("%llu",static_cast<unsigned long long>(*owner)):wxString{});
+            ProcessWindowEvent(areaSelection);
+        }
     }
 }
 
@@ -3402,7 +3425,7 @@ void ModelCanvas::onMouse(wxMouseEvent& event) {
         selectionStart_.reset();
     if (event.LeftUp()) {
         if (selectionStart_ && !event.ControlDown()) {
-            meshPick_ = MeshPick{event.GetPosition(), 0.0f, {}, event.ShiftDown()};
+            meshPick_ = MeshPick{event.GetPosition(), 0.0f, {}, event.ShiftDown(), {}};
             Refresh(false);
         }
         selectionStart_.reset();
@@ -3545,6 +3568,7 @@ void ModelCanvas::considerMeshPick(const render::MeshSubmission& submission) {
     }
     if (hit && -end.z < meshPick_->depth) {
         meshPick_->depth = -end.z;
+        meshPick_->areaOwner=submission.lightOwner;
         meshPick_->node.reset();
         const auto contains = [&](const model::Model& asset) {
             return std::any_of(asset.meshes.begin(), asset.meshes.end(),
@@ -4705,7 +4729,7 @@ bool ModelCanvas::prepareSubmission(const render::MeshSubmission& submission,
         shadowScene_.updateFocusContainer(lightScene_);
         return true;
     }
-    if (meshPick_ && submission.drawPrimary &&
+    if (meshPick_ && submission.drawPrimary && !submission.ownerOnly &&
         parameters.primitive == render::PrimitiveTopology::Triangles &&
         !parameters.particlePass && !parameters.lightsaberPass)
         considerMeshPick(submission);
@@ -4846,7 +4870,7 @@ void ModelCanvas::queueAreaRooms() {
         }
         const auto before=queue->size();
         glPushMatrix();glMultMatrixf(draw.world.values.data());
-        drawMesh(mesh,draw.deformed,false,*draw.material,draw.state,draw.asset->game,draw.asset->fog,
+        drawMesh(mesh,draw.deformed,selectedAreaOwners_.count(draw.owner)!=0,*draw.material,draw.state,draw.asset->game,draw.asset->fog,
             draw.owner,draw.document,draw.time,queue,draw.staticPart?0:draw.owner+1u,
             draw.ownerEffects?draw.ownerEffects->colorShift[3]:1.0f,
             draw.asset->classification,draw.hasTransparency,
