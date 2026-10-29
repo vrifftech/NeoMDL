@@ -51,6 +51,7 @@ struct BinaryColumn {
     std::size_t offset{},stride{};
     model::BinaryType type{model::BinaryType::Float32};
     bool readOnly{};
+    std::vector<std::pair<double,wxString>> choices{};
 };
 
 class BinaryValueTable final : public wxGridTableBase {
@@ -62,6 +63,7 @@ public:
     wxString GetColLabelValue(int column) override {return columns_[column].label;}
     wxString GetRowLabelValue(int row) override {return wxString::Format("%d",row);}
     wxString GetTypeName(int,int column) override {
+        if (!columns_[column].choices.empty()) return wxGRID_VALUE_CHOICE;
         return columns_[column].type==model::BinaryType::Float32 ? wxGRID_VALUE_FLOAT : wxGRID_VALUE_NUMBER;
     }
     bool CanGetValueAs(int row,int column,const wxString& type) override {return type==GetTypeName(row,column);}
@@ -71,7 +73,12 @@ public:
         return binaryNumber(bytes_,field.offset+row*field.stride,field.type);
     }
     long GetValueAsLong(int row,int column) override {return static_cast<long>(GetValueAsDouble(row,column));}
-    wxString GetValue(int row,int column) override {return wxString::Format("%.9g",GetValueAsDouble(row,column));}
+    wxString GetValue(int row,int column) override {
+        const auto value=GetValueAsDouble(row,column);
+        for (const auto& choice : columns_[column].choices)
+            if (choice.first==value) return choice.second;
+        return wxString::Format("%.9g",value);
+    }
     void SetValueAsDouble(int row,int column,double value) override {
         const auto& field=columns_[column];
         setBinaryNumber(bytes_,field.offset+row*field.stride,field.type,value);
@@ -88,7 +95,8 @@ private:
 };
 
 void editBinaryValues(wxWindow* parent,const wxString& title,std::vector<std::uint8_t>& bytes,
-                      std::size_t rows,std::vector<BinaryColumn> columns) {
+                      std::size_t rows,std::vector<BinaryColumn> columns,
+                      const wxString& note="Changes stay in this editing session. Save Copy writes the model.") {
     wxDialog dialog(parent,wxID_ANY,title,wxDefaultPosition,wxDefaultSize,wxDEFAULT_DIALOG_STYLE|wxRESIZE_BORDER);
     auto* layout=new wxBoxSizer(wxVERTICAL);
     auto* grid=new wxGrid(&dialog,wxID_ANY);
@@ -103,10 +111,16 @@ void editBinaryValues(wxWindow* parent,const wxString& title,std::vector<std::ui
             attr->SetEditor(new wxGridCellNumberEditor(0,255));
             attr->SetRenderer(new wxGridCellNumberRenderer);
         }
+        if (!table->column(i).choices.empty()) {
+            wxArrayString labels;
+            for (const auto& choice : table->column(i).choices) labels.Add(choice.second);
+            attr->SetEditor(new wxGridCellChoiceEditor(labels));
+            attr->SetRenderer(new wxGridCellStringRenderer);
+        }
         grid->SetColAttr(i,attr);grid->SetColSize(i,dialog.FromDIP(115));
     }
     layout->Add(grid,1,wxEXPAND|wxALL,dialog.FromDIP(8));
-    layout->Add(new wxStaticText(&dialog,wxID_ANY,"Changes stay in this editing session. Save Copy writes the model."),
+    layout->Add(new wxStaticText(&dialog,wxID_ANY,note),
                 0,wxLEFT|wxRIGHT|wxBOTTOM,dialog.FromDIP(8));
     layout->Add(dialog.CreateButtonSizer(wxOK),0,wxEXPAND|wxALL,dialog.FromDIP(8));
     dialog.FindWindow(wxID_OK)->SetLabel("Done");
@@ -139,6 +153,43 @@ void editBinaryVertices(wxWindow* parent,BinaryModelFile& file,std::size_t index
             add(("UV "+std::to_string(channel)).c_str(),mesh.mdxTexcoordOffsets[channel],uv,2,model::BinaryType::Float32);
     if (mesh.mdxBitmap&0x40u) add("Colour",mesh.mdxColorOffset,rgba,4,model::BinaryType::UInt8);
     editBinaryValues(parent,"Binary Vertex Attributes — "+wxui::toWx(node.name),*file.mdx,mesh.vertices.size(),std::move(columns));
+}
+
+void editBinarySkin(wxWindow* parent,BinaryModelFile& file,std::size_t index) {
+    const auto& node=file.model.nodes[index];
+    const auto& mesh=file.model.meshes[*node.mesh];
+    const auto base=*node.packedOffset+80;
+    const auto pool=static_cast<std::size_t>(binaryNumber(file.mdl,base+
+        (file.model.game==model::GameVersion::Kotor1 ? 324 : 332),model::BinaryType::UInt32));
+    std::vector<std::pair<double,wxString>> bones{{-1,"-1: unassigned"}};
+    for (std::size_t i=0;i<mesh.skinBoneMap.size();++i)
+        if (mesh.skinBoneMap[i]>=0)
+            bones.push_back({static_cast<double>(i),wxString::Format("%zu: ",i)+wxui::toWx(file.model.nodes[mesh.skinBoneMap[i]].name)});
+    std::vector<BinaryColumn> columns;
+    for (unsigned i=0;i<4;++i) {
+        columns.push_back({wxString::Format("Weight %u",i),pool+mesh.mdxWeightOffset+i*4,mesh.mdxRowSize});
+        columns.push_back({wxString::Format("Bone %u",i),pool+mesh.mdxBoneIndexOffset+i*4,mesh.mdxRowSize,
+            model::BinaryType::Float32,false,bones});
+    }
+    editBinaryValues(parent,"Binary Skin Weights — "+wxui::toWx(node.name),*file.mdx,mesh.vertices.size(),std::move(columns),
+        "Bone choices use the existing palette. Weights are stored as entered; Save Copy writes the model.");
+}
+
+void editBinaryDangly(wxWindow* parent,BinaryModelFile& file,std::size_t index) {
+    const auto& node=file.model.nodes[index];
+    const auto& mesh=file.model.meshes[*node.mesh];
+    const auto extension=*node.packedOffset+(file.model.game==model::GameVersion::Kotor1 ? 412u : 420u);
+    const wxString labels[]{"Dynamics","Vertex constraints"};
+    const int selected=wxGetSingleChoiceIndex("Choose dangly data","Dangly Mesh",2,labels,parent);
+    if (selected<0) return;
+    if (selected==0)
+        editBinaryValues(parent,"Dangly Dynamics — "+wxui::toWx(node.name),file.mdl,1,
+            {{"Displacement",extension+12,0},{"Tightness",extension+16,0},{"Period",extension+20,0}});
+    else {
+        const auto data=12+static_cast<std::size_t>(binaryNumber(file.mdl,extension,model::BinaryType::UInt32));
+        editBinaryValues(parent,"Dangly Constraints — "+wxui::toWx(node.name),file.mdl,mesh.dangly->constraints.size(),
+            {{"Constraint",data,4}});
+    }
 }
 
 void editBinaryControllers(wxWindow* parent,BinaryModelFile& file,std::size_t index) {
@@ -220,6 +271,9 @@ std::optional<std::filesystem::path> editBinaryMeshFields(wxWindow* parent, cons
         auto* controllers = new wxButton(fields,wxID_ANY,"Opacity / Glow...");
         controllers->SetToolTip("Edit existing opacity and self-illumination controller values.");
         grid->Add(vertices,0,wxEXPAND);grid->Add(controllers,0,wxEXPAND);
+        auto* skin = new wxButton(fields,wxID_ANY,"Skin Weights...");
+        auto* dangly = new wxButton(fields,wxID_ANY,"Dangly Settings...");
+        grid->Add(skin,0,wxEXPAND);grid->Add(dangly,0,wxEXPAND);
         fields->SetSizer(grid);pages->AddPage(fields,"Mesh");
 
         struct NumberField {
@@ -307,6 +361,8 @@ std::optional<std::filesystem::path> editBinaryMeshFields(wxWindow* parent, cons
             if (k2) {dirt->SetValue(file.mdl[base+314]!=0);noHologram->SetValue(file.mdl[base+320]!=0);}
             vertices->Enable(file.mdx.has_value() && !mesh.vertices.empty() && (mesh.mdxBitmap&0x7eu));
             controllers->Enable(std::any_of(node.controllers.begin(),node.controllers.end(),editableBinaryMaterialController));
+            skin->Enable(mesh.skinned && file.mdx.has_value());
+            dangly->Enable(mesh.dangly.has_value());
         };
         for (std::size_t i = 0; i < textures.size(); ++i) textures[i]->Bind(wxEVT_TEXT,[&,i](wxCommandEvent&) {
             const auto index = nodes[select->GetSelection()]; const auto value = wxui::toStd(textures[i]->GetValue());
@@ -338,6 +394,8 @@ std::optional<std::filesystem::path> editBinaryMeshFields(wxWindow* parent, cons
         }
         vertices->Bind(wxEVT_BUTTON,[&](wxCommandEvent&) {editBinaryVertices(&dialog,file,current);});
         controllers->Bind(wxEVT_BUTTON,[&](wxCommandEvent&) {editBinaryControllers(&dialog,file,current);});
+        skin->Bind(wxEVT_BUTTON,[&](wxCommandEvent&) {editBinarySkin(&dialog,file,current);});
+        dangly->Bind(wxEVT_BUTTON,[&](wxCommandEvent&) {editBinaryDangly(&dialog,file,current);});
         select->Bind(wxEVT_CHOICE,[&](wxCommandEvent&) {flush();load();});
         save->Bind(wxEVT_BUTTON,[&](wxCommandEvent&) {
             flush();
