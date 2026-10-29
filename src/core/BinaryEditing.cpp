@@ -90,8 +90,8 @@ std::vector<CollisionOutput> binaryEditOutputs(const BinaryModelFile& file,
                 name.at(i) = static_cast<std::uint8_t>((*edit.textures[channel])[i]);
             mdl.copy(base+88+channel*32,name.data(),name.size());
         }
-        for (std::size_t flag = 0; flag < 5; ++flag)
-            if (edit.flags[flag]) mdl.u8(base+309+flag,*edit.flags[flag] ? 1 : 0);
+        for (std::size_t flag = 0; flag < edit.flags.size(); ++flag)
+            if (edit.flags[flag]) mdl.u8(base+308+flag,*edit.flags[flag] ? 1 : 0);
         if (edit.tangentBasis || edit.regenerateTangents) {
             const auto& mesh=file.model.meshes[*file.model.nodes[index].mesh];
             const bool stored=(mesh.mdxBitmap&0x80u)!=0;

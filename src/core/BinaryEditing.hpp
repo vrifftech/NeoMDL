@@ -4,10 +4,18 @@
 
 namespace neomdl {
 
+inline bool editableBinaryMaterialController(const model::Controller& controller) {
+    return controller.rowCount &&
+        (controller.interpolation==model::ControllerInterpolation::Linear ||
+         controller.interpolation==model::ControllerInterpolation::Bezier) &&
+        ((controller.type==100u && controller.valueKind==model::ControllerValueKind::Vector) ||
+         (controller.type==132u && controller.valueKind==model::ControllerValueKind::Float));
+}
+
 struct BinaryMeshEdit {
     std::array<std::optional<std::string>,2> textures;
-    // Common mesh header bytes +309..+313, in stored order.
-    std::array<std::optional<bool>,5> flags;
+    // Common mesh header bytes +308..+313, in stored order.
+    std::array<std::optional<bool>,6> flags;
     std::optional<bool> tangentBasis;
     bool regenerateTangents{};
 };

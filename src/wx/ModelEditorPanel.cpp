@@ -14,6 +14,7 @@
 #include "core/DialogueAudioSource.hpp"
 #include "core/VideoEffects.hpp"
 #include "core/ResourceContext.hpp"
+#include "core/BinaryEditing.hpp"
 #include <model/SceneOrdering.hpp>
 #include <neotlk/TlkLookup.hpp>
 #include <twoda/TwoDAFile.hpp>
@@ -147,6 +148,8 @@ enum CommandId {
     ID_Headlight,
     ID_Fog,
     ID_LightingSettings,
+    ID_OwnerVisualEffects,
+    ID_SceneEffects,
     ID_Grid,
     ID_Axes,
     ID_ShowHidden,
@@ -411,11 +414,14 @@ public:
         editNode_->Enable(false);
         editVertices_ = new wxButton(detailsPanel, wxID_ANY, "Vertices...");
         editControllers_ = new wxButton(detailsPanel, wxID_ANY, "Controllers...");
+        effects_ = new wxButton(detailsPanel,wxID_ANY,"Effects...",wxDefaultPosition,wxDefaultSize,wxBU_EXACTFIT);
+        effects_->Enable(false);
         editVertices_->Enable(false);
         editControllers_->Enable(false);
         auto* dataProperties = new wxBoxSizer(wxHORIZONTAL);
         dataProperties->Add(editVertices_, 1, wxRIGHT, FromDIP(5));
-        dataProperties->Add(editControllers_, 1);
+        dataProperties->Add(editControllers_, 1,wxRIGHT,FromDIP(5));
+        dataProperties->Add(effects_,1);
         details_ = new wxTextCtrl(detailsPanel, wxID_ANY, wxEmptyString, wxDefaultPosition,
                                   wxDefaultSize, wxTE_MULTILINE | wxTE_READONLY | wxTE_RICH2);
         detailsLayout->Add(detailedDiagnostics_, 0, wxALL, FromDIP(5));
@@ -483,6 +489,7 @@ public:
         populateTree();
         updateDetails(std::nullopt);
         updateAnimationControls();
+        updateEditingControls();
         detailedDiagnostics_->Bind(wxEVT_CHECKBOX, [this](wxCommandEvent&) {
             updateDetails(selectedNode_);
         });
@@ -490,8 +497,15 @@ public:
             wxCommandEvent command(wxEVT_MENU,ID_NodeProperties);
             ProcessWindowEvent(command);
         });
-        editVertices_->Bind(wxEVT_BUTTON, [this](wxCommandEvent&) { editSelectedVertices(); });
-        editControllers_->Bind(wxEVT_BUTTON, [this](wxCommandEvent&) { editSelectedControllers(); });
+        editVertices_->Bind(wxEVT_BUTTON, [this](wxCommandEvent&) {
+            wxCommandEvent command(wxEVT_MENU,ID_VertexProperties);ProcessWindowEvent(command);
+        });
+        editControllers_->Bind(wxEVT_BUTTON, [this](wxCommandEvent&) {
+            wxCommandEvent command(wxEVT_MENU,ID_ControllerProperties);ProcessWindowEvent(command);
+        });
+        effects_->Bind(wxEVT_BUTTON,[this](wxCommandEvent&) {
+            wxCommandEvent command(wxEVT_MENU,ID_OwnerVisualEffects);ProcessWindowEvent(command);
+        });
         advancedAnimation_->Bind(wxEVT_COLLAPSIBLEPANE_CHANGED,
             [this, playback, preview](wxCollapsiblePaneEvent&) {
                 playback->FitInside();
@@ -638,6 +652,14 @@ public:
         return selectedNode_ && !document_->sourceModel().asciiBuilt && !document_->path().empty() &&
             canvas_->areaScene().empty() && document_->model().nodes[*selectedNode_].mesh &&
             !asciiEditor_->modified();
+    }
+    bool canEditBinaryVertices() const {
+        return canEditBinaryMesh() && !document_->model().meshes[*document_->model().nodes[*selectedNode_].mesh].vertices.empty() &&
+            (document_->model().meshes[*document_->model().nodes[*selectedNode_].mesh].mdxBitmap&0x7eu);
+    }
+    bool canEditBinaryControllers() const {
+        return canEditBinaryMesh() && std::any_of(document_->model().nodes[*selectedNode_].controllers.begin(),
+            document_->model().nodes[*selectedNode_].controllers.end(),editableBinaryMaterialController);
     }
     std::size_t selectedPackedOffset() const {
         return *document_->model().nodes[*selectedNode_].packedOffset;
@@ -896,8 +918,9 @@ public:
 private:
     void updateEditingControls() {
         editNode_->Enable(canEditNode() || canEditBinaryMesh());
-        editVertices_->Enable(canEditVertices());
-        editControllers_->Enable(canEditNode());
+        editVertices_->Enable(document_->sourceModel().asciiBuilt ? canEditVertices() : canEditBinaryVertices());
+        editControllers_->Enable(document_->sourceModel().asciiBuilt ? canEditNode() : canEditBinaryControllers());
+        effects_->Enable(document_->hasModelOwner() && !model::engineSceneStageOrder(document_->model().game).empty());
     }
     void populateAnimations() {
         animationChoice_->Clear();
@@ -1896,6 +1919,7 @@ private:
     wxButton* editNode_{};
     wxButton* editVertices_{};
     wxButton* editControllers_{};
+    wxButton* effects_{};
     ModelCanvas* canvas_{};
     wxCollapsiblePane* advancedAnimation_{};
     wxChoice* animationChoice_{};
@@ -2102,13 +2126,13 @@ private:
         return answer == wxID_NO || (answer == wxID_YES && page->asciiEditor()->save());
     }
 
-    void editBinaryMesh() {
+    void editBinaryMesh(BinaryMeshPage initialPage=BinaryMeshPage::Properties) {
         auto* page=activePage();
         const bool selected=page && page->canEditBinaryMesh();
         const auto offset=selected ? std::optional<std::size_t>{page->selectedPackedOffset()} : std::nullopt;
         const auto saved=editBinaryMeshFields(this,
             [this](const wxString& title,const auto& work) {return runJob(title,work);},
-            selected ? page->document().path() : std::filesystem::path{},offset);
+            selected ? page->document().path() : std::filesystem::path{},offset,initialPage);
         if (!saved) return;
         auto document=std::make_unique<ModelDocument>();
         const auto resources=selected ? page->document().resourceResolver() : captureHostResolver();
@@ -4132,6 +4156,8 @@ private:
         if (area) view->AppendCheckItem(ID_EngineShadows, "Area Shadows");
         view->AppendCheckItem(ID_Fog, "Show Fog");
         view->Append(ID_LightingSettings, "Lighting and Fog Settings...");
+        view->Append(ID_OwnerVisualEffects,"Owner Visual Effects...");
+        view->Append(ID_SceneEffects,"Scene Effects...");
         if (features & (PreviewReferences | PreviewParticles | PreviewLightsabers | PreviewDangly))
             view->AppendSeparator();
         if (features & PreviewReferences) view->AppendCheckItem(ID_ShowReferences, "Referenced Models");
@@ -5540,12 +5566,20 @@ private:
                 if (activePage()->canEditBinaryMesh()) editBinaryMesh();
                 else activePage()->editSelectedNode();
                 return;
-            case ID_VertexProperties: activePage()->editSelectedVertices(); return;
+            case ID_VertexProperties:
+                if (!activePage()->document().sourceModel().asciiBuilt) editBinaryMesh(BinaryMeshPage::Vertices);
+                else activePage()->editSelectedVertices();
+                return;
             case ID_ReplaceMesh:
                 activePage()->replaceSelectedMesh([this](const wxString& title, const auto& work) {
                     return runJob(title, work);
                 }); return;
-            case ID_ControllerProperties: activePage()->editSelectedControllers(); return;
+            case ID_ControllerProperties:
+                if (!activePage()->document().sourceModel().asciiBuilt) editBinaryMesh(BinaryMeshPage::Controllers);
+                else activePage()->editSelectedControllers();
+                return;
+            case ID_OwnerVisualEffects: showOwnerVisualEffects();return;
+            case ID_SceneEffects: showSceneEffects();return;
             case ID_ConvertMesh:
                 activePage()->convertSelectedMesh([this](const wxString& title,const auto& work) {return runJob(title,work);});return;
             case ID_RecalculateNormals:
@@ -5720,11 +5754,13 @@ private:
         enableModuleCommand(ID_ExportAscii,editor&&editor->ready());
         enableModuleCommand(ID_ExportPacked,editor&&editor->ready());
         enableModuleCommand(ID_NodeProperties,active&&(active->canEditNode()||active->canEditBinaryMesh()));
-        enableModuleCommand(ID_VertexProperties,active&&active->canEditVertices());
+        enableModuleCommand(ID_VertexProperties,active&&(active->document().sourceModel().asciiBuilt ? active->canEditVertices() : active->canEditBinaryVertices()));
         enableModuleCommand(ID_ReplaceMesh,active&&active->canReplaceMesh());
         enableModuleCommand(ID_ConvertMesh,active&&active->canConvertMesh());
         enableModuleCommand(ID_RecalculateNormals,active&&active->canRecalculateNormals());
-        enableModuleCommand(ID_ControllerProperties,active&&active->canEditNode());
+        enableModuleCommand(ID_ControllerProperties,active&&(active->document().sourceModel().asciiBuilt ? active->canEditNode() : active->canEditBinaryControllers()));
+        enableModuleCommand(ID_OwnerVisualEffects,active&&active->document().hasModelOwner());
+        enableModuleCommand(ID_SceneEffects,active&&active->document().isOpen());
         enableModuleCommand(ID_CollisionCompanions,editor&&editor->previewCurrent()&&!area);
         enableModuleCommand(ID_ModelProperties,editor&&editor->previewCurrent()&&!area);
         enableModuleCommand(ID_RenameTexture,editor&&editor->previewCurrent()&&!area);

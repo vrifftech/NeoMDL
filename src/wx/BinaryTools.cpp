@@ -11,7 +11,9 @@
 #include <wx/dialog.h>
 #include <wx/filedlg.h>
 #include <wx/grid.h>
+#include <wx/choicdlg.h>
 #include <wx/dc.h>
+#include <wx/notebook.h>
 #include <wx/spinctrl.h>
 #include <wx/splitter.h>
 #include <wx/treectrl.h>
@@ -27,9 +29,148 @@
 #include <sstream>
 
 namespace neomdl::ui {
+namespace {
+
+double binaryNumber(const std::vector<std::uint8_t>& bytes,std::size_t offset,model::BinaryType type) {
+    std::uint32_t word{};
+    for (std::size_t i=0;i<model::binaryTypeWidth(type);++i) word|=std::uint32_t(bytes[offset+i])<<(8*i);
+    if (type==model::BinaryType::Float32) {float value;std::memcpy(&value,&word,4);return value;}
+    if (type==model::BinaryType::Int16) return static_cast<std::int16_t>(word);
+    return word;
+}
+
+void setBinaryNumber(std::vector<std::uint8_t>& bytes,std::size_t offset,model::BinaryType type,double value) {
+    std::uint32_t word;
+    if (type==model::BinaryType::Float32) {const auto number=static_cast<float>(value);std::memcpy(&word,&number,4);}
+    else word=static_cast<std::uint32_t>(static_cast<std::int64_t>(value));
+    for (std::size_t i=0;i<model::binaryTypeWidth(type);++i) bytes[offset+i]=static_cast<std::uint8_t>(word>>(8*i));
+}
+
+struct BinaryColumn {
+    wxString label;
+    std::size_t offset{},stride{};
+    model::BinaryType type{model::BinaryType::Float32};
+    bool readOnly{};
+};
+
+class BinaryValueTable final : public wxGridTableBase {
+public:
+    BinaryValueTable(std::vector<std::uint8_t>& bytes,std::size_t rows,std::vector<BinaryColumn> columns)
+        :bytes_(bytes),rows_(rows),columns_(std::move(columns)) {}
+    int GetNumberRows() override {return static_cast<int>(rows_);}
+    int GetNumberCols() override {return static_cast<int>(columns_.size());}
+    wxString GetColLabelValue(int column) override {return columns_[column].label;}
+    wxString GetRowLabelValue(int row) override {return wxString::Format("%d",row);}
+    wxString GetTypeName(int,int column) override {
+        return columns_[column].type==model::BinaryType::Float32 ? wxGRID_VALUE_FLOAT : wxGRID_VALUE_NUMBER;
+    }
+    bool CanGetValueAs(int row,int column,const wxString& type) override {return type==GetTypeName(row,column);}
+    bool CanSetValueAs(int row,int column,const wxString& type) override {return type==GetTypeName(row,column);}
+    double GetValueAsDouble(int row,int column) override {
+        const auto& field=columns_[column];
+        return binaryNumber(bytes_,field.offset+row*field.stride,field.type);
+    }
+    long GetValueAsLong(int row,int column) override {return static_cast<long>(GetValueAsDouble(row,column));}
+    wxString GetValue(int row,int column) override {return wxString::Format("%.9g",GetValueAsDouble(row,column));}
+    void SetValueAsDouble(int row,int column,double value) override {
+        const auto& field=columns_[column];
+        setBinaryNumber(bytes_,field.offset+row*field.stride,field.type,value);
+    }
+    void SetValueAsLong(int row,int column,long value) override {SetValueAsDouble(row,column,value);}
+    void SetValue(int row,int column,const wxString& value) override {
+        SetValueAsDouble(row,column,std::stod(wxui::toStd(value)));
+    }
+    const BinaryColumn& column(std::size_t index) const {return columns_[index];}
+private:
+    std::vector<std::uint8_t>& bytes_;
+    std::size_t rows_;
+    std::vector<BinaryColumn> columns_;
+};
+
+void editBinaryValues(wxWindow* parent,const wxString& title,std::vector<std::uint8_t>& bytes,
+                      std::size_t rows,std::vector<BinaryColumn> columns) {
+    wxDialog dialog(parent,wxID_ANY,title,wxDefaultPosition,wxDefaultSize,wxDEFAULT_DIALOG_STYLE|wxRESIZE_BORDER);
+    auto* layout=new wxBoxSizer(wxVERTICAL);
+    auto* grid=new wxGrid(&dialog,wxID_ANY);
+    auto* table=new BinaryValueTable(bytes,rows,std::move(columns));
+    grid->SetTable(table,true);
+    grid->SetDefaultEditor(new wxGridCellFloatEditor(-1,9,wxGRID_FLOAT_FORMAT_COMPACT));
+    grid->SetDefaultRenderer(new wxGridCellFloatRenderer(-1,9,wxGRID_FLOAT_FORMAT_COMPACT));
+    for (int i=0;i<table->GetNumberCols();++i) {
+        auto* attr=new wxGridCellAttr;
+        attr->SetReadOnly(table->column(i).readOnly);
+        if (table->column(i).type==model::BinaryType::UInt8) {
+            attr->SetEditor(new wxGridCellNumberEditor(0,255));
+            attr->SetRenderer(new wxGridCellNumberRenderer);
+        }
+        grid->SetColAttr(i,attr);grid->SetColSize(i,dialog.FromDIP(115));
+    }
+    layout->Add(grid,1,wxEXPAND|wxALL,dialog.FromDIP(8));
+    layout->Add(new wxStaticText(&dialog,wxID_ANY,"Changes stay in this editing session. Save Copy writes the model."),
+                0,wxLEFT|wxRIGHT|wxBOTTOM,dialog.FromDIP(8));
+    layout->Add(dialog.CreateButtonSizer(wxOK),0,wxEXPAND|wxALL,dialog.FromDIP(8));
+    dialog.FindWindow(wxID_OK)->SetLabel("Done");
+    dialog.Bind(wxEVT_BUTTON,[&](wxCommandEvent&) {
+        grid->SaveEditControlValue();grid->DisableCellEditControl();dialog.EndModal(wxID_OK);
+    },wxID_OK);
+    dialog.Bind(wxEVT_CLOSE_WINDOW,[&](wxCloseEvent&) {
+        grid->SaveEditControlValue();grid->DisableCellEditControl();dialog.EndModal(wxID_OK);
+    });
+    dialog.SetSizer(layout);dialog.SetSize(dialog.FromDIP(wxSize(820,500)));
+    wxui::applyTheme(&dialog,wxui::currentDarkMode());dialog.ShowModal();
+}
+
+void editBinaryVertices(wxWindow* parent,BinaryModelFile& file,std::size_t index) {
+    const auto& node=file.model.nodes[index];
+    const auto& mesh=file.model.meshes[*node.mesh];
+    const auto base=*node.packedOffset+80;
+    const auto pool=static_cast<std::size_t>(binaryNumber(file.mdl,base+
+        (file.model.game==model::GameVersion::Kotor1 ? 324 : 332),model::BinaryType::UInt32));
+    std::vector<BinaryColumn> columns;
+    const auto add=[&](const char* name,std::size_t offset,const char* const* components,unsigned count,model::BinaryType type) {
+        for (unsigned i=0;i<count;++i)
+            columns.push_back({wxString::FromUTF8(name)+" "+wxString::FromUTF8(components[i]),
+                pool+offset+i*model::binaryTypeWidth(type),mesh.mdxRowSize,type});
+    };
+    const char* xyz[]{"X","Y","Z"};const char* uv[]{"U","V"};const char* rgba[]{"R","G","B","A"};
+    if (mesh.mdxBitmap&0x20u) add("Normal",mesh.mdxNormalOffset,xyz,3,model::BinaryType::Float32);
+    for (unsigned channel=0;channel<4;++channel)
+        if (mesh.mdxBitmap&(2u<<channel))
+            add(("UV "+std::to_string(channel)).c_str(),mesh.mdxTexcoordOffsets[channel],uv,2,model::BinaryType::Float32);
+    if (mesh.mdxBitmap&0x40u) add("Colour",mesh.mdxColorOffset,rgba,4,model::BinaryType::UInt8);
+    editBinaryValues(parent,"Binary Vertex Attributes — "+wxui::toWx(node.name),*file.mdx,mesh.vertices.size(),std::move(columns));
+}
+
+void editBinaryControllers(wxWindow* parent,BinaryModelFile& file,std::size_t index) {
+    const auto& node=file.model.nodes[index];
+    std::vector<std::size_t> controllers;wxArrayString labels;
+    for (std::size_t i=0;i<node.controllers.size();++i) {
+        const auto& controller=node.controllers[i];
+        if (editableBinaryMaterialController(controller)) {
+            controllers.push_back(i);labels.Add(controller.type==100u ? "Self-illumination RGB" : "Opacity");
+        }
+    }
+    const int chosen=controllers.size()==1 ? 0 : wxGetSingleChoiceIndex("Choose an existing controller",
+        "Binary Material Controllers",labels,parent);
+    if (chosen<0) return;
+    const auto& controller=node.controllers[controllers[chosen]];
+    const auto data=12+static_cast<std::size_t>(binaryNumber(file.mdl,*node.packedOffset+68,model::BinaryType::UInt32));
+    const unsigned width=controller.type==100u ? 3u : 1u;
+    const unsigned values=width*(controller.interpolation==model::ControllerInterpolation::Bezier ? 3u : 1u);
+    std::vector<BinaryColumn> columns{{"Time (seconds)",data+controller.timeIndex*4u,4u,model::BinaryType::Float32,true}};
+    const char* rgb[]{"R","G","B"};
+    for (unsigned i=0;i<values;++i) {
+        const auto label=width==3 ? wxString::FromUTF8(rgb[i%3]) : wxString("Value");
+        columns.push_back({values==width ? label : label+wxString::Format(" [%u]",i/width),
+            data+(controller.dataIndex+i)*4u,values*4u});
+    }
+    editBinaryValues(parent,"Binary Controller Values — "+labels[chosen],file.mdl,controller.rowCount,std::move(columns));
+}
+
+} // namespace
 
 std::optional<std::filesystem::path> editBinaryMeshFields(wxWindow* parent, const AuthoringJob& runJob,
-    const std::filesystem::path& input, std::optional<std::size_t> selectedOffset) {
+    const std::filesystem::path& input, std::optional<std::size_t> selectedOffset, BinaryMeshPage page) {
     auto path=input;
     if (path.empty()) {
         wxFileDialog open(parent,"Edit Binary Mesh Fields",{},{},"Binary MDL (*.mdl)|*.mdl;*.MDL",
@@ -55,7 +196,8 @@ std::optional<std::filesystem::path> editBinaryMeshFields(wxWindow* parent, cons
             select->Append(wxui::toWx(node.name) + wxString::Format("  [0x%zX]",*node.packedOffset));
         }
         layout->Add(select,0,wxEXPAND | wxALL,dialog.FromDIP(10));
-        auto* fields = new wxPanel(&dialog);
+        auto* pages = new wxNotebook(&dialog,wxID_ANY);
+        auto* fields = new wxPanel(pages);
         auto* grid = new wxFlexGridSizer(2,dialog.FromDIP(8),dialog.FromDIP(12)); grid->AddGrowableCol(1);
         std::array<wxTextCtrl*,2> textures{};
         const char* textureLabels[]{"Base texture","Secondary texture"};
@@ -64,8 +206,8 @@ std::optional<std::filesystem::path> editBinaryMeshFields(wxWindow* parent, cons
             textures[i] = new wxTextCtrl(fields,wxID_ANY,{},wxDefaultPosition,wxDefaultSize,0,wxTextValidator(wxFILTER_ASCII));
             textures[i]->SetMaxLength(31); grid->Add(textures[i],1,wxEXPAND);
         }
-        std::array<wxCheckBox*,5> flags{};
-        const char* flagLabels[]{"Rotate texture","Background geometry","Cast shadows","Beaming","Render"};
+        std::array<wxCheckBox*,6> flags{};
+        const char* flagLabels[]{"Lightmapped","Rotate texture","Background geometry","Cast shadows","Beaming","Render"};
         for (std::size_t i = 0; i < flags.size(); ++i) {
             flags[i] = new wxCheckBox(fields,wxID_ANY,flagLabels[i]); grid->Add(flags[i]); grid->AddSpacer(1);
         }
@@ -73,9 +215,55 @@ std::optional<std::filesystem::path> editBinaryMeshFields(wxWindow* parent, cons
         grid->Add(tangent); grid->AddSpacer(1);
         auto* regenerate = new wxCheckBox(fields,wxID_ANY,"Regenerate tangent basis");
         grid->Add(regenerate); grid->AddSpacer(1);
-        fields->SetSizer(grid); layout->Add(fields,0,wxEXPAND | wxALL,dialog.FromDIP(10));
+        auto* vertices = new wxButton(fields,wxID_ANY,"Vertex Attributes...");
+        vertices->SetToolTip("Edit existing normals, UVs and colours. Use Regenerate tangent basis after normal or UV changes when needed.");
+        auto* controllers = new wxButton(fields,wxID_ANY,"Opacity / Glow...");
+        controllers->SetToolTip("Edit existing opacity and self-illumination controller values.");
+        grid->Add(vertices,0,wxEXPAND);grid->Add(controllers,0,wxEXPAND);
+        fields->SetSizer(grid);pages->AddPage(fields,"Mesh");
+
+        struct NumberField {
+            wxSpinCtrlDouble* control;
+            std::size_t offset;
+            model::BinaryType type;
+            double displayed{};
+        };
+        std::vector<NumberField> numbers;
+        const auto number=[&](wxPanel* panel,wxFlexGridSizer* form,const char* label,std::size_t offset,model::BinaryType type) {
+            form->Add(new wxStaticText(panel,wxID_ANY,label),0,wxALIGN_CENTER_VERTICAL);
+            const bool floating=type==model::BinaryType::Float32;
+            const double minimum=floating ? -std::numeric_limits<float>::max() : type==model::BinaryType::Int16 ? -32768.0 : 0.0;
+            const double maximum=floating ? std::numeric_limits<float>::max() : type==model::BinaryType::Int16 ? 32767.0 : 4294967295.0;
+            auto* control=new wxSpinCtrlDouble(panel,wxID_ANY,{},wxDefaultPosition,wxSize(dialog.FromDIP(180),wxDefaultCoord),
+                wxSP_ARROW_KEYS,minimum,maximum,0.0,floating ? 0.01 : 1.0);
+            control->SetDigits(floating ? 9 : 0);form->Add(control,1,wxEXPAND);
+            numbers.push_back({control,offset,type});
+        };
+        auto* material=new wxPanel(pages);
+        auto* materialForm=new wxFlexGridSizer(2,dialog.FromDIP(7),dialog.FromDIP(10));materialForm->AddGrowableCol(1);
+        const char* colours[]{"Diffuse R","Diffuse G","Diffuse B","Ambient R","Ambient G","Ambient B"};
+        for (unsigned i=0;i<6;++i) number(material,materialForm,colours[i],60+i*4,model::BinaryType::Float32);
+        number(material,materialForm,"Transparency hint (ordering)",84,model::BinaryType::UInt32);
+        const bool k2=file.model.game==model::GameVersion::Kotor2;
+        wxCheckBox* dirt=nullptr;wxCheckBox* noHologram=nullptr;
+        if (k2) {
+            dirt=new wxCheckBox(material,wxID_ANY,"Dirt enabled (K2)");materialForm->Add(dirt);materialForm->AddSpacer(1);
+            dirt->SetToolTip("Stores the K2 dirt fields. Their visual effect depends on the engine material path.");
+            number(material,materialForm,"Dirt texture index",316,model::BinaryType::Int16);
+            number(material,materialForm,"Dirt worldspace",318,model::BinaryType::Int16);
+            noHologram=new wxCheckBox(material,wxID_ANY,"Exclude from hologram rendering");
+            materialForm->Add(noHologram);materialForm->AddSpacer(1);
+        }
+        material->SetSizer(materialForm);pages->AddPage(material,"Material");
+        auto* uv=new wxPanel(pages);
+        auto* uvForm=new wxFlexGridSizer(2,dialog.FromDIP(7),dialog.FromDIP(10));uvForm->AddGrowableCol(1);
+        auto* animateUv=new wxCheckBox(uv,wxID_ANY,"Animate UVs");uvForm->Add(animateUv);uvForm->AddSpacer(1);
+        const char* uvLabels[]{"Scroll X","Scroll Y","Jitter amount","Jitter speed"};
+        for (unsigned i=0;i<4;++i) number(uv,uvForm,uvLabels[i],236+i*4,model::BinaryType::Float32);
+        uv->SetSizer(uvForm);pages->AddPage(uv,"UV Animation");
+        layout->Add(pages,1,wxEXPAND | wxALL,dialog.FromDIP(10));
         auto* note = new wxStaticText(&dialog,wxID_ANY,
-            "Edit texture references, mesh flags and tangent basis directly in the binary model.\n"
+            "Edits apply to the binary model. Lightmaps use the existing secondary UVs and texture.\n"
             "Save Copy opens the edited model in the viewport.");
         note->Wrap(dialog.FromDIP(590)); layout->Add(note,0,wxALL,dialog.FromDIP(10));
         auto* buttons = new wxBoxSizer(wxHORIZONTAL);
@@ -85,8 +273,20 @@ std::optional<std::filesystem::path> editBinaryMeshFields(wxWindow* parent, cons
         layout->Add(buttons,0,wxEXPAND | wxALL,dialog.FromDIP(10));
         dialog.SetSizerAndFit(layout); dialog.SetMinSize(dialog.GetSize());
         std::map<std::size_t,BinaryMeshEdit> edits;
+        std::size_t current{};
+        const auto flush=[&] {
+            const auto base=*file.model.nodes[current].packedOffset+80;
+            for (auto& field : numbers) {
+                const auto value=field.control->GetValue();
+                if (value!=field.displayed) {
+                    setBinaryNumber(file.mdl,base+field.offset,field.type,value);
+                    field.displayed=value;
+                }
+            }
+        };
         const auto load = [&] {
             const auto index = nodes[select->GetSelection()];
+            current=index;
             const auto base = *file.model.nodes[index].packedOffset + 80;
             const auto& edit = edits[index];
             const auto& node=file.model.nodes[index];
@@ -94,11 +294,19 @@ std::optional<std::filesystem::path> editBinaryMeshFields(wxWindow* parent, cons
             for (std::size_t i = 0; i < textures.size(); ++i)
                 textures[i]->ChangeValue(wxui::toWx(edit.textures[i].value_or(binaryMeshTexture(file,index,i))));
             for (std::size_t i = 0; i < flags.size(); ++i)
-                flags[i]->SetValue(edit.flags[i].value_or(file.mdl[base+309+i] != 0));
+                flags[i]->SetValue(edit.flags[i].value_or(file.mdl[base+308+i] != 0));
             tangent->SetValue(edit.tangentBasis.value_or((mesh.mdxBitmap&0x80u)!=0));
             tangent->Enable(file.mdx.has_value() && !node.lightsaber && !mesh.animated && !mesh.vertices.empty());
             regenerate->SetValue(edit.regenerateTangents);
             regenerate->Enable(tangent->IsEnabled() && tangent->GetValue());
+            for (auto& field : numbers) {
+                field.control->SetValue(binaryNumber(file.mdl,base+field.offset,field.type));
+                field.displayed=field.control->GetValue();
+            }
+            animateUv->SetValue(binaryNumber(file.mdl,base+232,model::BinaryType::UInt32)!=0);
+            if (k2) {dirt->SetValue(file.mdl[base+314]!=0);noHologram->SetValue(file.mdl[base+320]!=0);}
+            vertices->Enable(file.mdx.has_value() && !mesh.vertices.empty() && (mesh.mdxBitmap&0x7eu));
+            controllers->Enable(std::any_of(node.controllers.begin(),node.controllers.end(),editableBinaryMaterialController));
         };
         for (std::size_t i = 0; i < textures.size(); ++i) textures[i]->Bind(wxEVT_TEXT,[&,i](wxCommandEvent&) {
             const auto index = nodes[select->GetSelection()]; const auto value = wxui::toStd(textures[i]->GetValue());
@@ -107,7 +315,7 @@ std::optional<std::filesystem::path> editBinaryMeshFields(wxWindow* parent, cons
         for (std::size_t i = 0; i < flags.size(); ++i) flags[i]->Bind(wxEVT_CHECKBOX,[&,i](wxCommandEvent&) {
             const auto index = nodes[select->GetSelection()]; const auto base = *file.model.nodes[index].packedOffset + 80;
             const auto value = flags[i]->GetValue();
-            edits[index].flags[i] = value == (file.mdl[base+309+i] != 0) ? std::nullopt : std::optional<bool>{value};
+            edits[index].flags[i] = value == (file.mdl[base+308+i] != 0) ? std::nullopt : std::optional<bool>{value};
         });
         tangent->Bind(wxEVT_CHECKBOX,[&](wxCommandEvent&) {
             const auto index=nodes[select->GetSelection()];
@@ -121,8 +329,18 @@ std::optional<std::filesystem::path> editBinaryMeshFields(wxWindow* parent, cons
         regenerate->Bind(wxEVT_CHECKBOX,[&](wxCommandEvent&) {
             edits[nodes[select->GetSelection()]].regenerateTangents=regenerate->GetValue();
         });
-        select->Bind(wxEVT_CHOICE,[&](wxCommandEvent&) { load(); });
+        animateUv->Bind(wxEVT_CHECKBOX,[&](wxCommandEvent&) {
+            setBinaryNumber(file.mdl,*file.model.nodes[current].packedOffset+80+232,model::BinaryType::UInt32,animateUv->GetValue());
+        });
+        if (k2) {
+            dirt->Bind(wxEVT_CHECKBOX,[&](wxCommandEvent&) {file.mdl[*file.model.nodes[current].packedOffset+80+314]=dirt->GetValue();});
+            noHologram->Bind(wxEVT_CHECKBOX,[&](wxCommandEvent&) {file.mdl[*file.model.nodes[current].packedOffset+80+320]=noHologram->GetValue();});
+        }
+        vertices->Bind(wxEVT_BUTTON,[&](wxCommandEvent&) {editBinaryVertices(&dialog,file,current);});
+        controllers->Bind(wxEVT_BUTTON,[&](wxCommandEvent&) {editBinaryControllers(&dialog,file,current);});
+        select->Bind(wxEVT_CHOICE,[&](wxCommandEvent&) {flush();load();});
         save->Bind(wxEVT_BUTTON,[&](wxCommandEvent&) {
+            flush();
             wxFileDialog output(&dialog,"Save Edited Binary Copy",neosettings::pathToWx(file.path.parent_path()),
                 neosettings::pathToWx(file.path.stem())+"-edited.mdl","Binary MDL (*.mdl)|*.mdl",wxFD_SAVE | wxFD_OVERWRITE_PROMPT);
             if (output.ShowModal() != wxID_OK) return;
@@ -130,7 +348,10 @@ std::optional<std::filesystem::path> editBinaryMeshFields(wxWindow* parent, cons
                 std::vector<CollisionOutput> outputs;
                 const auto destination = neosettings::pathFromWx(output.GetPath());
                 if (!runJob("Preparing binary copy",[&](const auto& job) {
-                    job.check(); outputs = binaryEditOutputs(file,edits,destination,job);
+                    const std::vector<std::uint8_t> emptyMdx;
+                    file.model=model::decodePackedModelBytes(file.mdl,file.mdx ? *file.mdx : emptyMdx,
+                        neoshared::pathToUtf8(file.path),job,false);
+                    outputs = binaryEditOutputs(file,edits,destination,job);
                 })) return;
                 auto reserved = file.inputs;
                 std::vector<std::filesystem::path> companions;
@@ -145,8 +366,10 @@ std::optional<std::filesystem::path> editBinaryMeshFields(wxWindow* parent, cons
                 })) {saved=destination;dialog.EndModal(wxID_OK);}
             } catch (const std::exception& error) { wxui::showError(&dialog,error); }
         });
-        fields->Enable(!nodes.empty()); save->Enable(!nodes.empty());
+        pages->Enable(!nodes.empty()); save->Enable(!nodes.empty());
         if (!nodes.empty()) { select->SetSelection(selection); load(); }
+        if (page==BinaryMeshPage::Vertices) dialog.CallAfter([&] {editBinaryVertices(&dialog,file,current);});
+        if (page==BinaryMeshPage::Controllers) dialog.CallAfter([&] {editBinaryControllers(&dialog,file,current);});
         wxui::applyTheme(&dialog,wxui::currentDarkMode()); dialog.ShowModal();
     } catch (const std::exception& error) { wxui::showError(parent,error); }
     return saved;
