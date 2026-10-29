@@ -1,5 +1,6 @@
 #include "wx/BinaryTools.hpp"
 #include "core/BinaryEditing.hpp"
+#include "core/BinaryGameConversion.hpp"
 #include "core/BinaryAnalysis.hpp"
 #include "NeoWxUi.hpp"
 #include <neoshared/texture/FileUtil.hpp>
@@ -10,6 +11,7 @@
 #include <wx/choice.h>
 #include <wx/dialog.h>
 #include <wx/filedlg.h>
+#include <wx/filedlgcustomize.h>
 #include <wx/grid.h>
 #include <wx/choicdlg.h>
 #include <wx/dc.h>
@@ -286,18 +288,41 @@ void editBinaryTransform(wxWindow* parent,BinaryModelFile& file,std::size_t inde
     dialog.ShowModal();
 }
 
+class BinarySaveControls final : public wxFileDialogCustomizeHook {
+public:
+    explicit BinarySaveControls(model::GameVersion original) : game(original) {}
+    void AddCustomControls(wxFileDialogCustomize& customizer) override {
+        customizer.AddStaticText("Target game");
+        const wxString games[]{"Knights of the Old Republic (K1)","The Sith Lords (K2)"};
+        choice_=customizer.AddChoice(2,games);
+        choice_->SetSelection(game==model::GameVersion::Kotor1 ? 0 : 1);
+        customizer.AddStaticText("K1 omits K2 dirt and hologram mesh settings.");
+    }
+    void TransferDataFromCustomControls() override {
+        game=choice_->GetSelection()==0 ? model::GameVersion::Kotor1 : model::GameVersion::Kotor2;
+    }
+    model::GameVersion game;
+private:
+    wxFileDialogChoice* choice_{};
+};
+
 std::optional<BinaryEditResult> saveBinaryCopy(wxWindow* parent,BinaryModelFile& file,std::size_t node,
     const std::map<std::size_t,BinaryMeshEdit>& edits,const AuthoringJob& runJob) {
+    BinarySaveControls controls(file.model.game);
     wxFileDialog output(parent,"Save Edited Binary Copy",neosettings::pathToWx(file.path.parent_path()),
         neosettings::pathToWx(file.path.stem())+"-edited.mdl","Binary MDL (*.mdl)|*.mdl",wxFD_SAVE | wxFD_OVERWRITE_PROMPT);
+    output.SetCustomizeHook(controls);
     if (output.ShowModal()!=wxID_OK) return {};
     std::vector<CollisionOutput> outputs;
+    std::map<std::size_t,std::size_t> nodeOffsets;
     const auto destination=neosettings::pathFromWx(output.GetPath());
     if (!runJob("Preparing binary copy",[&](const auto& job) {
         const std::vector<std::uint8_t> emptyMdx;
         file.model=model::decodePackedModelBytes(file.mdl,file.mdx ? *file.mdx : emptyMdx,
             neoshared::pathToUtf8(file.path),job,false);
         outputs=binaryEditOutputs(file,edits,destination,job);
+        if (controls.game!=file.model.game) nodeOffsets=switchBinaryGame(outputs.front().bytes,job);
+        else for (const auto& item : file.model.nodes) nodeOffsets.emplace(*item.packedOffset,*item.packedOffset);
     })) return {};
     auto reserved=file.inputs;
     std::vector<std::filesystem::path> companions;
@@ -310,7 +335,7 @@ std::optional<BinaryEditResult> saveBinaryCopy(wxWindow* parent,BinaryModelFile&
         job.check();
         for (const auto& item : outputs) neoshared::texture::writeFileBytes(item.path,item.bytes);
     })) return {};
-    return BinaryEditResult{destination,*file.model.nodes[node].packedOffset};
+    return BinaryEditResult{destination,nodeOffsets.at(*file.model.nodes[node].packedOffset),std::move(nodeOffsets)};
 }
 
 } // namespace
@@ -432,7 +457,7 @@ std::optional<BinaryEditResult> editBinaryMeshFields(wxWindow* parent, const Aut
         layout->Add(batch,0,wxLEFT|wxRIGHT|wxBOTTOM,dialog.FromDIP(10));
         auto* note = new wxStaticText(&dialog,wxID_ANY,
             "Changes stay in this dialog until Save Copy writes and opens a new MDL/MDX copy.\n"
-            "Cancel discards this session. The viewport updates after saving.\n"
+            "Choose K1 or K2 in Save Copy. Cancel discards this session.\n"
             "Lightmaps use the existing secondary UVs and texture; edit texture/TXI files in NeoTPC.");
         note->Wrap(dialog.FromDIP(590)); layout->Add(note,0,wxALL,dialog.FromDIP(10));
         auto* buttons = new wxBoxSizer(wxHORIZONTAL);
@@ -540,7 +565,7 @@ std::optional<BinaryEditResult> editBinaryMeshFields(wxWindow* parent, const Aut
                 if (output) {saved=*output;dialog.EndModal(wxID_OK);}
             } catch (const std::exception& error) { wxui::showError(&dialog,error); }
         });
-        pages->Enable(!nodes.empty()); save->Enable(!nodes.empty());
+        pages->Enable(!nodes.empty());select->Enable(!nodes.empty());save->Enable(!file.model.nodes.empty());
         if (!nodes.empty()) { select->SetSelection(selection); load(); }
         if (page==BinaryMeshPage::Vertices) dialog.CallAfter([&] {editBinaryVertices(&dialog,file,current,edits[current]);});
         if (page==BinaryMeshPage::Controllers) dialog.CallAfter([&] {editBinaryControllers(&dialog,file,current);});

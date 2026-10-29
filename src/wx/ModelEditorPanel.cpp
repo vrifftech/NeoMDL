@@ -708,7 +708,8 @@ public:
     void copyEditingContext(const ModelPage& source) {
         showAscii(source.asciiVisible());
         detailedDiagnostics_->SetValue(source.detailedDiagnostics_->GetValue());
-        outputGame_=source.outputGame_;
+        outputGame_=source.document_->sourceModel().game==document_->sourceModel().game
+            ? source.outputGame_ : document_->sourceModel().game;
         canvas_->copyCameraFrom(*source.canvas_);
         canvas_->setMeshVisibility(source.canvas_->hiddenMeshNodes(),source.canvas_->isolatedMeshNodes());
         updateDetails(selectedNode_);
@@ -2216,7 +2217,9 @@ private:
             })) return;
             const auto session=selected ? page->resourceSession() : std::shared_ptr<GameResourceSession>{};
             addDocument(std::move(document),session,resources,selected ? page : nullptr,selected);
-            activePage()->selectPackedNodes(offsets,saved->nodeOffset);
+            std::set<std::size_t> selection;
+            for (const auto original : offsets) selection.insert(saved->nodeOffsets.at(original));
+            activePage()->selectPackedNodes(selection,saved->nodeOffset);
         } catch (const std::exception& error) {
             wxMessageBox("The binary copy was saved to:\n"+neosettings::pathToWx(saved->path)+
                 "\n\nIt could not be opened:\n"+wxui::toWx(error.what()),
