@@ -182,6 +182,7 @@ std::vector<CollisionOutput> binaryEditOutputs(const BinaryModelFile& file,
         }
         for (std::size_t flag = 0; flag < edit.flags.size(); ++flag)
             if (edit.flags[flag]) mdl.u8(base+308+flag,*edit.flags[flag] ? 1 : 0);
+        for (const auto& [offset,bytes] : edit.headerFields) mdl.copy(base+offset,bytes.data(),bytes.size());
         if (!edit.positionRows.empty()) updateBinaryGeometry(mdl,file,index,edit);
         if (edit.tangentBasis || edit.regenerateTangents) {
             const auto& mesh=file.model.meshes[*file.model.nodes[index].mesh];

@@ -298,7 +298,8 @@ std::optional<std::filesystem::path> saveBinaryCopy(wxWindow* parent,BinaryModel
 } // namespace
 
 std::optional<std::filesystem::path> editBinaryMeshFields(wxWindow* parent, const AuthoringJob& runJob,
-    const std::filesystem::path& input, std::optional<std::size_t> selectedOffset, BinaryMeshPage page) {
+    const std::filesystem::path& input, std::optional<std::size_t> selectedOffset, BinaryMeshPage page,
+    const std::set<std::size_t>& selectedOffsets) {
     auto path=input;
     if (path.empty()) {
         wxFileDialog open(parent,"Edit Binary Mesh Fields",{},{},"Binary MDL (*.mdl)|*.mdl;*.MDL",
@@ -402,6 +403,10 @@ std::optional<std::filesystem::path> editBinaryMeshFields(wxWindow* parent, cons
         for (unsigned i=0;i<4;++i) number(uv,uvForm,uvLabels[i],236+i*4,model::BinaryType::Float32);
         uv->SetSizer(uvForm);pages->AddPage(uv,"UV Animation");
         layout->Add(pages,1,wxEXPAND | wxALL,dialog.FromDIP(10));
+        auto* batch=new wxCheckBox(&dialog,wxID_ANY,wxString::Format(
+            "Apply changed material/header properties to %zu selected meshes",selectedOffsets.size()));
+        batch->Show(selectedOffsets.size()>1);
+        layout->Add(batch,0,wxLEFT|wxRIGHT|wxBOTTOM,dialog.FromDIP(10));
         auto* note = new wxStaticText(&dialog,wxID_ANY,
             "Edits apply to the binary model. Lightmaps use the existing secondary UVs and texture.\n"
             "Save Copy opens the edited model in the viewport.");
@@ -414,12 +419,17 @@ std::optional<std::filesystem::path> editBinaryMeshFields(wxWindow* parent, cons
         dialog.SetSizerAndFit(layout); dialog.SetMinSize(dialog.GetSize());
         std::map<std::size_t,BinaryMeshEdit> edits;
         std::size_t current{};
-        const auto flush=[&] {
+        const auto headerField=[&](std::size_t offset,model::BinaryType type,double value) {
             const auto base=*file.model.nodes[current].packedOffset+80;
+            setBinaryNumber(file.mdl,base+offset,type,value);
+            edits[current].headerFields[offset]={file.mdl.begin()+base+offset,
+                file.mdl.begin()+base+offset+model::binaryTypeWidth(type)};
+        };
+        const auto flush=[&] {
             for (auto& field : numbers) {
                 const auto value=field.control->GetValue();
                 if (value!=field.displayed) {
-                    setBinaryNumber(file.mdl,base+field.offset,field.type,value);
+                    headerField(field.offset,field.type,value);
                     field.displayed=value;
                 }
             }
@@ -472,11 +482,11 @@ std::optional<std::filesystem::path> editBinaryMeshFields(wxWindow* parent, cons
             edits[nodes[select->GetSelection()]].regenerateTangents=regenerate->GetValue();
         });
         animateUv->Bind(wxEVT_CHECKBOX,[&](wxCommandEvent&) {
-            setBinaryNumber(file.mdl,*file.model.nodes[current].packedOffset+80+232,model::BinaryType::UInt32,animateUv->GetValue());
+            headerField(232,model::BinaryType::UInt32,animateUv->GetValue());
         });
         if (k2) {
-            dirt->Bind(wxEVT_CHECKBOX,[&](wxCommandEvent&) {file.mdl[*file.model.nodes[current].packedOffset+80+314]=dirt->GetValue();});
-            noHologram->Bind(wxEVT_CHECKBOX,[&](wxCommandEvent&) {file.mdl[*file.model.nodes[current].packedOffset+80+320]=noHologram->GetValue();});
+            dirt->Bind(wxEVT_CHECKBOX,[&](wxCommandEvent&) {headerField(314,model::BinaryType::UInt8,dirt->GetValue());});
+            noHologram->Bind(wxEVT_CHECKBOX,[&](wxCommandEvent&) {headerField(320,model::BinaryType::UInt8,noHologram->GetValue());});
         }
         vertices->Bind(wxEVT_BUTTON,[&](wxCommandEvent&) {editBinaryVertices(&dialog,file,current,edits[current]);});
         controllers->Bind(wxEVT_BUTTON,[&](wxCommandEvent&) {flush();editBinaryControllers(&dialog,file,current);load();});
@@ -487,7 +497,19 @@ std::optional<std::filesystem::path> editBinaryMeshFields(wxWindow* parent, cons
         save->Bind(wxEVT_BUTTON,[&](wxCommandEvent&) {
             flush();
             try {
-                const auto output=saveBinaryCopy(&dialog,file,edits,runJob);
+                auto outputEdits=edits;
+                if (batch->GetValue()) {
+                    const auto& source=edits[current];
+                    for (const auto index : nodes) if (selectedOffsets.count(*file.model.nodes[index].packedOffset)) {
+                        auto& target=outputEdits[index];
+                        for (std::size_t i=0;i<source.textures.size();++i)
+                            if (source.textures[i]) target.textures[i]=source.textures[i];
+                        for (std::size_t i=0;i<source.flags.size();++i)
+                            if (source.flags[i]) target.flags[i]=source.flags[i];
+                        for (const auto& field : source.headerFields) target.headerFields[field.first]=field.second;
+                    }
+                }
+                const auto output=saveBinaryCopy(&dialog,file,outputEdits,runJob);
                 if (output) {saved=*output;dialog.EndModal(wxID_OK);}
             } catch (const std::exception& error) { wxui::showError(&dialog,error); }
         });

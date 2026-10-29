@@ -1927,7 +1927,7 @@ void ModelCanvas::setDocument(const ModelDocument* document, bool preserveCamera
     triggerScene_.setDocument(document_);
     triggerCullPlane_ = 0u;
     pendingLightElapsed_ = 0.0f;
-    selectedNode_.reset();
+    selectedNodes_.clear();hiddenNodes_.clear();isolatedNodes_.reset();
     animationRuntime_.advanceProceduralUv(particleScene_.runtimeRandom(),0.0f);
     if(document_&&document_->hasModelOwner())
         lightsaberScene_.sampleConstructedOwners(animationRuntime_.pose());
@@ -2211,9 +2211,35 @@ void ModelCanvas::setOptions(RenderOptions options) {
     Refresh(false);
 }
 
-void ModelCanvas::setSelectedNode(std::optional<std::size_t> index) {
-    selectedNode_ = index;
+void ModelCanvas::setSelectedNodes(std::set<std::size_t> nodes) {
+    selectedNodes_=std::move(nodes);
     Refresh(false);
+}
+
+void ModelCanvas::hideSelectedMeshes() {
+    hiddenNodes_.insert(selectedNodes_.begin(),selectedNodes_.end());
+    Refresh(false);
+}
+
+void ModelCanvas::isolateSelectedMeshes(bool enabled) {
+    if (enabled) isolatedNodes_=selectedNodes_;
+    else isolatedNodes_.reset();
+    Refresh(false);
+}
+
+void ModelCanvas::showAllMeshes() {
+    hiddenNodes_.clear();isolatedNodes_.reset();
+    Refresh(false);
+}
+
+bool ModelCanvas::meshVisible(std::size_t node) const {
+    return !hiddenNodes_.count(node) && (!isolatedNodes_ || isolatedNodes_->count(node));
+}
+
+std::size_t ModelCanvas::referenceSelectionNode(std::size_t reference) const {
+    const auto& references=document_->references();
+    while (references[reference].parentInstance) reference=*references[reference].parentInstance;
+    return references[reference].parentNodeIndex;
 }
 
 bool ModelCanvas::activateCameraNode(std::size_t nodeIndex) {
@@ -3308,10 +3334,12 @@ void ModelCanvas::onPaint(wxPaintEvent&) {
     SwapBuffers();
     if (meshPick_) {
         const auto node = meshPick_->node;
+        const bool additive=meshPick_->additive;
         meshPick_.reset();
         wxCommandEvent selection(EVT_MODEL_NODE_PICKED, GetId());
         selection.SetEventObject(this);
         selection.SetInt(node ? static_cast<int>(*node) : -1);
+        selection.SetExtraLong(additive ? 1 : 0);
         ProcessWindowEvent(selection);
     }
 }
@@ -3359,7 +3387,7 @@ void ModelCanvas::onMouse(wxMouseEvent& event) {
         selectionStart_.reset();
     if (event.LeftUp()) {
         if (selectionStart_ && !event.ControlDown()) {
-            meshPick_ = MeshPick{event.GetPosition(), 0.0f, {}};
+            meshPick_ = MeshPick{event.GetPosition(), 0.0f, {}, event.ShiftDown()};
             Refresh(false);
         }
         selectionStart_.reset();
@@ -3512,9 +3540,7 @@ void ModelCanvas::considerMeshPick(const render::MeshSubmission& submission) {
             const auto& references = document_->references();
             for (std::size_t i = 0; i < references.size(); ++i) {
                 if (!contains(references[i].model)) continue;
-                auto root = i;
-                while (references[root].parentInstance) root = *references[root].parentInstance;
-                meshPick_->node = references[root].parentNodeIndex;
+                meshPick_->node = referenceSelectionNode(i);
                 break;
             }
         }
@@ -3929,7 +3955,8 @@ void ModelCanvas::drawScene() {
             continue;
         }
         const auto& meshNode = model.nodes[mesh.nodeIndex];
-        const bool selected = selectedNode_ && *selectedNode_ == mesh.nodeIndex;
+        if (!meshVisible(mesh.nodeIndex)) continue;
+        const bool selected = selectedNodes_.count(mesh.nodeIndex)!=0;
         // K1 Desktop PartAABB::Draw 0x34b4dc shares the specialized four-pass
         // debug consumer; it never submits ordinary textured mesh geometry.
         if (engineScene &&
@@ -4822,6 +4849,8 @@ void ModelCanvas::drawReferenceModels() {
         const auto* runtime = referenceScene_.instance(instanceIndex);
         if (!runtime || !runtime->active || !runtime->sceneMember) continue;
         const auto& reference=document_->references()[instanceIndex];
+        const auto selectionNode=referenceSelectionNode(instanceIndex);
+        if (!meshVisible(selectionNode)) continue;
         const auto& sampled=runtime->pose;
         const auto engineParts=reference.model.game==model::GameVersion::Kotor1
             ? engineCollapsedHitPose(reference.model,sampled,runtime->frame)
@@ -4869,8 +4898,7 @@ void ModelCanvas::drawReferenceModels() {
                 continue;
             }
             const auto& meshNode = reference.model.nodes[mesh.nodeIndex];
-            const bool selected = selectedNode_ && !reference.parentInstance &&
-                *selectedNode_ == reference.parentNodeIndex;
+            const bool selected=selectedNodes_.count(selectionNode)!=0;
             if (!model::engineSceneStageOrder(reference.model.game).empty() &&
                 (meshNode.flags & neomdl::model::kNodeAabb) != 0u) {
                 auto scale=model::identityMatrix();
@@ -5482,6 +5510,8 @@ void ModelCanvas::queueLightsabers() {
     model::Mat4 projection;glGetFloatv(GL_PROJECTION_MATRIX,projection.values.data());
     for(const auto& source:sources) {
       for (const auto& instance : source.scene->instances()) {
+        if (source.scene==&lightsaberScene_ &&
+            !meshVisible(instance->reference ? referenceSelectionNode(*instance->reference) : instance->nodeIndex)) continue;
         const auto id=source.ownerId(instance->reference);
         {
             // ManageSceneBSP admits owning Gobs. Collapsed room Parts do not
@@ -5718,6 +5748,7 @@ void ModelCanvas::drawNodeHelpers(
     const auto& nodes = document_->model().nodes;
     for (std::size_t nodeIndex = 0u; nodeIndex < nodes.size(); ++nodeIndex) {
         if (nodeIndex >= transforms.size()) continue;
+        if (!meshVisible(nodeIndex)) continue;
         const auto& node = nodes[nodeIndex];
         if (!node.light && !node.emitter && !node.camera && !node.reference &&
             !node.lightsaber && !node.trigger) continue;
@@ -5725,7 +5756,7 @@ void ModelCanvas::drawNodeHelpers(
         const auto world = neomdl::model::multiply(
             referenceScene_.mainWorld(), transforms[nodeIndex]);
         glMultMatrixf(world.values.data());
-        const bool selected = selectedNode_ && *selectedNode_ == nodeIndex;
+        const bool selected=selectedNodes_.count(nodeIndex)!=0;
         glLineWidth(selected ? 3.0f : 1.5f);
         if (node.light && options_.previewLights) drawLightGlyph(*node.light, scale);
         if (node.emitter && options_.previewEmitters)

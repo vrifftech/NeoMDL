@@ -154,6 +154,9 @@ enum CommandId {
     ID_Grid,
     ID_Axes,
     ID_ShowHidden,
+    ID_IsolateMeshes,
+    ID_HideMeshes,
+    ID_ShowAllMeshes,
     ID_CullBackfaces,
     ID_DanglySimulation,
     ID_NodeHelpers,
@@ -405,7 +408,7 @@ public:
         auto* inspector = new wxSplitterWindow(splitter_, wxID_ANY, wxDefaultPosition, wxDefaultSize,
                                                wxSP_LIVE_UPDATE | wxSP_3D);
         tree_ = new wxTreeCtrl(inspector, wxID_ANY, wxDefaultPosition, wxDefaultSize,
-                               wxTR_HAS_BUTTONS | wxTR_LINES_AT_ROOT | wxTR_SINGLE |
+                               wxTR_HAS_BUTTONS | wxTR_LINES_AT_ROOT | wxTR_MULTIPLE |
                                    wxTR_HIDE_ROOT);
         auto* detailsPanel = new wxPanel(inspector);
         auto* detailsLayout = new wxBoxSizer(wxVERTICAL);
@@ -514,18 +517,17 @@ public:
                 updateAnimationControls();
             });
         tree_->Bind(wxEVT_TREE_SEL_CHANGED, [this](wxTreeEvent& event) {
-            auto* data = dynamic_cast<NodeItemData*>(tree_->GetItemData(event.GetItem()));
-            selectedNode_ = data ? std::optional<std::size_t>(data->index) : std::nullopt;
-            canvas_->setSelectedNode(selectedNode_);
-            updateDetails(selectedNode_);
-            updateEditingControls();
-            changed_();
+            updateSelection(event.GetItem());
             event.Skip();
         });
         canvas_->Bind(EVT_MODEL_NODE_PICKED, [this](wxCommandEvent& event) {
-            const auto item = event.GetInt() < 0 ? tree_->GetRootItem() : nodeItems_[event.GetInt()];
-            tree_->SelectItem(item);
-            tree_->EnsureVisible(item);
+            if (!event.GetExtraLong()) tree_->UnselectAll();
+            if (event.GetInt()>=0) {
+                const auto item=nodeItems_[event.GetInt()];
+                tree_->SelectItem(item,!event.GetExtraLong() || !tree_->IsSelected(item));
+                tree_->EnsureVisible(item);
+            }
+            updateSelection(event.GetInt()<0 ? wxTreeItemId{} : nodeItems_[event.GetInt()]);
         });
         animationChoice_->Bind(wxEVT_CHOICE, [this](wxCommandEvent&) {
             if (advancedAnimation_->IsCollapsed()) previewSelectedAnimation();
@@ -666,14 +668,38 @@ public:
     std::size_t selectedPackedOffset() const {
         return *document_->model().nodes[*selectedNode_].packedOffset;
     }
+    std::set<std::size_t> selectedPackedOffsets(bool meshesOnly=false) const {
+        std::set<std::size_t> offsets;
+        for (const auto index : selectedNodes_) {
+            const auto& node=document_->model().nodes[index];
+            if (!meshesOnly || node.mesh) offsets.insert(*node.packedOffset);
+        }
+        return offsets;
+    }
+    void selectPackedNodes(const std::set<std::size_t>& offsets,std::optional<std::size_t> primary) {
+        tree_->UnselectAll();
+        for (std::size_t i=0;i<document_->model().nodes.size();++i)
+            if (offsets.count(*document_->model().nodes[i].packedOffset) && document_->model().nodes[i].packedOffset!=primary)
+                tree_->SelectItem(nodeItems_[i]);
+        if (primary) selectPackedNode(*primary);
+    }
     void selectPackedNode(std::size_t offset) {
         for (std::size_t i=0;i<document_->model().nodes.size();++i)
             if (document_->model().nodes[i].packedOffset==offset) {
                 tree_->SelectItem(nodeItems_[i]);
                 tree_->EnsureVisible(nodeItems_[i]);
+                updateSelection(nodeItems_[i]);
                 break;
             }
     }
+    bool hasSelectedMeshes() const {
+        return std::any_of(selectedNodes_.begin(),selectedNodes_.end(),
+            [&](auto index) {return document_->model().nodes[index].mesh || document_->model().nodes[index].reference;});
+    }
+    void hideSelectedMeshes() {canvas_->hideSelectedMeshes();}
+    void isolateSelectedMeshes(bool enabled) {canvas_->isolateSelectedMeshes(enabled);}
+    void showAllMeshes() {canvas_->showAllMeshes();}
+    bool meshesIsolated() const {return canvas_->meshesIsolated();}
     void editSelectedNode() {
         const auto sourceIndex = document_->model().partSourceNodes[*selectedNode_];
         asciiEditor_->editNode(document_->sourceModel(), sourceIndex);
@@ -970,6 +996,7 @@ private:
         stopPlayback();
         eventLog_.clear();
         selectedNode_.reset();
+        selectedNodes_.clear();
         populateTree();
         for (std::size_t i = 0; i < document_->model().nodes.size(); ++i)
             if (selectionIdentity ? document_->model().nodes[i].asciiIdentity == selectionIdentity :
@@ -1305,6 +1332,19 @@ private:
         return item;
     }
 
+    void updateSelection(wxTreeItemId primary) {
+        selectedNodes_.clear();selectedNode_.reset();wxArrayTreeItemIds selected;
+        tree_->GetSelections(selected);
+        for (const auto& item : selected) {
+            const auto index=static_cast<NodeItemData*>(tree_->GetItemData(item))->index;
+            selectedNodes_.insert(index);
+            if (item==primary) selectedNode_=index;
+        }
+        if (!selectedNode_ && !selectedNodes_.empty()) selectedNode_=*selectedNodes_.begin();
+        canvas_->setSelectedNodes(selectedNodes_);
+        updateDetails(selectedNode_);updateEditingControls();changed_();
+    }
+
     void populateTree() {
         tree_->DeleteAllItems();
         nodeItems_.resize(document_->model().nodes.size());
@@ -1331,6 +1371,7 @@ private:
             updateDetailedDiagnostics(selected);
         } else {
             std::ostringstream text;
+            if (selectedNodes_.size()>1) text<<selectedNodes_.size()<<" nodes selected\n\n";
             if (selected) {
                 const auto& node = document_->model().nodes[*selected];
                 text << node.name << "\n" << model::nodeFlagsText(node.flags) << "\n\n"
@@ -1355,7 +1396,7 @@ private:
                 text << "Resources from: model directory\n"
                      << "Choose a game installation in Tools > Model Resource Installation.\n";
             if (document_->hasModelOwner() && !document_->sourceModel().asciiBuilt)
-                text << "ASCII is generated automatically for editing and compilation.\n";
+                text << "Generate ASCII in the editor when needed.\n";
             if (const auto animation = selectedAnimation()) {
                 const auto& clip = document_->animation(*animation);
                 text << "\nSelected animation: " << clip.name << "\nLength: " << clip.length << " s\n"
@@ -1946,6 +1987,7 @@ private:
     std::chrono::steady_clock::time_point lastTick_{};
     std::vector<std::string> eventLog_;
     std::optional<std::size_t> selectedNode_;
+    std::set<std::size_t> selectedNodes_;
     bool playing_{};
     unsigned loadingSuspensions_{};
     std::shared_ptr<GameResourceSession> resourceSession_;
@@ -2132,9 +2174,11 @@ private:
         auto* page=activePage();
         const bool selected=page && (initialPage==BinaryMeshPage::Transform ? page->canEditBinaryNode() : page->canEditBinaryMesh());
         const auto offset=selected ? std::optional<std::size_t>{page->selectedPackedOffset()} : std::nullopt;
+        const auto offsets=selected ? page->selectedPackedOffsets() : std::set<std::size_t>{};
         const auto saved=editBinaryMeshFields(this,
             [this](const wxString& title,const auto& work) {return runJob(title,work);},
-            selected ? page->document().path() : std::filesystem::path{},offset,initialPage);
+            selected ? page->document().path() : std::filesystem::path{},offset,initialPage,
+            selected ? page->selectedPackedOffsets(true) : std::set<std::size_t>{});
         if (!saved) return;
         auto document=std::make_unique<ModelDocument>();
         const auto resources=selected ? page->document().resourceResolver() : captureHostResolver();
@@ -2143,7 +2187,7 @@ private:
         })) return;
         const auto session=selected ? page->resourceSession() : std::shared_ptr<GameResourceSession>{};
         addDocument(std::move(document),session,resources,selected ? page : nullptr);
-        if (offset) activePage()->selectPackedNode(*offset);
+        if (offset) activePage()->selectPackedNodes(offsets,offset);
     }
 
     void reloadModel(ResourceResolver resources, std::shared_ptr<GameResourceSession> session) {
@@ -4171,6 +4215,10 @@ private:
         view->AppendCheckItem(ID_Grid, "Show &Grid");
         view->AppendCheckItem(ID_Axes, "Show &Axes");
         auto* inspection = new wxMenu;
+        inspection->AppendCheckItem(ID_IsolateMeshes,"Isolate Selected Meshes","Temporarily show only the selected meshes in this viewport.");
+        inspection->Append(ID_HideMeshes,"Hide Selected Meshes","Temporarily hide the selected meshes in this viewport.");
+        inspection->Append(ID_ShowAllMeshes,"Show All Meshes","Clear temporary mesh hiding and isolation.");
+        inspection->AppendSeparator();
         inspection->AppendCheckItem(ID_ShowHidden, "Show Meshes with Render Flag Off");
         inspection->AppendCheckItem(ID_NodeHelpers, "Node Helpers");
         if (features & PreviewCameras) inspection->AppendCheckItem(ID_ShowCameras, "Camera Markers");
@@ -4312,6 +4360,7 @@ private:
         setCheck(ID_Grid, options_.grid.value_or(standalone));
         setCheck(ID_Axes, options_.axes.value_or(standalone));
         setCheck(ID_ShowHidden, options_.showHidden);
+        setCheck(ID_IsolateMeshes,active&&active->meshesIsolated());
         setCheck(ID_CullBackfaces, options_.cullBackfaces);
         setCheck(ID_DanglySimulation, options_.danglySimulation);
         setCheck(ID_NodeHelpers, options_.nodeHelpers);
@@ -5648,6 +5697,9 @@ private:
             case ID_Grid: options_.grid = event.IsChecked(); applyDisplayOptions(); return;
             case ID_Axes: options_.axes = event.IsChecked(); applyDisplayOptions(); return;
             case ID_ShowHidden: options_.showHidden = event.IsChecked(); applyDisplayOptions(); return;
+            case ID_IsolateMeshes: activePage()->isolateSelectedMeshes(event.IsChecked());updateState();return;
+            case ID_HideMeshes: activePage()->hideSelectedMeshes();updateState();return;
+            case ID_ShowAllMeshes: activePage()->showAllMeshes();updateState();return;
             case ID_CullBackfaces: options_.cullBackfaces = event.IsChecked(); applyDisplayOptions(); return;
             case ID_DanglySimulation:
                 options_.danglySimulation = event.IsChecked(); applyDisplayOptions(); return;
@@ -5691,7 +5743,8 @@ private:
                 return;
             case ID_CameraControls:
                 wxMessageBox(
-                    "Left click: select a mesh; click empty space to clear selection\n\n"
+                    "Left click: select a mesh; Shift-click: add or remove a mesh\n"
+                    "Click empty space to clear selection\n\n"
                     "Orbit\n"
                     "  Left drag: rotate around the pivot\n"
                     "  Right or middle drag: pan\n"
@@ -5771,6 +5824,9 @@ private:
         enableModuleCommand(ID_RenameTexture,editor&&editor->previewCurrent()&&!area);
         enableModuleCommand(ID_ExportTextures,editor&&editor->previewCurrent()&&!area);
         const bool modelPreview = active && active->document().hasModelOwner() && !area;
+        enableModuleCommand(ID_IsolateMeshes,modelPreview&&(active->hasSelectedMeshes()||active->meshesIsolated()));
+        enableModuleCommand(ID_HideMeshes,modelPreview&&active->hasSelectedMeshes());
+        enableModuleCommand(ID_ShowAllMeshes,modelPreview);
         enableModuleCommand(ID_LoadTextureOverride, modelPreview);
         enableModuleCommand(ID_ClearTextureOverride, modelPreview && active->document().textureOverride());
         enableModuleCommand(ID_ResourceProvenance,hasDocument);

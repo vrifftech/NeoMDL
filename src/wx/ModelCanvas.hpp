@@ -38,6 +38,7 @@
 #include <memory>
 #include <map>
 #include <optional>
+#include <set>
 #include <string>
 #include <unordered_map>
 #include <vector>
@@ -359,7 +360,11 @@ public:
     void stopLipSync(std::optional<std::size_t> instance);
     void setOptions(RenderOptions options);
     const RenderOptions& options() const noexcept { return options_; }
-    void setSelectedNode(std::optional<std::size_t> index);
+    void setSelectedNodes(std::set<std::size_t> nodes);
+    void hideSelectedMeshes();
+    void isolateSelectedMeshes(bool enabled);
+    void showAllMeshes();
+    bool meshesIsolated() const noexcept {return isolatedNodes_.has_value();}
     // Compatibility single-run entry point used by hosts that only need the
     // historical animation picker. The K2 run API below exposes the recovered
     // Gob/AnimRun priority list directly.
@@ -641,7 +646,10 @@ private:
     std::uint32_t forceSightMilliseconds_{};
     std::size_t distortionProducerCount_{};
     std::map<std::pair<std::size_t,std::size_t>,float> textureAngles_;
-    std::optional<std::size_t> selectedNode_;
+    std::set<std::size_t> selectedNodes_,hiddenNodes_;
+    std::optional<std::set<std::size_t>> isolatedNodes_;
+    bool meshVisible(std::size_t node) const;
+    std::size_t referenceSelectionNode(std::size_t reference) const;
     neomdl::model::AnimationRuntime animationRuntime_;
     SceneAnimationOwner mainAnimationOwner_;
     bool inspectionAnimationsAdvancing_{true};
@@ -694,6 +702,7 @@ private:
         wxPoint position;
         float depth{};
         std::optional<std::size_t> node;
+        bool additive{};
     };
     std::optional<MeshPick> meshPick_;
     bool freeFly_{};

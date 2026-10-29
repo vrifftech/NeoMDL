@@ -17,6 +17,7 @@ struct BinaryMeshEdit {
     std::array<std::optional<std::string>,2> textures;
     // Common mesh header bytes +308..+313, in stored order.
     std::array<std::optional<bool>,6> flags;
+    std::map<std::size_t,std::vector<std::uint8_t>> headerFields;
     std::optional<bool> tangentBasis;
     bool regenerateTangents{};
     std::set<std::size_t> positionRows;
