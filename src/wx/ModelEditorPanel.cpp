@@ -2400,15 +2400,12 @@ private:
         if (containingOnly) {
             auto directory = neogames::normalizeConfiguredPath(modelPath).parent_path();
             while (!directory.empty()) {
-                if (neogames::isValidGameInstallation(*definition, directory)) {
-                    selected = neoshared::game::inspectGameInstallation(
-                        directory, gameId, "Opened resource");
-                    if (selected) {
-                        for (const auto& saved : neogames::resolver().settings().readSaved(*definition)) {
-                            if (neoshared::sameResourcePath(saved.installPath, selected->installPath)) {
-                                selected = saved;
-                                break;
-                            }
+                selected = neoshared::game::inspectGameInstallation(directory, gameId, "Opened resource");
+                if (selected) {
+                    for (const auto& saved : neogames::resolver().settings().readSaved(*definition)) {
+                        if (neoshared::sameResourcePath(saved.installPath, selected->installPath)) {
+                            selected = saved;
+                            break;
                         }
                     }
                     break;

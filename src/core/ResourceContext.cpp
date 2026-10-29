@@ -4,11 +4,14 @@
 #include <algorithm>
 #include <cctype>
 #include <fstream>
+#include <map>
 #include <stdexcept>
 
 namespace neomdl {
 namespace {
 thread_local const neoshared::bif::JobControl* activeLoadJob{};
+using DirectoryFiles=std::map<std::string,std::vector<std::filesystem::directory_entry>>;
+thread_local std::map<std::filesystem::path,DirectoryFiles> loadDirectories;
 std::string lowerResourceName(std::string value) {
     for(auto& c:value) if(c>='A'&&c<='Z') c=char(c+('a'-'A'));
     return value;
@@ -23,14 +26,17 @@ ResourceLoadScope::ResourceLoadScope(const neoshared::bif::JobControl& job)
     // Texture codecs and chunked file reads already cooperate through this
     // shared operation hook. Nested loads inherit the bridge and supply their
     // current JobControl without keeping a UI callback in a decoded document.
-    if(!previous_)
+    // A new load phase refreshes names, including successive batch conversions.
+    loadDirectories.clear();
+    if(!previous_) {
         textureOperation_.emplace([prior=neoshared::texture::operationCheckpoint] {
             if(prior)prior();
             resourceLoadJob().check();
         });
+    }
     activeLoadJob=&job_;
 }
-ResourceLoadScope::~ResourceLoadScope() {activeLoadJob=previous_;}
+ResourceLoadScope::~ResourceLoadScope() {activeLoadJob=previous_;if(!previous_)loadDirectories.clear();}
 std::string resourceKey(const std::string& name) {
     if (name.empty() || name.find_first_of("/\\:\r\n")!=std::string::npos ||
         name=="." || name==".." || name.find('\0')!=std::string::npos)
@@ -41,13 +47,31 @@ std::optional<std::filesystem::path> uniqueResourceFile(
     const std::filesystem::path& directory,const std::string& filename) {
     const auto wanted=lowerResourceName(filename);
     std::optional<std::filesystem::path> selected;
+    const auto match=[&](const std::filesystem::directory_entry& entry) {
+        if(!entry.is_regular_file())return;
+        if(selected)throw std::runtime_error("Ambiguous resource in "+neoshared::pathToUtf8(directory)+": "+wanted);
+        selected=entry.path();
+    };
+    if(activeLoadJob) {
+        const auto root=std::filesystem::absolute(directory).lexically_normal();
+        auto found=loadDirectories.find(root);
+        if(found==loadDirectories.end()) {
+            DirectoryFiles files;
+            for(const auto& entry:std::filesystem::directory_iterator(root)) {
+                resourceLoadJob().check();
+                files[lowerResourceName(neoshared::pathToUtf8(entry.path().filename()))].push_back(entry);
+            }
+            found=loadDirectories.emplace(root,std::move(files)).first;
+        }
+        const auto file=found->second.find(wanted);
+        if(file!=found->second.end())for(const auto& entry:file->second)match(entry);
+        return selected;
+    }
     std::error_code error;
     for(std::filesystem::directory_iterator it(directory,error),end;!error&&it!=end;it.increment(error)) {
         resourceLoadJob().check();
         if(lowerResourceName(neoshared::pathToUtf8(it->path().filename()))!=wanted) continue;
-        if(!it->is_regular_file()) continue;
-        if(selected) throw std::runtime_error("Ambiguous resource in "+neoshared::pathToUtf8(directory)+": "+wanted);
-        selected=it->path();
+        match(*it);
     }
     if(error) throw std::runtime_error("Resource directory: "+error.message());
     return selected;
@@ -68,8 +92,12 @@ std::string resourceFileIdentity(const std::filesystem::path& path) {
     return "neomdl:file:"+neoshared::genericPathToUtf8(std::filesystem::weakly_canonical(path));
 }
 std::vector<std::uint8_t> readResourceFile(const std::filesystem::path& path) {
-    std::ifstream in(path,std::ios::binary|std::ios::ate);
+    std::ifstream in(path,std::ios::binary);
     if(!in) throw std::runtime_error("Unable to open file: "+neoshared::pathToUtf8(path));
+    return readResourceStream(in,path);
+}
+std::vector<std::uint8_t> readResourceStream(std::istream& in,const std::filesystem::path& path) {
+    in.seekg(0,std::ios::end);
     const auto end=in.tellg();
     if(end<0) throw std::runtime_error("Unable to size file: "+neoshared::pathToUtf8(path));
     std::vector<std::uint8_t> bytes;

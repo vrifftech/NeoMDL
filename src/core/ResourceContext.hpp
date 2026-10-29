@@ -5,6 +5,7 @@
 #include <neoshared/texture/Operation.hpp>
 #include <filesystem>
 #include <functional>
+#include <iosfwd>
 #include <memory>
 #include <mutex>
 #include <set>
@@ -71,6 +72,7 @@ std::optional<std::filesystem::path> uniqueResourceDirectory(
     const std::filesystem::path& directory, const std::string& name);
 std::string resourceFileIdentity(const std::filesystem::path& path);
 std::vector<std::uint8_t> readResourceFile(const std::filesystem::path& path);
+std::vector<std::uint8_t> readResourceStream(std::istream& input,const std::filesystem::path& path);
 std::string resourceKey(const std::string& name);
 std::string resourceExtension(std::uint16_t type);
 

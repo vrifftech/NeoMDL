@@ -65,7 +65,7 @@ struct Mount {
         if(!catalog.openFiles(root,paths,job,neoshared::bif::GameProfile::KotOR))
             throw std::runtime_error(catalog.lastError());
         std::map<std::string,const neoshared::bif::LooseArchiveInfo*> archives;
-        for(const auto& archive:catalog.archives()) archives.emplace(pathIdentity(archive.resolvedPath),&archive);
+        for(const auto& archive:catalog.archives()) archives.emplace(neoshared::genericPathToUtf8(archive.resolvedPath),&archive);
         for(const auto& path:paths) {
             job.update(indices.size(),paths.size(),"Indexing mounted resources: "+neoshared::pathToUtf8(path));
             const auto a=archives.find(neoshared::genericPathToUtf8(path));
@@ -175,8 +175,7 @@ bool GameResourceSession::open(const neoshared::game::GameInstall& supplied,std:
         if(!id||(*id!=neoshared::game::GameId::Kotor1&&*id!=neoshared::game::GameId::Kotor2))
             throw std::runtime_error("Resource sessions require a KotOR/KotOR II installation");
         const auto* definition=neoshared::game::findGame(*id);
-        if(!definition||!neoshared::game::isValidGameInstallation(*definition,supplied.installPath))
-            throw std::runtime_error("The selected game directory is not a validated installation");
+        if(!definition)throw std::runtime_error("Unknown game definition");
         auto next=std::make_shared<State>();next->base=std::make_shared<InstallationState>();
         auto& b=*next->base;b.installation=supplied;
         b.game=*id==neoshared::game::GameId::Kotor1?model::GameVersion::Kotor1:model::GameVersion::Kotor2;
@@ -233,12 +232,12 @@ bool GameResourceSession::open(const neoshared::game::GameInstall& supplied,std:
         // A separately configured viewer directory keeps its pre-existing
         // precedence. The normal installation Override is already discovered
         // and does not move ahead of the shared INI/numbered-alias sequence.
-        if(neoshared::game::isDirectoryPath(b.installation.overridePath) &&
-           std::none_of(aliases.begin(),aliases.end(),[&](const auto& root) {
-               return pathIdentity(root.path)==pathIdentity(b.installation.overridePath);
-           })) {
-            aliases.insert(aliases.begin(),{"CONFIGURED OVERRIDE",b.installation.overridePath,{},0,false});
-            for(std::size_t n=0;n<aliases.size();++n)aliases[n].precedence=n;
+        if(neoshared::game::isDirectoryPath(b.installation.overridePath)) {
+            const auto configured=pathIdentity(b.installation.overridePath);
+            if(std::none_of(aliases.begin(),aliases.end(),[&](const auto& root){return pathIdentity(root.path)==configured;})) {
+                aliases.insert(aliases.begin(),{"CONFIGURED OVERRIDE",b.installation.overridePath,{},0,false});
+                for(std::size_t n=0;n<aliases.size();++n)aliases[n].precedence=n;
+            }
         }
         b.overrides.openOverrides(b.root,aliases,job);
         b.overrideRoots=std::move(aliases);
@@ -281,7 +280,7 @@ bool GameResourceSession::openModule(const GameResourceSession& source,const Mod
         next->mount.open(next->base->root,scope.archives,job);
         next->module->archives=next->mount.paths;
         next->identity="neomdl:module:"+component(next->base->identity)+component(lower(scope.name));
-        for(const auto& p:next->mount.paths) next->identity+=component(pathIdentity(p));
+        for(const auto& p:next->mount.paths) next->identity+=component(neoshared::genericPathToUtf8(p));
         next->diagnostics=next->base->diagnostics;
         next->diagnostics.push_back("Active module: "+scope.name+" (immutable resolver snapshot)");
         job.update(1,1,"Module ready: "+scope.name);
@@ -386,19 +385,22 @@ ResourceResolver GameResourceSession::voiceResolver() const {
             const auto index=found->second.front();
             const auto& item=voices.mount.catalog.resources().at(index);
             // InitializeSource tries the next engine path when fopen fails.
-            std::ifstream probe(item.directPath,std::ios::binary);
-            if(!probe) return {};
-            probe.close();
-            auto result=neoshared::bif::readResourceDocument(b.key,voices.mount.catalog,
-                {neoshared::bif::ResourceSource::LooseArchive,index},job);
+            std::ifstream input(item.directPath,std::ios::binary);
+            if(!input) return {};
             const auto& owner=voices.mount.catalog.archives().at(item.archiveIndex);
-            result.identity=state->identity+component("voice")+component(result.identity);
-            result.sourceDescription="[engine voice / "+owner.overrideAlias+"] "+result.sourceDescription;
+            neoshared::ResourceDocument result;
+            result.fileName=item.fileName();result.type=item.type;job.update(0,item.size,"Reading "+result.fileName);result.bytes=readResourceStream(input,item.directPath);
+            job.update(result.bytes.size(),result.bytes.size(),"Read "+result.fileName);
+            result.identity=state->identity+component("voice")+component(owner.overrideAlias)+component(neoshared::genericPathToUtf8(item.directPath));
+            result.sourceDescription="[engine voice / "+owner.overrideAlias+"] "+neoshared::genericPathToUtf8(item.directPath);
+            result.protectedInputs={b.key.keyPath(),owner.resolvedPath,item.directPath};
+            if(!owner.overrideIniPath.empty())result.protectedInputs.push_back(owner.overrideIniPath);
             return result;
         };
+        std::size_t wavRoot=0;
         const auto wav=[&]() ->std::optional<neoshared::ResourceDocument> {
             for(std::size_t n=1;n<=overrideCount;++n)
-                if(auto result=read(n,".wav")) return result;
+                if(auto result=read(n,".wav")) {wavRoot=n;return result;}
             return read(0,".wav");
         };
         if(type==4) return wav();
@@ -406,14 +408,10 @@ ResourceResolver GameResourceSession::voiceResolver() const {
             // The desktop compressed-voice request opens the base WAV stream.
             return read(0,".wav");
         }
-
-
-
-
         auto first=wav();
-        if(first && first->bytes.size()>=4u &&
-            std::equal(first->bytes.begin(),first->bytes.begin()+4,"RIFF")) return first;
-        if(auto base=read(0,".wav")) return base;
+        if(first && (wavRoot==0 || (first->bytes.size()>=4u &&
+            std::equal(first->bytes.begin(),first->bytes.begin()+4,"RIFF")))) return first;
+        if(wavRoot!=0)if(auto base=read(0,".wav"))return base;
         for(std::size_t n=1;n<=overrideCount;++n)
             if(auto result=read(n,".mp3")) return result;
         return {};

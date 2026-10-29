@@ -265,12 +265,17 @@ ConversionReport convertFile(const ConversionRequest& request, const ConversionO
     auto inputs = conversionInputs(request);
     inputs.insert(inputs.end(), batchInputs.begin(), batchInputs.end());
     if (options.layout) inputs.push_back(*options.layout);
+    std::sort(inputs.begin(),inputs.end());inputs.erase(std::unique(inputs.begin(),inputs.end()),inputs.end());
     const bool exporting = request.asciiOutput || request.packedOutput;
     if (exporting) neoshared::checkResourceOutput(conversionReportPath(request), inputs);
+    const auto checkedReportInputs=inputs;
     try {
         auto outputs = buildConversion(request, options, report, inputs, job);
+        std::sort(inputs.begin(),inputs.end());inputs.erase(std::unique(inputs.begin(),inputs.end()),inputs.end());
         if (exporting) {
-            neoshared::checkResourceOutput(conversionReportPath(request), inputs);
+            std::vector<std::filesystem::path> discovered;
+            std::set_difference(inputs.begin(),inputs.end(),checkedReportInputs.begin(),checkedReportInputs.end(),std::back_inserter(discovered));
+            neoshared::checkResourceOutput(conversionReportPath(request), discovered);
             inputs.push_back(conversionReportPath(request));
         }
         for (const auto& output : outputs) {
