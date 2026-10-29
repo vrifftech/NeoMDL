@@ -60,6 +60,21 @@ public:
 };
 wxDECLARE_EVENT(EVT_AREA_GIZMO, AreaGizmoEvent);
 
+struct AreaSnapSettings {float grid{},rotation{};bool walkmesh{};};
+enum class AreaMarkerKind {Waypoint, Sound, Camera, Entry};
+struct AreaEditorMarker {std::string path;AreaMarkerKind kind;model::Vec3 position;};
+wxDECLARE_EVENT(EVT_AREA_MARKER_PICKED, wxCommandEvent);
+class AreaPolygonEvent : public wxCommandEvent {
+public:
+    using wxCommandEvent::wxCommandEvent;
+    wxEvent* Clone() const override {return new AreaPolygonEvent(*this);}
+    AreaGizmoPhase phase{AreaGizmoPhase::Preview};
+    std::vector<model::Vec3> points;
+    int vertex{-1};
+    bool drawing{};
+};
+wxDECLARE_EVENT(EVT_AREA_POLYGON, AreaPolygonEvent);
+
 std::string triggerDetectionReport(const TriggerDetectionResult&);
 
 struct DialogueActorAnimation {
@@ -382,6 +397,18 @@ public:
     void cancelAreaGizmo();
     void previewAreaTrigger(std::size_t sourceIndex,model::Vec3 position,float headingDelta);
     void previewAreaCamera(std::size_t sourceIndex,model::Vec3 position);
+    void setAreaSnapping(AreaSnapSettings settings) {areaSnap_=settings;}
+    std::optional<model::Vec3> snappedAreaPoint(model::Vec3 position,bool snapZ=true) const;
+    float snappedAreaHeading(float heading) const;
+    void setAreaMarkers(std::vector<AreaEditorMarker> markers,std::string selected);
+    void moveAreaMarker(const std::string& path,model::Vec3 position);
+    void setAreaPolygon(std::vector<model::Vec3> points,bool vertices);
+    void beginAreaPolygon(std::optional<float> planeZ={},float zOffset=0.0f);
+    bool areaPolygonDrawing() const noexcept {return polygonDrawing_;}
+    bool areaPolygonDragging() const noexcept {return polygonDrag_.has_value();}
+    void finishAreaPolygon();
+    void cancelAreaPolygon();
+    void previewAreaTriggerGeometry(std::size_t sourceIndex,const std::vector<model::Vec3>& points);
     void hideSelectedMeshes();
     void isolateSelectedMeshes(bool enabled);
     void showAllMeshes();
@@ -557,6 +584,10 @@ private:
     void drawMeshProjectionInspection();
     void drawGridAndAxes();
     void drawAreaGizmo();
+    void drawAreaEditorOverlay();
+    bool handleAreaPolygon(wxMouseEvent& event);
+    void emitAreaPolygon(AreaGizmoPhase phase,bool drawing,int vertex=-1);
+    std::optional<std::string> pickAreaMarker(wxPoint position) const;
     bool handleAreaGizmo(wxMouseEvent& event);
     model::Vec3 gizmoScreenPoint(model::Vec3 position) const;
     std::optional<model::Vec3> gizmoConstraint(wxPoint position,int handle,model::Vec3 origin) const;
@@ -746,6 +777,15 @@ private:
         float heading{},angle{},rotation{};
     };
     std::optional<GizmoDrag> gizmoDrag_;
+    AreaSnapSettings areaSnap_;
+    std::vector<AreaEditorMarker> areaMarkers_;
+    std::string selectedAreaMarker_;
+    std::vector<model::Vec3> polygonPoints_;
+    bool polygonVertices_{},polygonDrawing_{};
+    std::optional<float> polygonPlaneZ_;
+    float polygonZOffset_{};
+    struct PolygonDrag {std::size_t vertex;model::Vec3 position;};
+    std::optional<PolygonDrag> polygonDrag_;
     bool freeFly_{};
     std::array<bool, 6> flyMovement_{};
     std::chrono::steady_clock::time_point cameraTick_{std::chrono::steady_clock::now()};

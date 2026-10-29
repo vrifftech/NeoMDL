@@ -1080,6 +1080,40 @@ std::optional<LightRoomId> AreaScene::findRoomAt(model::Vec3 position,bool allSu
         if(entry.walkmesh&&engineRoomContainsPoint(*entry.walkmesh,position,mask))return entry.id;
     return {};
 }
+std::optional<model::Vec3> AreaScene::walkmeshHit(model::Vec3 start,model::Vec3 end) const {
+    const auto materials=walkableMaterials_.value();
+    RoomSurfaceHitInfo hit;bool found=false;
+    for(const auto& room:rooms_)if(room.walkmesh) {
+        hit.clearOutput();
+        if(engineRoomHitWalkable(*room.walkmesh,start,end,hit,materials)) {end=hit.position;found=true;}
+    }
+    return found?std::optional<model::Vec3>{end}:std::nullopt;
+}
+std::optional<model::Vec3> AreaScene::nearestWalkmeshPoint(model::Vec3 position) const {
+    const auto materials=walkableMaterials_.value();
+    float distance=std::numeric_limits<float>::max();std::optional<model::Vec3> result;
+    for(const auto& room:rooms_)if(room.walkmesh) {
+        const auto& mesh=*room.walkmesh;std::vector<std::int32_t> pending;
+        if(!mesh.nodes.empty())pending.push_back(mesh.root);
+        while(!pending.empty()) {
+            const auto& node=mesh.nodes.at(pending.back());pending.pop_back();
+            if(position.x<node.minimum[0]||position.x>node.maximum[0]||position.y<node.minimum[1]||position.y>node.maximum[1])continue;
+            if(node.face==-1) {pending.push_back(node.firstChild);pending.push_back(node.secondChild);continue;}
+            const auto& face=mesh.faces.at(node.face);
+            if(!(materials&(1u<<(face.material&31u))))continue;
+            const auto z=engineRoomFaceHeight(mesh,node.face,position);
+            std::array<model::Vec3,3> triangle;
+            for(std::size_t i=0;i<3;++i) {
+                const auto& vertex=mesh.vertices.at(face.vertices[i]);triangle[i]={vertex[0],vertex[1],vertex[2]};
+            }
+            model::Vec3 end{position.x,position.y,z-1.0f};
+            if(engineHitTriangle(triangle,{position.x,position.y,z+1.0f},end)&&std::abs(end.z-position.z)<distance) {
+                distance=std::abs(end.z-position.z);result=end;
+            }
+        }
+    }
+    return result;
+}
 void AreaScene::synchronizeCurrentRoom() {
     if(currentRoomOverride_)return;
     const auto replay=environment_.replayCurrentRoom();

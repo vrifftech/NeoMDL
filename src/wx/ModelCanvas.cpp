@@ -51,6 +51,8 @@ namespace neomdl::ui {
 wxDEFINE_EVENT(EVT_MODEL_NODE_PICKED, wxCommandEvent);
 wxDEFINE_EVENT(EVT_AREA_OWNER_PICKED, wxCommandEvent);
 wxDEFINE_EVENT(EVT_AREA_GIZMO, AreaGizmoEvent);
+wxDEFINE_EVENT(EVT_AREA_MARKER_PICKED, wxCommandEvent);
+wxDEFINE_EVENT(EVT_AREA_POLYGON, AreaPolygonEvent);
 
 namespace {
 struct DetectionCaptureExhausted : std::runtime_error {
@@ -457,6 +459,7 @@ ModelCanvas::ModelCanvas(wxWindow* parent)
     Bind(wxEVT_SIZE, &ModelCanvas::onSize, this);
     Bind(wxEVT_ERASE_BACKGROUND, &ModelCanvas::onErase, this);
     Bind(wxEVT_LEFT_DOWN, &ModelCanvas::onMouse, this);
+    Bind(wxEVT_LEFT_DCLICK, &ModelCanvas::onMouse, this);
     Bind(wxEVT_LEFT_UP, &ModelCanvas::onMouse, this);
     Bind(wxEVT_RIGHT_DOWN, &ModelCanvas::onMouse, this);
     Bind(wxEVT_RIGHT_UP, &ModelCanvas::onMouse, this);
@@ -560,6 +563,7 @@ void ModelCanvas::installArea(AreaScene pending,PreparedSceneAudioPlayback sound
     Refresh(false);
 }
 void ModelCanvas::clearArea() {
+    cancelAreaPolygon();polygonPoints_.clear();areaMarkers_.clear();
     cancelAreaGizmo();gizmoMode_=AreaGizmoMode::None;
     selectedAreaOwners_.clear();
     stopDialogue();
@@ -1838,6 +1842,7 @@ void ModelCanvas::refreshMaterials() {
 }
 
 void ModelCanvas::setDocument(const ModelDocument* document, bool preserveCamera) {
+    cancelAreaPolygon();polygonPoints_.clear();areaMarkers_.clear();
     cancelAreaGizmo();gizmoMode_=AreaGizmoMode::None;
     selectedAreaOwners_.clear();
     selectionStart_.reset();
@@ -3299,6 +3304,7 @@ void ModelCanvas::previewAreaTrigger(std::size_t sourceIndex,model::Vec3 positio
                 position.y+x*std::sin(angle)+y*std::cos(angle),position.z+point.z-record.position.z};
         }
         record.position=position;
+        setAreaPolygon(record.worldFootprint,polygonVertices_);
         if(record.runtimeInstance) {
             const auto heading=std::atan2(-record.orientation.x,record.orientation.y)+angle;
             setSceneOwnerWorld(*record.runtimeInstance,gitBearingTransform(position,heading));
@@ -3315,6 +3321,162 @@ void ModelCanvas::previewAreaCamera(std::size_t sourceIndex,model::Vec3 position
     std::string error;
     if(!cameraScene_.setAreaCameras(records,error))throw std::runtime_error(error);
     Refresh(false);
+}
+
+std::optional<model::Vec3> ModelCanvas::snappedAreaPoint(model::Vec3 position,bool snapZ) const {
+    if(areaSnap_.grid>0.0f) {
+        position.x=std::round(position.x/areaSnap_.grid)*areaSnap_.grid;
+        position.y=std::round(position.y/areaSnap_.grid)*areaSnap_.grid;
+        if(snapZ)position.z=std::round(position.z/areaSnap_.grid)*areaSnap_.grid;
+    }
+    return areaSnap_.walkmesh?areaScene_.nearestWalkmeshPoint(position):std::optional<model::Vec3>{position};
+}
+float ModelCanvas::snappedAreaHeading(float heading) const {
+    return areaSnap_.rotation>0.0f?std::round(heading/areaSnap_.rotation)*areaSnap_.rotation:heading;
+}
+void ModelCanvas::setAreaMarkers(std::vector<AreaEditorMarker> markers,std::string selected) {
+    areaMarkers_=std::move(markers);selectedAreaMarker_=std::move(selected);Refresh(false);
+}
+void ModelCanvas::moveAreaMarker(const std::string& path,model::Vec3 position) {
+    for(auto& marker:areaMarkers_)if(marker.path==path)marker.position=position;
+    Refresh(false);
+}
+std::optional<std::string> ModelCanvas::pickAreaMarker(wxPoint position) const {
+    float best=float(FromDIP(12)),depth=sceneFarClip_;std::optional<std::string> result;
+    for(const auto& marker:areaMarkers_) {
+        const auto p=gizmoScreenPoint(marker.position);
+        if(p.z<=pickingCamera_->nearClip||p.z>=sceneFarClip_)continue;
+        const auto distance=std::max(std::abs(p.x-position.x),std::abs(p.y-position.y));
+        if(distance<best||(distance==best&&p.z<depth)) {best=distance;depth=p.z;result=marker.path;}
+    }
+    return result;
+}
+void ModelCanvas::setAreaPolygon(std::vector<model::Vec3> points,bool vertices) {
+    if(polygonDrawing_||polygonDrag_)return;
+    polygonPoints_=std::move(points);polygonVertices_=vertices;Refresh(false);
+}
+void ModelCanvas::beginAreaPolygon(std::optional<float> planeZ,float zOffset) {
+    cancelAreaGizmo();cancelAreaPolygon();selectionStart_.reset();meshPick_.reset();resetCameraInput();
+    polygonPoints_.clear();polygonDrawing_=true;polygonPlaneZ_=planeZ;polygonZOffset_=zOffset;
+    SetFocus();emitAreaPolygon(AreaGizmoPhase::Begin,true);Refresh(false);
+}
+void ModelCanvas::emitAreaPolygon(AreaGizmoPhase phase,bool drawing,int vertex) {
+    AreaPolygonEvent event(EVT_AREA_POLYGON,GetId());event.SetEventObject(this);
+    event.phase=phase;event.points=polygonPoints_;event.vertex=vertex;event.drawing=drawing;ProcessWindowEvent(event);
+}
+void ModelCanvas::finishAreaPolygon() {
+    if(!polygonDrawing_||polygonPoints_.size()<3)return;
+    polygonDrawing_=false;emitAreaPolygon(AreaGizmoPhase::Commit,true);Refresh(false);
+}
+void ModelCanvas::cancelAreaPolygon() {
+    if(polygonDrag_) {
+        const auto drag=*polygonDrag_;polygonPoints_[drag.vertex]=drag.position;polygonDrag_.reset();
+        if(HasCapture())ReleaseMouse();
+        emitAreaPolygon(AreaGizmoPhase::Cancel,false,int(drag.vertex));
+    }
+    if(polygonDrawing_) {polygonDrawing_=false;polygonPoints_.clear();emitAreaPolygon(AreaGizmoPhase::Cancel,true);}
+    Refresh(false);
+}
+void ModelCanvas::previewAreaTriggerGeometry(std::size_t sourceIndex,const std::vector<model::Vec3>& points) {
+    auto records=areaScene_.triggers();
+    for(auto& record:records)if(record.sourceIndex==sourceIndex)record.worldFootprint=points;
+    std::string error;if(!triggerScene_.replaceAreaTriggers(records,error))throw std::runtime_error(error);
+    updateSceneBounds();Refresh(false);
+}
+bool ModelCanvas::handleAreaPolygon(wxMouseEvent& event) {
+    if(polygonDrawing_) {
+        if(event.RightDown()) {cancelAreaPolygon();return true;}
+        if(event.LeftDClick()) {finishAreaPolygon();return true;}
+        if(event.LeftDown()) {
+            if(polygonPoints_.size()>=3) {
+                const auto first=gizmoScreenPoint(polygonPoints_.front());
+                if(std::hypot(first.x-event.GetX(),first.y-event.GetY())<FromDIP(10)) {finishAreaPolygon();return true;}
+            }
+            auto point=areaPlacementPoint(event.GetPosition(),polygonPlaneZ_);
+            if(point)point=snappedAreaPoint(*point,false);
+            if(point) {point->z+=polygonZOffset_;polygonPoints_.push_back(*point);emitAreaPolygon(AreaGizmoPhase::Preview,true);Refresh(false);}
+            return true;
+        }
+        if(event.LeftUp())return true;
+        return false;
+    }
+    if(polygonDrag_) {
+        if(event.RightDown()) {cancelAreaPolygon();return true;}
+        if(event.Dragging()||event.LeftUp()) {
+            const auto drag=*polygonDrag_;
+            auto point=gizmoConstraint(event.GetPosition(),3,drag.position);
+            if(point)point=snappedAreaPoint(*point,false);
+            if(point) {polygonPoints_[drag.vertex]=*point;emitAreaPolygon(AreaGizmoPhase::Preview,false,int(drag.vertex));Refresh(false);}
+            if(!polygonDrag_)return true;
+            if(event.LeftUp()) {
+                if(!point)cancelAreaPolygon();
+                else {polygonDrag_.reset();if(HasCapture())ReleaseMouse();emitAreaPolygon(AreaGizmoPhase::Commit,false,int(drag.vertex));}
+            }
+        }
+        return true;
+    }
+    if(!polygonVertices_||!event.LeftDown()||event.ControlDown())return false;
+    float best=float(FromDIP(10));std::optional<std::size_t> vertex;
+    for(std::size_t i=0;i<polygonPoints_.size();++i) {
+        const auto p=gizmoScreenPoint(polygonPoints_[i]);
+        if(p.z<=pickingCamera_->nearClip)continue;
+        const auto distance=std::hypot(p.x-event.GetX(),p.y-event.GetY());
+        if(distance<best) {best=distance;vertex=i;}
+    }
+    if(!vertex)return false;
+    selectionStart_.reset();resetCameraInput();SetFocus();
+    polygonDrag_=PolygonDrag{*vertex,polygonPoints_[*vertex]};CaptureMouse();
+    emitAreaPolygon(AreaGizmoPhase::Begin,false,int(*vertex));return true;
+}
+
+void ModelCanvas::drawAreaEditorOverlay() {
+    if(areaMarkers_.empty()&&polygonPoints_.empty())return;
+    glPushAttrib(GL_ENABLE_BIT|GL_LINE_BIT|GL_POINT_BIT|GL_CURRENT_BIT|GL_DEPTH_BUFFER_BIT);
+    glDisable(GL_DEPTH_TEST);glDisable(GL_LIGHTING);glDisable(GL_TEXTURE_2D);glDisable(GL_BLEND);glDisable(GL_CULL_FACE);
+    glDepthMask(GL_FALSE);glLineWidth(2.0f*float(GetContentScaleFactor()));
+    glPushMatrix();glLoadMatrixf(cameraView_.values.data());
+    glColor3f(1.0f,0.75f,0.15f);glBegin(polygonDrawing_?GL_LINE_STRIP:GL_LINE_LOOP);
+    for(const auto& p:polygonPoints_)glVertex3f(p.x,p.y,p.z);
+    glEnd();
+    const auto size=GetClientSize();
+    glMatrixMode(GL_PROJECTION);glPushMatrix();glLoadIdentity();glOrtho(0,size.x,size.y,0,-1,1);
+    glMatrixMode(GL_MODELVIEW);glLoadIdentity();
+    for(const auto& marker:areaMarkers_) {
+        const auto p=gizmoScreenPoint(marker.position);
+        if(p.z<=pickingCamera_->nearClip||p.z>=sceneFarClip_)continue;
+        glPushMatrix();glTranslatef(p.x,p.y,0);const auto unit=float(FromDIP(12))/12.0f;glScalef(unit,unit,1);
+        glColor3f(0.05f,0.07f,0.09f);glBegin(GL_QUADS);
+        glVertex2f(-12,-12);glVertex2f(12,-12);glVertex2f(12,12);glVertex2f(-12,12);glEnd();
+        const float colors[4][3]={{0.25f,1,0.4f},{0.4f,0.8f,1},{0.8f,0.55f,1},{1,0.65f,0.2f}};
+        const auto& color=colors[static_cast<int>(marker.kind)];
+        if(marker.path==selectedAreaMarker_)glColor3f(1,0.85f,0.15f);else glColor3fv(color);
+        glBegin(GL_LINE_LOOP);glVertex2f(-12,-12);glVertex2f(12,-12);glVertex2f(12,12);glVertex2f(-12,12);glEnd();
+        glBegin(GL_LINES);
+        switch(marker.kind) {
+        case AreaMarkerKind::Waypoint:
+            glVertex2f(-5,8);glVertex2f(-5,-8);glVertex2f(-5,-8);glVertex2f(7,-4);glVertex2f(7,-4);glVertex2f(-5,0);break;
+        case AreaMarkerKind::Sound:
+            glVertex2f(-8,-3);glVertex2f(-3,-3);glVertex2f(-3,-3);glVertex2f(2,-8);glVertex2f(2,-8);glVertex2f(2,8);
+            glVertex2f(2,8);glVertex2f(-3,3);glVertex2f(-3,3);glVertex2f(-8,3);glVertex2f(-8,3);glVertex2f(-8,-3);
+            glVertex2f(5,-5);glVertex2f(8,-2);glVertex2f(8,-2);glVertex2f(8,2);glVertex2f(8,2);glVertex2f(5,5);break;
+        case AreaMarkerKind::Camera:
+            glVertex2f(-8,-5);glVertex2f(2,-5);glVertex2f(2,-5);glVertex2f(2,5);glVertex2f(2,5);glVertex2f(-8,5);
+            glVertex2f(-8,5);glVertex2f(-8,-5);glVertex2f(2,-2);glVertex2f(8,-6);glVertex2f(8,-6);glVertex2f(8,6);glVertex2f(8,6);glVertex2f(2,2);break;
+        case AreaMarkerKind::Entry:
+            glVertex2f(0,-8);glVertex2f(8,-8);glVertex2f(8,-8);glVertex2f(8,8);glVertex2f(8,8);glVertex2f(0,8);
+            glVertex2f(-9,0);glVertex2f(4,0);glVertex2f(4,0);glVertex2f(-1,-5);glVertex2f(4,0);glVertex2f(-1,5);break;
+        }
+        glEnd();glPopMatrix();
+    }
+    if(polygonVertices_||polygonDrawing_) {
+        glPointSize(9.0f*float(GetContentScaleFactor()));glBegin(GL_POINTS);
+        for(std::size_t i=0;i<polygonPoints_.size();++i) {
+            const auto p=gizmoScreenPoint(polygonPoints_[i]);if(p.z<=pickingCamera_->nearClip)continue;
+            if(i==0&&polygonDrawing_)glColor3f(0.25f,1,0.4f);else glColor3f(1,0.8f,0.2f);glVertex2f(p.x,p.y);
+        }
+        glEnd();
+    }
+    glMatrixMode(GL_PROJECTION);glPopMatrix();glMatrixMode(GL_MODELVIEW);glPopMatrix();glPopAttrib();
 }
 
 model::Vec3 ModelCanvas::gizmoScreenPoint(model::Vec3 position) const {
@@ -3366,6 +3528,7 @@ bool ModelCanvas::handleAreaGizmo(wxMouseEvent& event) {
         if(event.RightDown()) {cancelAreaGizmo();return true;}
         if(event.Dragging()||event.LeftUp()) {
             const auto hit=gizmoConstraint(event.GetPosition(),gizmoDrag_->handle,gizmoDrag_->position);
+            bool valid=hit.has_value();
             if(hit) {
                 const auto& drag=*gizmoDrag_;
                 gizmoPosition_=drag.position;
@@ -3379,12 +3542,23 @@ bool ModelCanvas::handleAreaGizmo(wxMouseEvent& event) {
                 } else {
                     const auto angle=std::atan2(hit->y-drag.position.y,hit->x-drag.position.x);
                     gizmoDrag_->rotation+=std::remainder(angle-drag.angle,6.28318530718f);
-                    gizmoDrag_->angle=angle;gizmoHeading_=drag.heading+gizmoDrag_->rotation*57.2957795131f;
+                    gizmoDrag_->angle=angle;gizmoHeading_=snappedAreaHeading(drag.heading+gizmoDrag_->rotation*57.2957795131f);
                 }
-                emitAreaGizmo(AreaGizmoPhase::Preview);Refresh(false);
+                if(drag.handle<4) {
+                    const auto snap=[&](float value){return areaSnap_.grid>0?std::round(value/areaSnap_.grid)*areaSnap_.grid:value;};
+                    if(drag.handle==0||drag.handle==3)gizmoPosition_.x=snap(gizmoPosition_.x);
+                    if(drag.handle==1||drag.handle==3)gizmoPosition_.y=snap(gizmoPosition_.y);
+                    if(drag.handle==2)gizmoPosition_.z=snap(gizmoPosition_.z);
+                    if(areaSnap_.walkmesh&&drag.handle!=2) {
+                        const auto point=areaScene_.nearestWalkmeshPoint(gizmoPosition_);valid=point.has_value();if(point)gizmoPosition_=*point;
+                    }
+                }
+                if(valid) {emitAreaGizmo(AreaGizmoPhase::Preview);Refresh(false);}
             }
+            if(!gizmoDrag_)return true;
             if(event.LeftUp()) {
-                gizmoDrag_.reset();if(HasCapture())ReleaseMouse();emitAreaGizmo(AreaGizmoPhase::Commit);
+                if(!valid)cancelAreaGizmo();
+                else {gizmoDrag_.reset();if(HasCapture())ReleaseMouse();emitAreaGizmo(AreaGizmoPhase::Commit);}
             }
         }
         return true;
@@ -3469,6 +3643,7 @@ std::optional<model::Vec3> ModelCanvas::areaPlacementPoint(wxPoint position,std:
     const auto ray=engineCameraHitSegment(camera,static_cast<int>(std::lround(position.x*scale)),
         camera.viewport.height-static_cast<int>(std::lround(position.y*scale)),document_->model().game);
     if(!ray)return {};
+    if(areaSnap_.walkmesh)return areaScene_.walkmeshHit(ray->start,ray->end);
     if(planeZ) {
         const auto dz=ray->end.z-ray->start.z;
         if(dz==0.0f)return {};
@@ -3590,7 +3765,8 @@ void ModelCanvas::onSize(wxSizeEvent& event) {
 void ModelCanvas::onErase(wxEraseEvent&) {}
 
 void ModelCanvas::onMouse(wxMouseEvent& event) {
-    if(handleAreaGizmo(event))return;
+    try {if(handleAreaPolygon(event)||handleAreaGizmo(event))return;}
+    catch(const std::exception& e) {cancelAreaPolygon();cancelAreaGizmo();wxMessageBox(wxString::FromUTF8(e.what()),"Area editing",wxOK|wxICON_ERROR,this);return;}
     advanceCamera();
     if (event.ButtonDown()) SetFocus();
     if(event.LeftDown()&&event.ControlDown()&&pickingCamera_&&document_&&document_->isOpen()) {
@@ -3626,8 +3802,11 @@ void ModelCanvas::onMouse(wxMouseEvent& event) {
         selectionStart_.reset();
     if (event.LeftUp()) {
         if (selectionStart_ && !event.ControlDown()) {
-            meshPick_ = MeshPick{event.GetPosition(), 0.0f, {}, event.ShiftDown(), {}};
-            Refresh(false);
+            if(const auto marker=pickAreaMarker(event.GetPosition())) {
+                meshPick_.reset();
+                wxCommandEvent selection(EVT_AREA_MARKER_PICKED,GetId());selection.SetEventObject(this);
+                selection.SetString(wxString::FromUTF8(marker->c_str()));ProcessWindowEvent(selection);
+            } else {meshPick_ = MeshPick{event.GetPosition(), 0.0f, {}, event.ShiftDown(), {}};Refresh(false);}
         }
         selectionStart_.reset();
     }
@@ -3788,6 +3967,17 @@ void ModelCanvas::considerMeshPick(const render::MeshSubmission& submission) {
 }
 
 void ModelCanvas::onKey(wxKeyEvent& event) {
+    if(polygonDrawing_||polygonDrag_) {
+        if(event.GetEventType()==wxEVT_KEY_DOWN) {
+            if(event.GetKeyCode()==WXK_ESCAPE) {cancelAreaPolygon();return;}
+            if(polygonDrawing_&&(event.GetKeyCode()==WXK_RETURN||event.GetKeyCode()==WXK_NUMPAD_ENTER)) {finishAreaPolygon();return;}
+            if(polygonDrawing_&&event.GetKeyCode()==WXK_BACK) {
+                if(!polygonPoints_.empty())polygonPoints_.pop_back();
+                emitAreaPolygon(AreaGizmoPhase::Preview,true);Refresh(false);return;
+            }
+        }
+        if(polygonDrag_)return;
+    }
     if(gizmoDrag_) {if(event.GetKeyCode()==WXK_ESCAPE)cancelAreaGizmo();return;}
     advanceCamera();
     constexpr std::array<int, 6> keys{{'D', 'A', 'E', 'Q', 'S', 'W'}};
@@ -3808,6 +3998,7 @@ void ModelCanvas::onKey(wxKeyEvent& event) {
 }
 
 void ModelCanvas::onFocusLost(wxFocusEvent& event) {
+    if(polygonDrag_)cancelAreaPolygon();
     cancelAreaGizmo();
     selectionStart_.reset();
     resetCameraInput();
@@ -3815,6 +4006,7 @@ void ModelCanvas::onFocusLost(wxFocusEvent& event) {
 }
 
 void ModelCanvas::onCaptureLost(wxMouseCaptureLostEvent&) {
+    if(polygonDrag_)cancelAreaPolygon();
     cancelAreaGizmo();
     selectionStart_.reset();
     resetCameraInput();
@@ -4571,6 +4763,7 @@ void ModelCanvas::drawScene() {
     drawNodeHelpers(transforms);
     drawAreaCameraGlyphs();
     drawAreaGizmo();
+    drawAreaEditorOverlay();
     glPolygonMode(GL_FRONT_AND_BACK, GL_FILL);
     glDisable(GL_BLEND);
     glDepthMask(GL_TRUE);

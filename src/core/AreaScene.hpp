@@ -252,6 +252,8 @@ public:
         return walkableMaterials_.has_value();
     }
     std::optional<LightRoomId> findRoomAt(model::Vec3 position, bool allSurfaces = false) const;
+    std::optional<model::Vec3> walkmeshHit(model::Vec3 start,model::Vec3 end) const;
+    std::optional<model::Vec3> nearestWalkmeshPoint(model::Vec3 position) const;
     void updateCurrentRoomFromPosition(model::Vec3 position, bool allSurfaces = false);
     // Engine game caller: ignore-visibility suppresses updates; no player or
     // WOK miss retains the previous room (K1 0x2890a, K2 0x194392).
