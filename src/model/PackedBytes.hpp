@@ -128,4 +128,16 @@ private:
     mutable std::size_t reads_{};
 };
 
+inline GameVersion modelGame(const ByteView& bytes, std::size_t offset,
+                             const std::string& label) {
+    const auto token0 = bytes.u32(offset, "model layout token 0");
+    const auto token1 = bytes.u32(offset + 4u, "model layout token 1");
+    if (token0 == kK1ModelToken0 && token1 == kK1ModelToken1) return GameVersion::Kotor1;
+    if (token0 == kK2ModelToken0 && token1 == kK2ModelToken1) return GameVersion::Kotor2;
+    std::ostringstream message;
+    message << sourcePrefix(label) << "Unsupported model layout tokens 0x" << std::hex
+            << token0 << "/0x" << token1;
+    throw ModelError(message.str());
+}
+
 } // namespace neomdl::model::packed

@@ -18,6 +18,13 @@
 
 namespace neomdl {
 
+struct ModelFileSource {
+    std::filesystem::path path;
+    neoshared::ResourceDocument resource;
+};
+ModelFileSource readModelFileSource(const std::filesystem::path& path,
+    const neoshared::bif::JobControl& job = resourceLoadJob());
+
 class ModelDocument;
 enum class VisualAttachmentKind { None, CreatureHead, EquippedItem };
 struct VisualModelAttachment {
@@ -72,6 +79,12 @@ public:
     // Loading callbacks are scoped to this operation and are never retained by
     // the document or its resource resolver. Cancellation propagates to callers.
     bool openFile(const std::filesystem::path& path,
+                  const ResourceResolver& fallbackResolver = {},
+                  const neoshared::bif::JobControl& job = resourceLoadJob(),
+                  std::optional<model::GameVersion> asciiGame = std::nullopt,
+                  bool includeAnimations = true,
+                  const std::optional<std::filesystem::path>& mdxPath = {});
+    bool openFile(ModelFileSource source,
                   const ResourceResolver& fallbackResolver = {},
                   const neoshared::bif::JobControl& job = resourceLoadJob(),
                   std::optional<model::GameVersion> asciiGame = std::nullopt,

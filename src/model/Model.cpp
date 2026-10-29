@@ -28,10 +28,6 @@
 namespace neomdl::model {
 namespace {
 
-using packed::kK1ModelToken0;
-using packed::kK2ModelToken0;
-using packed::kK1ModelToken1;
-using packed::kK2ModelToken1;
 using packed::isModelToken;
 constexpr std::size_t kWrapperSize = 12u;
 constexpr std::size_t kModelHeaderSize = 196u;
@@ -242,18 +238,7 @@ public:
 private:
     void parseHeader() {
         payload_->require(0u, kModelHeaderSize, "model header");
-        const auto token0 = payload_->u32(0u, "model layout token 0");
-        const auto token1 = payload_->u32(4u, "model layout token 1");
-        if (token0 == kK1ModelToken0 && token1 == kK1ModelToken1) {
-            model_.game = GameVersion::Kotor1;
-        } else if (token0 == kK2ModelToken0 && token1 == kK2ModelToken1) {
-            model_.game = GameVersion::Kotor2;
-        } else {
-            std::ostringstream message;
-            message << sourcePrefix(label_) << "Unsupported model layout tokens 0x" << std::hex
-                    << token0 << "/0x" << token1;
-            throw ModelError(message.str());
-        }
+        model_.game = packed::modelGame(*payload_, 0u, label_);
         model_.name = payload_->fixedString(8u, 32u, "model name");
         rootNodeOffset_ = payload_->u32(40u, "root node offset");
         declaredNodeCount_ = payload_->u32(44u, "declared node count");
@@ -2776,6 +2761,15 @@ bool isAsciiModelInput(const std::vector<std::uint8_t>& mdlBytes) noexcept {
     if(mdlBytes.size()>=4u)for(unsigned i=0;i<4;++i)
         firstWord|=std::uint32_t(mdlBytes[i])<<(i*8u);
     return !mdlBytes.empty()&&mdlBytes.front()!=0&&!isModelToken(firstWord);
+}
+
+std::optional<GameVersion> modelInputGame(const std::vector<std::uint8_t>& mdlBytes,
+    const std::string& sourceLabel, const neoshared::bif::JobControl& job) {
+    if (isAsciiModelInput(mdlBytes)) return {};
+    const packed::ByteView bytes(mdlBytes.data(), mdlBytes.size(), sourceLabel, job);
+    const auto base = bytes.contains(kWrapperSize, 4u) && isModelToken(bytes.u32(kWrapperSize))
+        ? kWrapperSize : 0u;
+    return packed::modelGame(bytes, base, sourceLabel);
 }
 
 Model decodeModelBytes(const std::vector<std::uint8_t>& mdlBytes,

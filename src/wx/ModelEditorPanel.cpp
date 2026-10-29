@@ -2041,6 +2041,15 @@ public:
         updateState();
     }
 
+    bool chooseAsciiGame(std::optional<model::GameVersion>& game) {
+        wxArrayString choices;
+        choices.Add("Knights of the Old Republic");choices.Add("Knights of the Old Republic II");
+        wxSingleChoiceDialog choice(this,"Choose the target game for this ASCII model.","Open ASCII MDL",choices);
+        if(choice.ShowModal()!=wxID_OK)return false;
+        game=choice.GetSelection()==0?model::GameVersion::Kotor1:model::GameVersion::Kotor2;
+        return true;
+    }
+
     bool loadModelWithGame(const wxString& title,
         std::optional<model::GameVersion>& game,
         const std::function<void(const neoshared::bif::JobControl&,std::optional<model::GameVersion>)>& load) {
@@ -2051,11 +2060,7 @@ public:
                 catch(const model::AsciiModelGameRequired&) {gameRequired=true;}
             }))return false;
             if(!gameRequired)return true;
-            wxArrayString choices;
-            choices.Add("Knights of the Old Republic");choices.Add("Knights of the Old Republic II");
-            wxSingleChoiceDialog choice(this,"Choose the target game for this ASCII model.","Open ASCII MDL",choices);
-            if(choice.ShowModal()!=wxID_OK)return false;
-            game=choice.GetSelection()==0?model::GameVersion::Kotor1:model::GameVersion::Kotor2;
+            if(!chooseAsciiGame(game))return false;
         }
     }
 
@@ -2073,35 +2078,23 @@ public:
             // explicitly selected engine rules before resolving dependencies.
             const auto host = captureHostResolver();
             auto document = std::make_unique<ModelDocument>();
+            ModelFileSource source;
             std::optional<model::GameVersion> asciiGame;
-            if (!loadModelWithGame("Loading model",asciiGame,
-                [&](const neoshared::bif::JobControl& job,std::optional<model::GameVersion> game) {
-                document->openFile(path, host, job,game);
+            if (!runJob("Reading model", [&](const neoshared::bif::JobControl& job) {
+                source = readModelFileSource(path, job);
+                asciiGame = model::modelInputGame(source.resource.bytes, source.resource.sourceDescription, job);
             })) return false;
+            if (!asciiGame && !chooseAsciiGame(asciiGame)) return false;
 
             std::shared_ptr<GameResourceSession> installationSession;
             std::string installationWarning;
             const auto installed = installedResourceResolver(
-                document->model().game, path, installationSession,
+                *asciiGame, source.path, installationSession,
                 installationWarning, true);
             const auto combined = combineResolvers(host, installed);
-            if (installed) {
-                auto enriched = std::make_unique<ModelDocument>();
-                asciiGame=document->model().game;
-                if (!loadModelWithGame("Loading model resources",asciiGame,
-                    [&](const neoshared::bif::JobControl& job,std::optional<model::GameVersion> game) {
-                    try {
-                        enriched->openFile(path, combined, job,game);
-                        document = std::move(enriched);
-                    } catch (const neoshared::bif::JobCancelled&) {
-                        throw;
-                    } catch (const std::exception& error) {
-                        document->appendDiagnostic(
-                            "Installed-game resource lookup was unavailable; the model was opened "
-                            "with same-directory resources only: " + std::string(error.what()));
-                    }
-                })) return false;
-            }
+            if (!runJob("Loading model", [&](const neoshared::bif::JobControl& job) {
+                document->openFile(std::move(source), combined, job, asciiGame);
+            })) return false;
 
             if (installationSession && installationSession->installation()) {
                 const auto& install = *installationSession->installation();

@@ -813,6 +813,8 @@ public:
 };
 
 bool isAsciiModelInput(const std::vector<std::uint8_t>& mdlBytes) noexcept;
+std::optional<GameVersion> modelInputGame(const std::vector<std::uint8_t>& mdlBytes,
+    const std::string& sourceLabel = {}, const neoshared::bif::JobControl& job = {});
 
 Model decodePackedModelBytes(const std::vector<std::uint8_t>& mdlBytes,
     const std::vector<std::uint8_t>& mdxBytes, const std::string& sourceLabel,

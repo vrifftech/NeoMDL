@@ -202,6 +202,13 @@ bool ModelDocument::openFile(const std::filesystem::path& requestedPath,
                              bool includeAnimations,
                              const std::optional<std::filesystem::path>& mdxPath) {
     const ResourceLoadScope loading(job);
+    return openFile(readModelFileSource(requestedPath, job), fallbackResolver, job,
+                    asciiGame, includeAnimations, mdxPath);
+}
+
+ModelFileSource readModelFileSource(const std::filesystem::path& requestedPath,
+                                   const neoshared::bif::JobControl& job) {
+    const ResourceLoadScope loading(job);
     job.update(0u, 0u, "Opening model: " + neoshared::pathToUtf8(requestedPath.filename()));
     auto mdlPath = requestedPath;
     if (lower(neoshared::pathToUtf8(mdlPath.extension())) == ".mdx") {
@@ -217,6 +224,17 @@ bool ModelDocument::openFile(const std::filesystem::path& requestedPath,
             "NeoMDL opens .mdl and .mdl.ascii models and their .mdx companions.");
     }
 
+    return {mdlPath, readLocalResource(mdlPath, kMdlResourceType)};
+}
+
+bool ModelDocument::openFile(ModelFileSource source,
+                             const ResourceResolver& fallbackResolver,
+                             const neoshared::bif::JobControl& job,
+                             std::optional<model::GameVersion> asciiGame,
+                             bool includeAnimations,
+                             const std::optional<std::filesystem::path>& mdxPath) {
+    const ResourceLoadScope loading(job);
+    const auto& mdlPath = source.path;
     const auto directory = mdlPath.parent_path().empty()
         ? std::filesystem::path{"."} : mdlPath.parent_path();
     const auto localResources = collisionResources(mdlPath, directoryResourceResolver(directory));
@@ -226,12 +244,10 @@ bool ModelDocument::openFile(const std::filesystem::path& requestedPath,
             return readLocalResource(*mdxPath, kMdxResourceType);
         return localResources(name, type);
     };
-    auto primary = readLocalResource(mdlPath, kMdlResourceType);
-
     const auto resolver = overlayResolver(localResolver, fallbackResolver);
     // AurResGet's standalone authoring path can open .lmt sidecars. The
     // installed game's resource callback has no .lmt type mapping.
-    openResource(std::move(primary), resolver,job,asciiGame,looseAsciiResources(directory),includeAnimations);
+    openResource(std::move(source.resource), resolver,job,asciiGame,looseAsciiResources(directory),includeAnimations);
     // Local documents retain their filesystem identity even though companion
     // resources may have come from an installed-game archive session.
     runtimeScopePinned_=bool(fallbackResolver);
