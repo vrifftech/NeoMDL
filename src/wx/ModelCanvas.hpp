@@ -398,6 +398,8 @@ public:
     void cancelAreaGizmo();
     void previewAreaTrigger(std::size_t sourceIndex,model::Vec3 position,float headingDelta);
     void previewAreaCamera(std::size_t sourceIndex,model::Vec3 position);
+    void previewAreaCameras(const std::vector<AreaCameraRecord>& records,std::optional<std::size_t> active={});
+    void setViewerOrientation(float yaw,float pitch);
     void setAreaSnapping(AreaSnapSettings settings) {areaSnap_=settings;}
     std::optional<model::Vec3> snappedAreaPoint(model::Vec3 position,bool snapZ=true) const;
     float snappedAreaHeading(float heading) const;

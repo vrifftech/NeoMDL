@@ -3316,11 +3316,21 @@ void ModelCanvas::previewAreaTrigger(std::size_t sourceIndex,model::Vec3 positio
 }
 
 void ModelCanvas::previewAreaCamera(std::size_t sourceIndex,model::Vec3 position) {
-    auto records=areaScene_.cameras();
+    std::vector<AreaCameraRecord> records;for(const auto& camera:cameraScene_.areaCameras())records.push_back(camera.authored);
     for(auto& record:records)if(record.sourceIndex==sourceIndex)record.position=position;
+    previewAreaCameras(records,cameraScene_.activeAreaCameraIndex());
+}
+
+void ModelCanvas::previewAreaCameras(const std::vector<AreaCameraRecord>& records,std::optional<std::size_t> active) {
     std::string error;
     if(!cameraScene_.setAreaCameras(records,error))throw std::runtime_error(error);
+    if(active)cameraScene_.activateAreaCamera(*active);
+    resetCameraInput();++sceneEffects_.historyEpoch;
     Refresh(false);
+}
+
+void ModelCanvas::setViewerOrientation(float yaw,float pitch) {
+    useViewerCamera(false);yaw_=yaw;pitch_=pitch;Refresh(false);
 }
 
 std::optional<model::Vec3> ModelCanvas::snappedAreaPoint(model::Vec3 position,bool snapZ) const {
@@ -4141,17 +4151,18 @@ void ModelCanvas::applyProjection(int width, int height) {
         viewAngle=camera->viewAngle;nearPlane=camera->nearClip;farPlane=camera->farClip;
     }
     sceneFarClip_ = farPlane;
-    CameraHitState picking;picking.viewAngle=viewAngle;picking.nearClip=nearPlane;picking.farClip=farPlane;
+    CameraHitState picking;picking.viewAngle=viewAngle;picking.nearClip=nearPlane;picking.farClip=farPlane;picking.orthographicHeight=height*0.01f;
     picking.viewport={0,0,width,height};pickingCamera_=picking;
     glMatrixMode(GL_PROJECTION);
     glLoadIdentity();
     // Camera::RenderScene 0x006e933d..0x006e9379 promotes its float inputs
     // to doubles. The embedded GLU call multiplies the float result, or leaves
     // the freshly loaded identity unchanged on its engine zero checks.
-    std::array<float, 16> projection;
-    if (neoshared::glu::perspective(viewAngle, aspect, nearPlane, farPlane,
-                                   projection))
-        glMultMatrixf(projection.data());
+    if(viewAngle>0.0f) {
+        std::array<float, 16> projection;
+        if (neoshared::glu::perspective(viewAngle, aspect, nearPlane, farPlane,projection))
+            glMultMatrixf(projection.data());
+    } else glOrtho(0.0,double(aspect*picking.orthographicHeight),0.0,double(picking.orthographicHeight),double(nearPlane),double(farPlane));
     glMatrixMode(GL_MODELVIEW);
     glLoadIdentity();
 }

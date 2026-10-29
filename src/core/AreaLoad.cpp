@@ -38,7 +38,8 @@ model::Vec3 position(const GffStruct& s,const char* n,model::Vec3 fallback={}) {
 model::Quaternion orientation(const GffStruct& s,const char* n,
                               model::Quaternion fallback={}) {
     const auto* p=typed<GffOrientationField>(s,n);if(!p)return fallback;
-    return {p->value[0],p->value[1],p->value[2],p->value[3]};
+    // ReadFieldQuaternion stores w,x,y,z; the runtime quaternion is x,y,z,w.
+    return {p->value[1],p->value[2],p->value[3],p->value[0]};
 }
 std::optional<bool> optionalFlag(const GffStruct& s,const char* n) {
     const auto* p=typed<GffByteField>(s,n);if(!p)return {};
@@ -444,8 +445,6 @@ AreaLoadPlan readAreaLoad(const std::string& area,const std::string& scope,
                 record.pitch=number(entry,"Pitch");record.height=number(entry,"Height");
                 record.fieldOfView=number(entry,"FieldOfView",55.0f);
                 record.microphoneRange=number(entry,"MicRange");
-                require(record.fieldOfView>0.0f&&record.fieldOfView<180.0f,"CameraList field of view is outside (0,180)");
-                require(record.microphoneRange>=0.0f,"CameraList microphone range is negative");
             } catch(const neoshared::bif::JobCancelled&) {throw;
             } catch(const std::exception& e) {
                 if(!options.allowPartialVisuals)throw;
