@@ -33,7 +33,7 @@ AsciiEditor::AsciiEditor(wxWindow* parent, std::shared_ptr<const ModelDocument> 
     search_ = new wxSearchCtrl(this, wxID_ANY, wxEmptyString, wxDefaultPosition, wxDefaultSize, wxTE_PROCESS_ENTER);
     search_->SetDescriptiveText("Find in ASCII (Ctrl+F)");
     update_ = new wxButton(this, wxID_ANY, "Update Preview");
-    update_->SetToolTip("Update now (Ctrl+Enter). Edits update automatically after a short typing pause.");
+    update_->SetToolTip("Generate ASCII or update its preview (Ctrl+Enter). Text edits update after a short typing pause.");
     update_->Enable(false);
     layout->Add(format_, 0, wxEXPAND | wxLEFT | wxRIGHT | wxTOP, FromDIP(5));
     toolbar->Add(search_, 1, wxALIGN_CENTER_VERTICAL | wxRIGHT, FromDIP(5));
@@ -52,7 +52,7 @@ AsciiEditor::AsciiEditor(wxWindow* parent, std::shared_ptr<const ModelDocument> 
     editor_->SetMarginWidth(1, 0);
     editor_->SetReadOnly(true);
     layout->Add(editor_, 1, wxEXPAND);
-    status_ = new wxTextCtrl(this, wxID_ANY, "Generating ASCII; the viewport shows the original model.",
+    status_ = new wxTextCtrl(this, wxID_ANY, wxEmptyString,
         wxDefaultPosition, wxSize(-1, FromDIP(52)), wxTE_MULTILINE | wxTE_READONLY | wxTE_WORDWRAP);
     layout->Add(status_, 0, wxEXPAND | wxALL, FromDIP(5));
     SetSizer(layout);
@@ -81,8 +81,9 @@ AsciiEditor::AsciiEditor(wxWindow* parent, std::shared_ptr<const ModelDocument> 
         if (event.ControlDown() && event.GetKeyCode() == 'F') {
             search_->SetFocus();
             search_->SelectAll();
-        } else if (event.ControlDown() && event.GetKeyCode() == WXK_RETURN && ready()) {
-            updatePreview();
+        } else if (event.ControlDown() && event.GetKeyCode() == WXK_RETURN && update_->IsEnabled()) {
+            if (ready_) updatePreview();
+            else generateAscii(format_->GetSelection()==1);
         } else event.Skip();
     });
     timer_.SetOwner(this);
@@ -191,7 +192,7 @@ void AsciiEditor::poll() {
                 format_->SetSelection(advanced_ ? 1 : 0);
                 format_->Enable(true);
                 editor_->SetReadOnly(!ready_);
-                update_->Enable(ready_);
+                update_->Enable(true);
             }
             if (generated || workerRevision_ == revision_) {
                 status_->ChangeValue(wxui::toWx(std::string(generated ? "ASCII generation failed: " :

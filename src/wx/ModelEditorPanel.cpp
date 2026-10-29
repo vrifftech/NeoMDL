@@ -410,22 +410,24 @@ public:
         tree_ = new wxTreeCtrl(inspector, wxID_ANY, wxDefaultPosition, wxDefaultSize,
                                wxTR_HAS_BUTTONS | wxTR_LINES_AT_ROOT | wxTR_MULTIPLE |
                                    wxTR_HIDE_ROOT);
+        tree_->SetToolTip("Select a node to edit it. Ctrl-click adds or removes nodes; Shift-click selects a range.");
         auto* detailsPanel = new wxPanel(inspector);
         auto* detailsLayout = new wxBoxSizer(wxVERTICAL);
         detailedDiagnostics_ = new wxCheckBox(detailsPanel, wxID_ANY, "Detailed diagnostics");
         editNode_ = new wxButton(detailsPanel, wxID_ANY, "Edit Selected Node...");
         editNode_->SetToolTip("Edit the selected node's properties.");
         editNode_->Enable(false);
-        editVertices_ = new wxButton(detailsPanel, wxID_ANY, "Vertices...");
-        editControllers_ = new wxButton(detailsPanel, wxID_ANY, "Controllers...");
-        effects_ = new wxButton(detailsPanel,wxID_ANY,"Effects...",wxDefaultPosition,wxDefaultSize,wxBU_EXACTFIT);
+        editVertices_ = new wxButton(detailsPanel, wxID_ANY, "Vertices...",wxDefaultPosition,wxDefaultSize,wxBU_EXACTFIT);
+        editControllers_ = new wxButton(detailsPanel, wxID_ANY, "Controllers...",wxDefaultPosition,wxDefaultSize,wxBU_EXACTFIT);
+        effects_ = new wxButton(detailsPanel,wxID_ANY,"Preview Effects...",wxDefaultPosition,wxDefaultSize,wxBU_EXACTFIT);
+        effects_->SetToolTip("Preview owner effects such as holograms. These settings are not saved into the MDL.");
         effects_->Enable(false);
         editVertices_->Enable(false);
         editControllers_->Enable(false);
-        auto* dataProperties = new wxBoxSizer(wxHORIZONTAL);
-        dataProperties->Add(editVertices_, 1, wxRIGHT, FromDIP(5));
-        dataProperties->Add(editControllers_, 1,wxRIGHT,FromDIP(5));
-        dataProperties->Add(effects_,1);
+        auto* dataProperties = new wxWrapSizer(wxHORIZONTAL);
+        dataProperties->Add(editVertices_, 0, wxRIGHT|wxBOTTOM, FromDIP(5));
+        dataProperties->Add(editControllers_, 0,wxRIGHT|wxBOTTOM,FromDIP(5));
+        dataProperties->Add(effects_,0,wxBOTTOM,FromDIP(5));
         details_ = new wxTextCtrl(detailsPanel, wxID_ANY, wxEmptyString, wxDefaultPosition,
                                   wxDefaultSize, wxTE_MULTILINE | wxTE_READONLY | wxTE_RICH2);
         detailsLayout->Add(detailedDiagnostics_, 0, wxALL, FromDIP(5));
@@ -440,6 +442,8 @@ public:
         sourceSplit_ = new wxSplitterWindow(splitter_, wxID_ANY, wxDefaultPosition, wxDefaultSize,
                                              wxSP_LIVE_UPDATE | wxSP_3D);
         canvas_ = new ModelCanvas(sourceSplit_);
+        canvas_->SetToolTip("Click a mesh to select it; Shift-click adds or removes meshes.\n"
+            "View > Inspection contains temporary Hide and Isolate controls.");
         canvas_->setDocument(document_.get());
         canvas_->setOptions(options);
         sourceSplit_->SetMinimumPaneSize(FromDIP(160));
@@ -526,8 +530,8 @@ public:
                 const auto item=nodeItems_[event.GetInt()];
                 tree_->SelectItem(item,!event.GetExtraLong() || !tree_->IsSelected(item));
                 tree_->EnsureVisible(item);
-            }
-            updateSelection(event.GetInt()<0 ? wxTreeItemId{} : nodeItems_[event.GetInt()]);
+                updateSelection(item);
+            } else if (!event.GetExtraLong()) updateSelection({});
         });
         animationChoice_->Bind(wxEVT_CHOICE, [this](wxCommandEvent&) {
             if (advancedAnimation_->IsCollapsed()) previewSelectedAnimation();
@@ -660,7 +664,8 @@ public:
     }
     bool canEditBinaryVertices() const {
         return canEditBinaryMesh() && !document_->model().meshes[*document_->model().nodes[*selectedNode_].mesh].vertices.empty() &&
-            (document_->model().meshes[*document_->model().nodes[*selectedNode_].mesh].mdxBitmap&0x7fu);
+            (document_->model().meshes[*document_->model().nodes[*selectedNode_].mesh].mdxBitmap&
+                (document_->model().meshes[*document_->model().nodes[*selectedNode_].mesh].animated ? 0x7eu : 0x7fu));
     }
     bool canEditBinaryControllers() const {
         return canEditBinaryMesh();
@@ -945,10 +950,13 @@ public:
 
 private:
     void updateEditingControls() {
-        editNode_->Enable(canEditNode() || canEditBinaryMesh());
+        editNode_->Enable(canEditNode() || canEditBinaryNode());
+        editNode_->SetLabel(canEditBinaryNode() ? canEditBinaryMesh() ? "Edit Binary Mesh..." : "Edit Node Transform..." : "Edit Selected Node...");
+        editNode_->SetToolTip(canEditBinaryNode() ? "Edit binary model data and save a new copy." : "Edit the selected node in the ASCII source.");
         editVertices_->Enable(document_->sourceModel().asciiBuilt ? canEditVertices() : canEditBinaryVertices());
         editControllers_->Enable(document_->sourceModel().asciiBuilt ? canEditNode() : canEditBinaryControllers());
         effects_->Enable(document_->hasModelOwner() && !model::engineSceneStageOrder(document_->model().game).empty());
+        editNode_->GetParent()->Layout();
     }
     void populateAnimations() {
         animationChoice_->Clear();
@@ -980,11 +988,9 @@ private:
 
     void applyAsciiPreview(std::unique_ptr<ModelDocument> document) {
         if (document_->textureOverride()) document->setTextureOverride(document_->textureOverride());
-        const auto selection = selectedNode_ ? document_->model().nodes[*selectedNode_].name : std::string{};
-        std::optional<std::uint32_t> selectionIdentity;
-        if (selectedNode_ && document->sourceModel().nodes.front().asciiIdentity)
-            selectionIdentity = document_->model().nodes[*selectedNode_].asciiIdentity.value_or(
-                static_cast<std::uint32_t>(document_->model().partSourceNodes[*selectedNode_]));
+        const auto selections=selectedNodes_;
+        const auto selection=selectedNode_;
+        const bool identified=document->sourceModel().nodes.front().asciiIdentity.has_value();
         const auto animation = selectedAnimation();
         const auto clip = animation ? document_->animation(*animation).name : std::string{};
         const auto* run = selectedRun();
@@ -998,12 +1004,19 @@ private:
         selectedNode_.reset();
         selectedNodes_.clear();
         populateTree();
-        for (std::size_t i = 0; i < document_->model().nodes.size(); ++i)
-            if (selectionIdentity ? document_->model().nodes[i].asciiIdentity == selectionIdentity :
-                !selection.empty() && document_->model().nodes[i].name == selection) {
+        wxTreeItemId primary;
+        for (std::size_t i=0;i<document_->model().nodes.size();++i) {
+            const auto& node=document_->model().nodes[i];
+            const auto matches=[&](std::size_t old) {
+                const auto& original=previous->model().nodes[old];
+                return identified ? node.asciiIdentity==original.asciiIdentity.value_or(
+                    static_cast<std::uint32_t>(previous->model().partSourceNodes[old])) : node.name==original.name;
+            };
+            if (std::any_of(selections.begin(),selections.end(),matches)) {
                 tree_->SelectItem(nodeItems_[i]);
-                break;
+                if (selection && matches(*selection)) primary=nodeItems_[i];
             }
+        }
         populateAnimations();
         for (std::size_t index = 0; index < document_->animations().size(); ++index) {
             if (document_->animation(index).name == clip) {
@@ -1016,8 +1029,7 @@ private:
         }
         updatePreviewFeatures();
         updateAnimationControls();
-        updateDetails(selectedNode_);
-        updateEditingControls();
+        updateSelection(primary);
     }
 
     std::optional<std::size_t> selectedAnimation() const {
@@ -4103,7 +4115,7 @@ private:
         file->Append(ID_LoadArea, "Load Area Layout...");
         file->Append(ID_ModuleArea, "Load Module Area...");
         file->AppendSeparator();
-        file->Append(ID_ExportAscii, "Export ASCII MDL...", "Re-export the current ASCII using conversion options.");
+        file->Append(ID_ExportAscii, "Export ASCII MDL...", "Export the loaded model or current ASCII edits with conversion options.");
         file->Append(ID_ExportPacked, "Compile ASCII to &Binary...",
                      "Compile the text in the ASCII editor to MDL/MDX.");
         file->Append(ID_ExportTextures, "Export Texture List...", "Save the model's directly referenced texture names.");
@@ -4111,7 +4123,7 @@ private:
         file->Append(ID_QuickConvert, "Quick Convert Files...", "Read model files and write their opposite format.");
         file->Append(ID_BatchDecompile, "Batch Decompile...", "Convert selected model files to ASCII.");
         file->Append(ID_BatchCompile, "Batch Compile...", "Compile selected model files to binary MDL/MDX.");
-        file->Append(ID_BinaryMeshFields, "Edit Binary Mesh Fields...", "Edit binary mesh textures, flags and tangent basis directly.");
+        file->Append(ID_BinaryMeshFields, "Binary Mesh Editor...", "Edit the selected binary mesh or open another model, then save a new MDL/MDX copy.");
         file->AppendSeparator();
         file->Append(ID_CloseModel, "&Close Model\tCtrl+W");
         file->Append(ID_CloseAll, "Close &All");
@@ -4122,11 +4134,11 @@ private:
         auto* edit = new wxMenu;
         edit->Append(ID_NodeProperties, "Selected Node Properties...", "Edit the selected node's properties.");
         edit->Append(ID_NodeTransform,"Selected Node Transform...","Edit the selected binary node's base position, rotation and scale.");
-        edit->Append(ID_VertexProperties, "Selected Mesh Vertex Properties...", "Edit vertex values and corner assignments in source-index tables.");
+        edit->Append(ID_VertexProperties, "Selected Mesh Vertex Properties...", "Edit stored vertex attributes in binary models, or source tables in ASCII models.");
         edit->Append(ID_ReplaceMesh, "Replace Selected Mesh...", "Queue mesh replacements from donor models.");
         edit->Append(ID_ConvertMesh, "Convert Selected Mesh to Trimesh", "Bake a skin at its constructed bind pose, or retain a lightsaber's stationary blade pieces. Undoable ASCII edit.");
         edit->Append(ID_RecalculateNormals, "Recalculate Selected Mesh Normals...", "Choose normal weighting and a crease angle for the selected mesh. Undoable ASCII edit.");
-        edit->Append(ID_ControllerProperties, "Selected Node Controller Properties...", "Edit base controllers and animation keys for the selected node.");
+        edit->Append(ID_ControllerProperties, "Selected Node Controller Properties...", "Edit binary mesh opacity/glow, or ASCII node controllers and animation keys.");
         edit->Append(ID_CollisionCompanions, "Collision Companions...", "Edit PWK, door DWK states and room WOK geometry, hooks and links.");
         edit->Append(ID_ModelProperties, "Model Properties...", "Choose the animation root and head link.");
         edit->Append(ID_RenameTexture, "Rename Texture Throughout Model...", "Change matching texture references in this model.");
@@ -4203,8 +4215,8 @@ private:
         if (area) view->AppendCheckItem(ID_EngineShadows, "Area Shadows");
         view->AppendCheckItem(ID_Fog, "Show Fog");
         view->Append(ID_LightingSettings, "Lighting and Fog Settings...");
-        view->Append(ID_OwnerVisualEffects,"Owner Visual Effects...");
-        view->Append(ID_SceneEffects,"Scene Effects...");
+        view->Append(ID_OwnerVisualEffects,"Owner Visual Effects (Preview)...");
+        view->Append(ID_SceneEffects,"Scene Effects (Preview)...");
         if (features & (PreviewReferences | PreviewParticles | PreviewLightsabers | PreviewDangly))
             view->AppendSeparator();
         if (features & PreviewReferences) view->AppendCheckItem(ID_ShowReferences, "Referenced Models");
@@ -5615,7 +5627,7 @@ private:
                     [this](const wxString& title,const auto& work){return runJob(title,work);});return;
             case ID_ConversionNaming: chooseConversionNaming(this);return;
             case ID_NodeProperties:
-                if (activePage()->canEditBinaryMesh()) editBinaryMesh();
+                if (activePage()->canEditBinaryNode()) editBinaryMesh(activePage()->canEditBinaryMesh() ? BinaryMeshPage::Properties : BinaryMeshPage::Transform);
                 else activePage()->editSelectedNode();
                 return;
             case ID_NodeTransform: editBinaryMesh(BinaryMeshPage::Transform);return;
@@ -5808,9 +5820,9 @@ private:
         enableModuleCommand(ID_SaveAscii,editor&&editor->ready());
         enableModuleCommand(ID_SaveAsciiAs,editor&&editor->ready());
         enableModuleCommand(ID_AsciiEditor,editor&&!area);
-        enableModuleCommand(ID_ExportAscii,editor&&editor->ready());
+        enableModuleCommand(ID_ExportAscii,editor!=nullptr);
         enableModuleCommand(ID_ExportPacked,editor&&editor->ready());
-        enableModuleCommand(ID_NodeProperties,active&&(active->canEditNode()||active->canEditBinaryMesh()));
+        enableModuleCommand(ID_NodeProperties,active&&(active->canEditNode()||active->canEditBinaryNode()));
         enableModuleCommand(ID_NodeTransform,active&&active->canEditBinaryNode());
         enableModuleCommand(ID_VertexProperties,active&&(active->document().sourceModel().asciiBuilt ? active->canEditVertices() : active->canEditBinaryVertices()));
         enableModuleCommand(ID_ReplaceMesh,active&&active->canReplaceMesh());
