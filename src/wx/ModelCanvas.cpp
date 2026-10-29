@@ -3355,9 +3355,9 @@ void ModelCanvas::setAreaPolygon(std::vector<model::Vec3> points,bool vertices) 
     if(polygonDrawing_||polygonDrag_)return;
     polygonPoints_=std::move(points);polygonVertices_=vertices;Refresh(false);
 }
-void ModelCanvas::beginAreaPolygon(std::optional<float> planeZ,float zOffset) {
+void ModelCanvas::beginAreaPolygon(std::optional<float> planeZ,float zOffset,std::optional<std::size_t> vertexLimit) {
     cancelAreaGizmo();cancelAreaPolygon();selectionStart_.reset();meshPick_.reset();resetCameraInput();
-    polygonPoints_.clear();polygonDrawing_=true;polygonPlaneZ_=planeZ;polygonZOffset_=zOffset;
+    polygonPoints_.clear();polygonDrawing_=true;polygonPlaneZ_=planeZ;polygonZOffset_=zOffset;polygonVertexLimit_=vertexLimit;
     SetFocus();emitAreaPolygon(AreaGizmoPhase::Begin,true);Refresh(false);
 }
 void ModelCanvas::emitAreaPolygon(AreaGizmoPhase phase,bool drawing,int vertex) {
@@ -3392,7 +3392,7 @@ bool ModelCanvas::handleAreaPolygon(wxMouseEvent& event) {
                 const auto first=gizmoScreenPoint(polygonPoints_.front());
                 if(std::hypot(first.x-event.GetX(),first.y-event.GetY())<FromDIP(10)) {finishAreaPolygon();return true;}
             }
-            if(polygonPoints_.size()<kAreaTriggerVertexLimit) {
+            if(!polygonVertexLimit_||polygonPoints_.size()<*polygonVertexLimit_) {
                 auto point=areaPlacementPoint(event.GetPosition(),polygonPlaneZ_);
                 if(point)point=snappedAreaPoint(*point,false);
                 if(point) {point->z+=polygonZOffset_;polygonPoints_.push_back(*point);emitAreaPolygon(AreaGizmoPhase::Preview,true);Refresh(false);}
@@ -3449,7 +3449,7 @@ void ModelCanvas::drawAreaEditorOverlay() {
         glPushMatrix();glTranslatef(p.x,p.y,0);const auto unit=float(FromDIP(12))/12.0f;glScalef(unit,unit,1);
         glColor3f(0.05f,0.07f,0.09f);glBegin(GL_QUADS);
         glVertex2f(-12,-12);glVertex2f(12,-12);glVertex2f(12,12);glVertex2f(-12,12);glEnd();
-        const float colors[4][3]={{0.25f,1,0.4f},{0.4f,0.8f,1},{0.8f,0.55f,1},{1,0.65f,0.2f}};
+        const float colors[7][3]={{0.25f,1,0.4f},{0.4f,0.8f,1},{0.8f,0.55f,1},{1,0.65f,0.2f},{1,0.85f,0.4f},{1,0.4f,0.35f},{0.35f,1,0.85f}};
         const auto& color=colors[static_cast<int>(marker.kind)];
         if(marker.path==selectedAreaMarker_)glColor3f(1,0.85f,0.15f);else glColor3fv(color);
         glBegin(GL_LINE_LOOP);glVertex2f(-12,-12);glVertex2f(12,-12);glVertex2f(12,12);glVertex2f(-12,12);glEnd();
@@ -3467,6 +3467,15 @@ void ModelCanvas::drawAreaEditorOverlay() {
         case AreaMarkerKind::Entry:
             glVertex2f(0,-8);glVertex2f(8,-8);glVertex2f(8,-8);glVertex2f(8,8);glVertex2f(8,8);glVertex2f(0,8);
             glVertex2f(-9,0);glVertex2f(4,0);glVertex2f(4,0);glVertex2f(-1,-5);glVertex2f(4,0);glVertex2f(-1,5);break;
+        case AreaMarkerKind::Item:
+            glVertex2f(0,-9);glVertex2f(8,0);glVertex2f(8,0);glVertex2f(0,9);glVertex2f(0,9);glVertex2f(-8,0);glVertex2f(-8,0);glVertex2f(0,-9);
+            glVertex2f(-8,0);glVertex2f(8,0);glVertex2f(0,-9);glVertex2f(0,9);break;
+        case AreaMarkerKind::Encounter:
+            glVertex2f(0,-9);glVertex2f(9,8);glVertex2f(9,8);glVertex2f(-9,8);glVertex2f(-9,8);glVertex2f(0,-9);
+            glVertex2f(0,-3);glVertex2f(0,3);glVertex2f(-1,5);glVertex2f(1,5);break;
+        case AreaMarkerKind::Store:
+            glVertex2f(-8,-3);glVertex2f(8,-3);glVertex2f(8,-3);glVertex2f(8,8);glVertex2f(8,8);glVertex2f(-8,8);glVertex2f(-8,8);glVertex2f(-8,-3);
+            glVertex2f(-4,-3);glVertex2f(-4,-8);glVertex2f(-4,-8);glVertex2f(4,-8);glVertex2f(4,-8);glVertex2f(4,-3);break;
         }
         glEnd();glPopMatrix();
     }

@@ -62,7 +62,7 @@ wxDECLARE_EVENT(EVT_AREA_GIZMO, AreaGizmoEvent);
 
 struct AreaSnapSettings {float grid{},rotation{};bool walkmesh{};};
 inline constexpr std::size_t kAreaTriggerVertexLimit=255;
-enum class AreaMarkerKind {Waypoint, Sound, Camera, Entry};
+enum class AreaMarkerKind {Waypoint, Sound, Camera, Entry, Item, Encounter, Store};
 struct AreaEditorMarker {std::string path;AreaMarkerKind kind;model::Vec3 position;};
 wxDECLARE_EVENT(EVT_AREA_MARKER_PICKED, wxCommandEvent);
 class AreaPolygonEvent : public wxCommandEvent {
@@ -404,7 +404,7 @@ public:
     void setAreaMarkers(std::vector<AreaEditorMarker> markers,std::string selected);
     void moveAreaMarker(const std::string& path,model::Vec3 position);
     void setAreaPolygon(std::vector<model::Vec3> points,bool vertices);
-    void beginAreaPolygon(std::optional<float> planeZ={},float zOffset=0.0f);
+    void beginAreaPolygon(std::optional<float> planeZ={},float zOffset=0.0f,std::optional<std::size_t> vertexLimit=kAreaTriggerVertexLimit);
     bool areaPolygonDrawing() const noexcept {return polygonDrawing_;}
     bool areaPolygonDragging() const noexcept {return polygonDrag_.has_value();}
     void finishAreaPolygon();
@@ -784,6 +784,7 @@ private:
     std::vector<model::Vec3> polygonPoints_;
     bool polygonVertices_{},polygonDrawing_{};
     std::optional<float> polygonPlaneZ_;
+    std::optional<std::size_t> polygonVertexLimit_;
     float polygonZOffset_{};
     struct PolygonDrag {std::size_t vertex;model::Vec3 position;};
     std::optional<PolygonDrag> polygonDrag_;
