@@ -7,7 +7,12 @@ namespace neomdl::ui {
 
 enum class BinaryMeshPage { Properties, Vertices, Controllers, Transform };
 
-std::optional<std::filesystem::path> editBinaryMeshFields(wxWindow* parent, const AuthoringJob& runJob,
+struct BinaryEditResult {
+    std::filesystem::path path;
+    std::size_t nodeOffset;
+};
+
+std::optional<BinaryEditResult> editBinaryMeshFields(wxWindow* parent, const AuthoringJob& runJob,
     const std::filesystem::path& input = {}, std::optional<std::size_t> selectedOffset = {},
     BinaryMeshPage page = BinaryMeshPage::Properties, const std::set<std::size_t>& selectedOffsets = {});
 void inspectBinaryFile(wxWindow* parent, const AuthoringJob& runJob);

@@ -204,7 +204,10 @@ void editBinaryDangly(wxWindow* parent,BinaryModelFile& file,std::size_t index) 
 }
 
 void editBinaryControllers(wxWindow* parent,BinaryModelFile& file,std::size_t index) {
-    const auto& original=file.model.nodes[index];
+    auto& original=file.model.nodes[index];
+    const auto words=12+static_cast<std::size_t>(binaryNumber(file.mdl,*original.packedOffset+68,model::BinaryType::UInt32));
+    for (std::size_t i=0;i<original.controllerDataWords.size();++i)
+        original.controllerDataWords[i]=static_cast<std::uint32_t>(binaryNumber(file.mdl,words+i*4,model::BinaryType::UInt32));
     std::vector<std::size_t> controllers;wxArrayString labels;
     for (std::size_t i=0;i<original.controllers.size();++i) {
         const auto& controller=original.controllers[i];
@@ -220,7 +223,9 @@ void editBinaryControllers(wxWindow* parent,BinaryModelFile& file,std::size_t in
     if (static_cast<std::size_t>(chosen)<controllers.size()) controllerIndex=controllers[chosen];
     else {
         const auto type=static_cast<std::size_t>(chosen)==controllers.size() ? 132u : 100u;
-        setBinaryStaticController(file,index,type,type==132u ? std::vector<float>{1.0f} : std::vector<float>{0,0,0});
+        const auto state=model::bindNodeMaterial(original);
+        setBinaryStaticController(file,index,type,type==132u ? std::vector<float>{state.alpha} :
+            std::vector<float>{state.selfIllumination[0],state.selfIllumination[1],state.selfIllumination[2]});
         const auto& current=file.model.nodes[index].controllers;
         controllerIndex=static_cast<std::size_t>(std::find_if(current.begin(),current.end(),
             [&](const auto& c) {return c.type==type;})-current.begin());
@@ -281,7 +286,7 @@ void editBinaryTransform(wxWindow* parent,BinaryModelFile& file,std::size_t inde
     dialog.ShowModal();
 }
 
-std::optional<std::filesystem::path> saveBinaryCopy(wxWindow* parent,BinaryModelFile& file,
+std::optional<BinaryEditResult> saveBinaryCopy(wxWindow* parent,BinaryModelFile& file,std::size_t node,
     const std::map<std::size_t,BinaryMeshEdit>& edits,const AuthoringJob& runJob) {
     wxFileDialog output(parent,"Save Edited Binary Copy",neosettings::pathToWx(file.path.parent_path()),
         neosettings::pathToWx(file.path.stem())+"-edited.mdl","Binary MDL (*.mdl)|*.mdl",wxFD_SAVE | wxFD_OVERWRITE_PROMPT);
@@ -305,12 +310,12 @@ std::optional<std::filesystem::path> saveBinaryCopy(wxWindow* parent,BinaryModel
         job.check();
         for (const auto& item : outputs) neoshared::texture::writeFileBytes(item.path,item.bytes);
     })) return {};
-    return destination;
+    return BinaryEditResult{destination,*file.model.nodes[node].packedOffset};
 }
 
 } // namespace
 
-std::optional<std::filesystem::path> editBinaryMeshFields(wxWindow* parent, const AuthoringJob& runJob,
+std::optional<BinaryEditResult> editBinaryMeshFields(wxWindow* parent, const AuthoringJob& runJob,
     const std::filesystem::path& input, std::optional<std::size_t> selectedOffset, BinaryMeshPage page,
     const std::set<std::size_t>& selectedOffsets) {
     auto path=input;
@@ -320,7 +325,7 @@ std::optional<std::filesystem::path> editBinaryMeshFields(wxWindow* parent, cons
         if (open.ShowModal() != wxID_OK) return {};
         path=neosettings::pathFromWx(open.GetPath());
     }
-    std::optional<std::filesystem::path> saved;
+    std::optional<BinaryEditResult> saved;
     try {
         BinaryModelFile file;
         if (!runJob("Reading binary mesh fields",[&](const auto& job) {
@@ -332,7 +337,7 @@ std::optional<std::filesystem::path> editBinaryMeshFields(wxWindow* parent, cons
             const auto index=static_cast<std::size_t>(node-file.model.nodes.begin());
             std::map<std::size_t,BinaryMeshEdit> edits;
             editBinaryTransform(parent,file,index,edits[index],"Save Copy...",[&](wxWindow* owner) {
-                saved=saveBinaryCopy(owner,file,edits,runJob);
+                saved=saveBinaryCopy(owner,file,index,edits,runJob);
                 return saved.has_value();
             });
             return saved;
@@ -531,7 +536,7 @@ std::optional<std::filesystem::path> editBinaryMeshFields(wxWindow* parent, cons
                         for (const auto& field : source.headerFields) target.headerFields[field.first]=field.second;
                     }
                 }
-                const auto output=saveBinaryCopy(&dialog,file,outputEdits,runJob);
+                const auto output=saveBinaryCopy(&dialog,file,current,outputEdits,runJob);
                 if (output) {saved=*output;dialog.EndModal(wxID_OK);}
             } catch (const std::exception& error) { wxui::showError(&dialog,error); }
         });

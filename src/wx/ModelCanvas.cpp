@@ -2232,6 +2232,11 @@ void ModelCanvas::showAllMeshes() {
     Refresh(false);
 }
 
+void ModelCanvas::setMeshVisibility(std::set<std::size_t> hidden,std::optional<std::set<std::size_t>> isolated) {
+    hiddenNodes_=std::move(hidden);isolatedNodes_=std::move(isolated);
+    Refresh(false);
+}
+
 bool ModelCanvas::meshVisible(std::size_t node) const {
     return !hiddenNodes_.count(node) && (!isolatedNodes_ || isolatedNodes_->count(node));
 }

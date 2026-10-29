@@ -990,6 +990,11 @@ private:
         if (document_->textureOverride()) document->setTextureOverride(document_->textureOverride());
         const auto selections=selectedNodes_;
         const auto selection=selectedNode_;
+        const auto oldHidden=canvas_->hiddenMeshNodes();
+        const auto oldIsolated=canvas_->isolatedMeshNodes();
+        std::set<std::size_t> hidden;
+        std::optional<std::set<std::size_t>> isolated;
+        if (oldIsolated) isolated.emplace();
         const bool identified=document->sourceModel().nodes.front().asciiIdentity.has_value();
         const auto animation = selectedAnimation();
         const auto clip = animation ? document_->animation(*animation).name : std::string{};
@@ -1016,7 +1021,10 @@ private:
                 tree_->SelectItem(nodeItems_[i]);
                 if (selection && matches(*selection)) primary=nodeItems_[i];
             }
+            if (std::any_of(oldHidden.begin(),oldHidden.end(),matches)) hidden.insert(i);
+            if (oldIsolated && std::any_of(oldIsolated->begin(),oldIsolated->end(),matches)) isolated->insert(i);
         }
+        canvas_->setMeshVisibility(std::move(hidden),std::move(isolated));
         populateAnimations();
         for (std::size_t index = 0; index < document_->animations().size(); ++index) {
             if (document_->animation(index).name == clip) {
@@ -2195,11 +2203,11 @@ private:
         auto document=std::make_unique<ModelDocument>();
         const auto resources=selected ? page->document().resourceResolver() : captureHostResolver();
         if (!runJob("Loading edited binary model",[&](const auto& job) {
-            document->openFile(*saved,resources,job);
+            document->openFile(saved->path,resources,job);
         })) return;
         const auto session=selected ? page->resourceSession() : std::shared_ptr<GameResourceSession>{};
         addDocument(std::move(document),session,resources,selected ? page : nullptr);
-        if (offset) activePage()->selectPackedNodes(offsets,offset);
+        activePage()->selectPackedNodes(offsets,saved->nodeOffset);
     }
 
     void reloadModel(ResourceResolver resources, std::shared_ptr<GameResourceSession> session) {
@@ -5669,6 +5677,7 @@ private:
             case ID_ResetView:
                 activePage()->clearAreaEnvironmentReplay();
                 activePage()->setTextureOverride({});
+                activePage()->showAllMeshes();
                 applyPreviewOptions(options_);
                 updateState();
                 return;
