@@ -3306,7 +3306,7 @@ void ModelCanvas::previewAreaTrigger(std::size_t sourceIndex,model::Vec3 positio
         record.position=position;
         setAreaPolygon(record.worldFootprint,polygonVertices_);
         if(record.runtimeInstance) {
-            const auto heading=std::atan2(-record.orientation.x,record.orientation.y)+angle;
+            const auto heading=std::atan2(-record.orientation.x,record.orientation.y)+(record.templateIdentity.empty()?angle:0.0f);
             setSceneOwnerWorld(*record.runtimeInstance,gitBearingTransform(position,heading));
         }
     }
@@ -3392,9 +3392,11 @@ bool ModelCanvas::handleAreaPolygon(wxMouseEvent& event) {
                 const auto first=gizmoScreenPoint(polygonPoints_.front());
                 if(std::hypot(first.x-event.GetX(),first.y-event.GetY())<FromDIP(10)) {finishAreaPolygon();return true;}
             }
-            auto point=areaPlacementPoint(event.GetPosition(),polygonPlaneZ_);
-            if(point)point=snappedAreaPoint(*point,false);
-            if(point) {point->z+=polygonZOffset_;polygonPoints_.push_back(*point);emitAreaPolygon(AreaGizmoPhase::Preview,true);Refresh(false);}
+            if(polygonPoints_.size()<kAreaTriggerVertexLimit) {
+                auto point=areaPlacementPoint(event.GetPosition(),polygonPlaneZ_);
+                if(point)point=snappedAreaPoint(*point,false);
+                if(point) {point->z+=polygonZOffset_;polygonPoints_.push_back(*point);emitAreaPolygon(AreaGizmoPhase::Preview,true);Refresh(false);}
+            }
             return true;
         }
         if(event.LeftUp())return true;

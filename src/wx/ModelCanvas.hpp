@@ -61,6 +61,7 @@ public:
 wxDECLARE_EVENT(EVT_AREA_GIZMO, AreaGizmoEvent);
 
 struct AreaSnapSettings {float grid{},rotation{};bool walkmesh{};};
+inline constexpr std::size_t kAreaTriggerVertexLimit=255;
 enum class AreaMarkerKind {Waypoint, Sound, Camera, Entry};
 struct AreaEditorMarker {std::string path;AreaMarkerKind kind;model::Vec3 position;};
 wxDECLARE_EVENT(EVT_AREA_MARKER_PICKED, wxCommandEvent);

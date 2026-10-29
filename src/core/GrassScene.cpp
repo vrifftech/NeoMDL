@@ -112,6 +112,10 @@ void GrassScene::rebuild(const std::vector<GrassRoomSource>& rooms,const GrassSe
     const neoshared::bif::JobControl& job) {
     ResourceLoadScope work(job);job.update(0,rooms.size(),"Preparing grass rooms");
     validateGrassSettings(settings);GrassScene next;next.settings_=settings;
+    for(auto& material:next.settings_.surfaces)if(material) {
+        float sum=0.0f;for(const auto weight:material->probabilities)sum+=weight;
+        if(sum!=1.0f)for(auto& weight:material->probabilities)weight/=sum;
+    }
     std::size_t totalBlades=0;
     std::size_t roomIndex=0;
     for(const auto& room:rooms) {

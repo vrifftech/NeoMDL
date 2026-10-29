@@ -243,7 +243,8 @@ AreaLoadPlan readAreaLoad(const std::string& area,const std::string& scope,
                     const auto r=required(p.templateResref,family.type);p.templateIdentity=r.identity;
                     loadGff(t,r,family.signature);data=t.root();
                 }
-                const auto tag=string(*data,"Tag");if(!tag.empty())p.label+=" "+tag;
+                const auto& tagSource=templates&&family.kind==AreaObjectKind::Door&&options.game==model::GameVersion::Kotor2&&field(placement,"Tag")?placement:*data;
+                const auto tag=string(tagSource,"Tag");if(!tag.empty())p.label+=" "+tag;
                 if(family.kind==AreaObjectKind::Creature) {
                     p.frame=gitCreatureFrame({number(placement,"XPosition"),number(placement,"YPosition"),number(placement,"ZPosition")},
                         {number(placement,"XOrientation"),number(placement,"YOrientation"),number(placement,"ZOrientation")});
@@ -282,11 +283,9 @@ AreaLoadPlan readAreaLoad(const std::string& area,const std::string& scope,
                     if(family.kind==AreaObjectKind::Placeable) {
                         require(field(*data,"Appearance"),"placeable has no Appearance");
                         p.appearance=dword(*data,"Appearance");p.modelResref=resourceKey(tables.stringValue("placeables",p.appearance,"modelname"));
-                        if(options.game==model::GameVersion::Kotor1) {
-                            // K1 LoadPlaceables 0x1a15cc calls either the UTP
-                            // loader or the inline loader, then applies placement
-                            // only. LoadPlaceable 0x26f62d..0x26f70b: Open,
-                            // saved INT Animation, then BYTE AnimationState.
+                        // Both engines load visual state from the UTP or inline
+                        // record: Open, saved Animation, then AnimationState.
+                        {
                             if(byte(*data,"Open"))
                                 p.authoredVisualState.animation=placeableServerAnimation(0x275bu);
                             else if(const auto* animation=typed<GffIntField>(*data,"Animation"))
@@ -296,12 +295,6 @@ AreaLoadPlan readAreaLoad(const std::string& area,const std::string& scope,
                                 const auto command=placeableAnimationState(*p.animationState);
                                 p.authoredVisualState.animation=placeableServerAnimation(command.serverAnimation);
                                 p.authoredVisualState.animation->serializedState=*p.animationState;
-                            }
-                        } else {
-                            const auto& stateSource=field(placement,"AnimationState")?placement:*data;
-                            if(field(stateSource,"AnimationState")) {
-                                p.animationState=byte(stateSource,"AnimationState");
-                                p.authoredVisualState.animation=placeableAnimationState(*p.animationState);
                             }
                         }
                     } else {
@@ -316,22 +309,17 @@ AreaLoadPlan readAreaLoad(const std::string& area,const std::string& scope,
                             engine2da::getInt(tables.table("doortypes"),static_cast<int>(p.appearance),"visiblemodel",visible);
                             p.visible=visible!=0;
                         } else p.modelResref=resourceKey(tables.stringValue("genericdoors",byte(*data,"GenericType"),"modelname"));
-                        // K1 LoadDoorExternal 0x20e136 applies transition
-                        // metadata after a template, but never overrides its
-                        // visual OpenState from the placement structure.
-                        const auto& stateSource=options.game==model::GameVersion::Kotor1?*data:
-                            (field(placement,"OpenState")?placement:*data);
-                        if(options.game==model::GameVersion::Kotor1||field(stateSource,"OpenState")) {
-                            p.openState=byte(stateSource,"OpenState");
-                            p.authoredVisualState.animation=doorOpenStateAnimation(
-                                options.game==model::GameVersion::Kotor1&&!p.visible?3u:*p.openState);
-                        }
+                        // LoadDoorExternal does not override template OpenState.
+                        p.openState=byte(*data,"OpenState");
+                        p.authoredVisualState.animation=doorOpenStateAnimation(
+                            options.game==model::GameVersion::Kotor1&&!p.visible?3u:*p.openState);
                     }
                     // K1 engine door/placeable loaders have no tweak-color producer.
-                    if(options.game==model::GameVersion::Kotor2&&byte(*data,"UseTweakColor")) {
-                        const auto tweak=color(*data,"TweakColor");
-                        require(tweak.has_value(),"UseTweakColor is set but TweakColor is missing");
-                        ObjectColorShift shift;shift.enabled=true;shift.color=*tweak;shift.amount=1.0f;
+                    const auto& tweakSource=templates?placement:*data;
+                    if(options.game==model::GameVersion::Kotor2&&byte(tweakSource,"UseTweakColor")) {
+                        const auto tweak=dword(tweakSource,"TweakColor");
+                        ObjectColorShift shift;shift.enabled=true;shift.amount=1.0f;
+                        shift.color={float(tweak&255u)/255.0f,float((tweak>>8u)&255u)/255.0f,float((tweak>>16u)&255u)/255.0f};
                         shift.propagateToReferences=true;p.authoredVisualState.colorShift=shift;
                     }
                 }
@@ -375,7 +363,7 @@ AreaLoadPlan readAreaLoad(const std::string& area,const std::string& scope,
                 else if(const auto name=localized(*data,"LocalizedName");!name.empty())
                     record.label+=" "+name;
                 record.position={number(placement,"XPosition"),number(placement,"YPosition"),number(placement,"ZPosition")};
-                record.orientation={number(placement,"XOrientation"),number(placement,"YOrientation"),number(placement,"ZOrientation")};
+                record.orientation={number(*data,"XOrientation"),number(*data,"YOrientation"),number(*data,"ZOrientation")};
                 record.type=integer32(*data,"Type",0);
                 record.highlightHeight=number(*data,"HighlightHeight",0.1f);
                 if(!(record.highlightHeight>0.0f))record.highlightHeight=0.1f;
