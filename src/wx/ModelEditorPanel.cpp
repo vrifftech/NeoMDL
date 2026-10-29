@@ -103,6 +103,7 @@ enum CommandId {
     ID_QuickConvert,
     ID_ConversionNaming,
     ID_NodeProperties,
+    ID_NodeTransform,
     ID_VertexProperties,
     ID_ReplaceMesh,
     ID_ConvertMesh,
@@ -648,18 +649,19 @@ public:
         return (asciiEditor_->advanced() && (!document_->sourceModel().asciiBuilt ||
             document_->model().nodes[*selectedNode_].asciiIdentity)) || selectedNameIsUnique();
     }
-    bool canEditBinaryMesh() const {
+    bool canEditBinaryNode() const {
         return selectedNode_ && !document_->sourceModel().asciiBuilt && !document_->path().empty() &&
-            canvas_->areaScene().empty() && document_->model().nodes[*selectedNode_].mesh &&
-            !asciiEditor_->modified();
+            canvas_->areaScene().empty() && !asciiEditor_->modified();
+    }
+    bool canEditBinaryMesh() const {
+        return canEditBinaryNode() && document_->model().nodes[*selectedNode_].mesh;
     }
     bool canEditBinaryVertices() const {
         return canEditBinaryMesh() && !document_->model().meshes[*document_->model().nodes[*selectedNode_].mesh].vertices.empty() &&
-            (document_->model().meshes[*document_->model().nodes[*selectedNode_].mesh].mdxBitmap&0x7eu);
+            (document_->model().meshes[*document_->model().nodes[*selectedNode_].mesh].mdxBitmap&0x7fu);
     }
     bool canEditBinaryControllers() const {
-        return canEditBinaryMesh() && std::any_of(document_->model().nodes[*selectedNode_].controllers.begin(),
-            document_->model().nodes[*selectedNode_].controllers.end(),editableBinaryMaterialController);
+        return canEditBinaryMesh();
     }
     std::size_t selectedPackedOffset() const {
         return *document_->model().nodes[*selectedNode_].packedOffset;
@@ -2128,7 +2130,7 @@ private:
 
     void editBinaryMesh(BinaryMeshPage initialPage=BinaryMeshPage::Properties) {
         auto* page=activePage();
-        const bool selected=page && page->canEditBinaryMesh();
+        const bool selected=page && (initialPage==BinaryMeshPage::Transform ? page->canEditBinaryNode() : page->canEditBinaryMesh());
         const auto offset=selected ? std::optional<std::size_t>{page->selectedPackedOffset()} : std::nullopt;
         const auto saved=editBinaryMeshFields(this,
             [this](const wxString& title,const auto& work) {return runJob(title,work);},
@@ -4075,6 +4077,7 @@ private:
 
         auto* edit = new wxMenu;
         edit->Append(ID_NodeProperties, "Selected Node Properties...", "Edit the selected node's properties.");
+        edit->Append(ID_NodeTransform,"Selected Node Transform...","Edit the selected binary node's base position, rotation and scale.");
         edit->Append(ID_VertexProperties, "Selected Mesh Vertex Properties...", "Edit vertex values and corner assignments in source-index tables.");
         edit->Append(ID_ReplaceMesh, "Replace Selected Mesh...", "Queue mesh replacements from donor models.");
         edit->Append(ID_ConvertMesh, "Convert Selected Mesh to Trimesh", "Bake a skin at its constructed bind pose, or retain a lightsaber's stationary blade pieces. Undoable ASCII edit.");
@@ -5566,6 +5569,7 @@ private:
                 if (activePage()->canEditBinaryMesh()) editBinaryMesh();
                 else activePage()->editSelectedNode();
                 return;
+            case ID_NodeTransform: editBinaryMesh(BinaryMeshPage::Transform);return;
             case ID_VertexProperties:
                 if (!activePage()->document().sourceModel().asciiBuilt) editBinaryMesh(BinaryMeshPage::Vertices);
                 else activePage()->editSelectedVertices();
@@ -5754,6 +5758,7 @@ private:
         enableModuleCommand(ID_ExportAscii,editor&&editor->ready());
         enableModuleCommand(ID_ExportPacked,editor&&editor->ready());
         enableModuleCommand(ID_NodeProperties,active&&(active->canEditNode()||active->canEditBinaryMesh()));
+        enableModuleCommand(ID_NodeTransform,active&&active->canEditBinaryNode());
         enableModuleCommand(ID_VertexProperties,active&&(active->document().sourceModel().asciiBuilt ? active->canEditVertices() : active->canEditBinaryVertices()));
         enableModuleCommand(ID_ReplaceMesh,active&&active->canReplaceMesh());
         enableModuleCommand(ID_ConvertMesh,active&&active->canConvertMesh());

@@ -1,6 +1,7 @@
 #pragma once
 
 #include "core/CollisionAssets.hpp"
+#include <set>
 
 namespace neomdl {
 
@@ -18,6 +19,8 @@ struct BinaryMeshEdit {
     std::array<std::optional<bool>,6> flags;
     std::optional<bool> tangentBasis;
     bool regenerateTangents{};
+    std::set<std::size_t> positionRows;
+    bool transformChanged{},bindingChanged{};
 };
 
 struct BinaryModelFile {
@@ -32,6 +35,8 @@ struct BinaryModelFile {
 BinaryModelFile readBinaryModelFile(const std::filesystem::path& path,
     const neoshared::bif::JobControl& job = {});
 std::string binaryMeshTexture(const BinaryModelFile& file, std::size_t node, std::size_t channel);
+void setBinaryStaticController(BinaryModelFile& file,std::size_t node,std::uint32_t type,
+                               const std::vector<float>& values);
 std::vector<CollisionOutput> binaryEditOutputs(const BinaryModelFile& file,
     const std::map<std::size_t,BinaryMeshEdit>& edits, const std::filesystem::path& output,
     const neoshared::bif::JobControl& job = {});

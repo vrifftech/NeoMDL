@@ -4,7 +4,7 @@
 
 namespace neomdl::ui {
 
-enum class BinaryMeshPage { Properties, Vertices, Controllers };
+enum class BinaryMeshPage { Properties, Vertices, Controllers, Transform };
 
 std::optional<std::filesystem::path> editBinaryMeshFields(wxWindow* parent, const AuthoringJob& runJob,
     const std::filesystem::path& input = {}, std::optional<std::size_t> selectedOffset = {},

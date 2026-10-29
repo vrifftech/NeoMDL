@@ -5,6 +5,8 @@
 #include <neoshared/PathUtf8.hpp>
 
 #include <algorithm>
+#include <cmath>
+#include <functional>
 
 namespace neomdl {
 namespace {
@@ -48,6 +50,66 @@ std::vector<model::TangentBasis> tangentSums(model::Mesh mesh,
     return sums;
 }
 
+model::Bounds geometryBounds(const std::vector<model::Vec3>& positions) {
+    model::Bounds bounds{positions.front(),positions.front(),true};
+    for (const auto p : positions) {
+        bounds.minimum.x=std::min(bounds.minimum.x,p.x);bounds.maximum.x=std::max(bounds.maximum.x,p.x);
+        bounds.minimum.y=std::min(bounds.minimum.y,p.y);bounds.maximum.y=std::max(bounds.maximum.y,p.y);
+        bounds.minimum.z=std::min(bounds.minimum.z,p.z);bounds.maximum.z=std::max(bounds.maximum.z,p.z);
+    }
+    return bounds;
+}
+
+void updateBinaryGeometry(model::packed_export::Buffer& mdl,const BinaryModelFile& file,
+                          std::size_t index,const BinaryMeshEdit& edit) {
+    const auto& node=file.model.nodes[index];const auto& mesh=file.model.meshes[*node.mesh];
+    const auto base=*node.packedOffset+80;
+    std::vector<model::Vec3> positions;
+    for (const auto& vertex : mesh.vertices) positions.push_back(vertex.position);
+    const auto bounds=geometryBounds(positions);
+    const model::Vec3 center{(bounds.minimum.x+bounds.maximum.x)*0.5f,
+        (bounds.minimum.y+bounds.maximum.y)*0.5f,(bounds.minimum.z+bounds.maximum.z)*0.5f};
+    float radius{};
+    for (const auto p : positions) radius=std::max(radius,std::hypot(p.x-center.x,p.y-center.y,p.z-center.z));
+    mdl.vec3(base+20,bounds.minimum);mdl.vec3(base+32,bounds.maximum);
+    mdl.f32(base+44,radius);mdl.vec3(base+48,center);
+    if (mesh.cpuPositions && !mesh.cpuPositions->empty()) {
+        auto cpu=*mesh.cpuPositions;
+        const auto pool=12+word(file.mdl,base+(file.model.game==model::GameVersion::Kotor1 ? 328u : 336u));
+        for (const auto row : edit.positionRows) {cpu[row]=positions[row];mdl.vec3(pool+row*12,cpu[row]);}
+        positions=std::move(cpu);
+    }
+    if (mesh.dangly) {
+        const auto extension=*node.packedOffset+(file.model.game==model::GameVersion::Kotor1 ? 412u : 420u);
+        const auto rest=12+word(file.mdl,extension+24);
+        for (const auto row : edit.positionRows) mdl.vec3(rest+row*12,mesh.vertices[row].position);
+    }
+    const auto faces=12+word(file.mdl,base+8);
+    for (std::size_t i=0;i<mesh.faces.size();++i) {
+        const auto& face=mesh.faces[i];
+        if (!std::any_of(face.indices.begin(),face.indices.end(),[&](auto row) {return edit.positionRows.count(row);})) continue;
+        const auto a=positions[face.indices[0]],b=positions[face.indices[1]],c=positions[face.indices[2]];
+        const model::Vec3 p{b.x-a.x,b.y-a.y,b.z-a.z},q{c.x-a.x,c.y-a.y,c.z-a.z};
+        const auto normal=model::normalize({p.y*q.z-p.z*q.y,p.z*q.x-p.x*q.z,p.x*q.y-p.y*q.x});
+        mdl.vec3(faces+i*32,normal);mdl.f32(faces+i*32+12,-(normal.x*a.x+normal.y*a.y+normal.z*a.z));
+    }
+    if (node.aabb && node.aabb->root) {
+        const auto& tree=*node.aabb;
+        std::function<model::Bounds(std::size_t)> update=[&](std::size_t at) {
+            const auto& entry=tree.nodes[at];model::Bounds box;
+            if (entry.leaf()) {
+                const auto& face=mesh.faces[entry.faceIndex];
+                box=geometryBounds({positions[face.indices[0]],positions[face.indices[1]],positions[face.indices[2]]});
+            } else {
+                const auto left=update(entry.firstChild),right=update(entry.secondChild);
+                box=geometryBounds({left.minimum,left.maximum,right.minimum,right.maximum});
+            }
+            mdl.vec3(12+entry.sourceOffset,box.minimum);mdl.vec3(12+entry.sourceOffset+12,box.maximum);return box;
+        };
+        update(*tree.root);
+    }
+}
+
 } // namespace
 
 BinaryModelFile readBinaryModelFile(const std::filesystem::path& path,
@@ -76,6 +138,34 @@ std::string binaryMeshTexture(const BinaryModelFile& file, std::size_t node, std
     return {begin,std::find(begin,begin+32,0)};
 }
 
+void setBinaryStaticController(BinaryModelFile& file,std::size_t index,std::uint32_t type,
+                               const std::vector<float>& values) {
+    const auto& node=file.model.nodes[index];const auto at=*node.packedOffset;
+    model::packed_export::Buffer out{file.mdl};
+    const auto count=word(file.mdl,at+60),words=word(file.mdl,at+72);
+    const auto data=out.append((words+1+values.size())*4);
+    for (std::size_t i=0;i<words;++i) out.u32(data+i*4,word(file.mdl,12+word(file.mdl,at+68)+i*4));
+    out.f32(data+words*4,0.0f);
+    for (std::size_t i=0;i<values.size();++i) out.f32(data+(words+1+i)*4,values[i]);
+    auto controller=std::find_if(node.controllers.begin(),node.controllers.end(),[&](const auto& c) {return c.type==type;});
+    std::size_t record;
+    if (controller==node.controllers.end()) {
+        const auto keys=out.append((count+1)*16);
+        for (std::size_t i=0;i<count*16;++i) out.u8(keys+i,file.mdl[12+word(file.mdl,at+56)+i]);
+        out.u32(at+56,keys-12);out.u32(at+60,count+1);out.u32(at+64,count+1);record=keys+count*16;
+    } else record=12+word(file.mdl,at+56)+static_cast<std::size_t>(controller-node.controllers.begin())*16;
+    out.u32(record,type);out.u16(record+4,0xffffu);out.u16(record+6,1);
+    out.u16(record+8,static_cast<std::uint16_t>(words));out.u16(record+10,static_cast<std::uint16_t>(words+1));
+    out.u8(record+12,static_cast<std::uint8_t>(values.size()));
+    out.u32(at+68,data-12);out.u32(at+72,static_cast<std::uint32_t>(words+1+values.size()));
+    out.u32(at+76,static_cast<std::uint32_t>(words+1+values.size()));
+    if (type==model::kControllerPosition) out.vec3(at+16,{values[0],values[1],values[2]});
+    if (type==model::kControllerOrientation) out.quaternion(at+28,{values[0],values[1],values[2],values[3]});
+    out.u32(4,static_cast<std::uint32_t>(out.bytes.size()-12));file.mdl=std::move(out.bytes);
+    const std::vector<std::uint8_t> empty;
+    file.model=model::decodePackedModelBytes(file.mdl,file.mdx ? *file.mdx : empty,neoshared::pathToUtf8(file.path),{},false);
+}
+
 std::vector<CollisionOutput> binaryEditOutputs(const BinaryModelFile& file,
     const std::map<std::size_t,BinaryMeshEdit>& edits, const std::filesystem::path& output,
     const neoshared::bif::JobControl& job) {
@@ -92,6 +182,7 @@ std::vector<CollisionOutput> binaryEditOutputs(const BinaryModelFile& file,
         }
         for (std::size_t flag = 0; flag < edit.flags.size(); ++flag)
             if (edit.flags[flag]) mdl.u8(base+308+flag,*edit.flags[flag] ? 1 : 0);
+        if (!edit.positionRows.empty()) updateBinaryGeometry(mdl,file,index,edit);
         if (edit.tangentBasis || edit.regenerateTangents) {
             const auto& mesh=file.model.meshes[*file.model.nodes[index].mesh];
             const bool stored=(mesh.mdxBitmap&0x80u)!=0;
@@ -125,6 +216,18 @@ std::vector<CollisionOutput> binaryEditOutputs(const BinaryModelFile& file,
                     }
             }
         }
+    }
+    if (std::any_of(edits.begin(),edits.end(),[](const auto& entry) {
+        return !entry.second.positionRows.empty()||entry.second.transformChanged||entry.second.bindingChanged;
+    })) {
+        const std::vector<std::uint8_t> empty;
+        const auto current=model::decodePackedModelBytes(mdl.bytes,mdx ? mdx->bytes : empty,
+            neoshared::pathToUtf8(file.path),job,false);
+        const auto bounds=model::constructedBindPose(current,job).bounds;
+        mdl.vec3(12+0x68,bounds.minimum);mdl.vec3(12+0x74,bounds.maximum);
+        mdl.f32(12+0x80,std::hypot(std::max(std::abs(bounds.minimum.x),std::abs(bounds.maximum.x)),
+            std::max(std::abs(bounds.minimum.y),std::abs(bounds.maximum.y)),
+            std::max(std::abs(bounds.minimum.z),std::abs(bounds.maximum.z))));
     }
     std::vector<CollisionOutput> outputs{{output,std::move(mdl.bytes)}};
     if (mdx) {
