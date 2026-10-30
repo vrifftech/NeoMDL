@@ -17,11 +17,8 @@ struct SceneAudioPreparedSound {
     std::uint32_t durationMilliseconds{},sampleRate{};
 };
 using SceneAudioPreparedBuffers=std::map<SceneAudioBufferKey,SceneAudioPreparedSound>;
-struct PreparedSceneAudioResource {
-    std::shared_ptr<const neoshared::audio::PcmData> pcm;
-};
 struct PreparedSceneAudioPlayback {
-    std::map<SceneAudioResourceKey,PreparedSceneAudioResource> sounds;
+    std::map<SceneAudioResourceKey,std::shared_ptr<const neoshared::audio::PcmData>> sounds;
     std::vector<SceneAudioPriority> priorities;
 };
 

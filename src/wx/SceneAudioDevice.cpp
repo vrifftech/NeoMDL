@@ -58,12 +58,12 @@ SceneAudioBufferKey sceneAudioBufferKey(const SceneAudioPlay& p) {
 SceneAudioPreparedBuffers prepareSceneAudioBuffers(const PreparedSceneAudioPlayback& assets,
     const SceneAudioPreparedBuffers& existing,const neoshared::bif::JobControl& job) {
     SceneAudioPreparedBuffers result;
-    for(const auto& [key,sound]:assets.sounds) {
+    for(const auto& [key,pcm]:assets.sounds) {
         job.check();
         if(existing.count(key))continue;
         job.update(result.size(),assets.sounds.size(),"Preparing scene sound "+std::get<0>(key));
-        result.emplace(key,SceneAudioPreparedSound{sound.pcm,
-            static_cast<std::uint32_t>(sound.pcm->durationSeconds()*1000.0),sound.pcm->sampleRate});
+        result.emplace(key,SceneAudioPreparedSound{pcm,
+            static_cast<std::uint32_t>(pcm->durationSeconds()*1000.0),pcm->sampleRate});
     }
     return result;
 }

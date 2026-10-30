@@ -22,11 +22,9 @@ PreparedSceneAudioPlayback prepare(const std::set<SceneAudioResourceKey>& reques
         job.update(completed,requested.size(),"Preparing scene sound "+name);
         if(!name.empty())if(auto resource=resolver(name,type)) {
             if(const auto span=engineSceneAudioSourceSpan(resource->bytes,streaming,game)) {
-                PreparedSceneAudioResource sound;
                 const std::vector<std::uint8_t> encoded(resource->bytes.begin()+span->offset,
                     resource->bytes.begin()+span->offset+span->size);
-                sound.pcm=neoshared::audio::decodeBytes(encoded,[&]{job.check();});
-                result.sounds.emplace(key,std::move(sound));
+                result.sounds.emplace(key,neoshared::audio::decodeBytes(encoded,[&]{job.check();}));
             }
         }
         ++completed;
