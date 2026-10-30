@@ -14,6 +14,8 @@
 #include <string>
 #include <vector>
 
+namespace neoshared::bif { class LooseArchiveCatalog; }
+
 namespace neomdl {
 
 // A loading operation owns its callbacks only until its worker finishes.
@@ -62,6 +64,8 @@ private:
 };
 ResourceResolver traceResources(ResourceResolver resolver,
     std::shared_ptr<ResourceTrace> trace, std::string requester);
+// The catalog remains unchanged for the lifetime of its indexed resolver.
+ResourceResolver archiveResources(std::shared_ptr<const neoshared::bif::LooseArchiveCatalog> catalog);
 // Unique case-folded sibling lookup; ambiguity is an error, never permission
 // to try a lower-priority mount. No implicit current-working-directory search.
 ResourceResolver directoryResources(const std::filesystem::path& directory,

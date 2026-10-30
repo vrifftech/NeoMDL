@@ -42,16 +42,16 @@ std::vector<Path> installationArchives(const Path& root,const neoshared::bif::Jo
 
 struct Mount {
     neoshared::bif::LooseArchiveCatalog catalog;
-    std::vector<Index> indices; // caller priority, independent of catalog sort
+    Index index; // first archive in caller priority, independent of catalog sort
     std::vector<Path> paths;
     void indexArchive(const neoshared::bif::LooseArchiveInfo& archive,const neoshared::bif::JobControl& job) {
-        Index index;
+        Index entries;
         for(const auto n:archive.resourceIndices) {
             job.check();
             const auto& r=catalog.resources().at(n);
-            index[{lower(r.resref),r.type}].push_back(n);
+            entries[{lower(r.resref),r.type}].push_back(n);
         }
-        indices.push_back(std::move(index));
+        index.merge(entries);
     }
     void open(const Path& root,const std::vector<Path>& requested,const neoshared::bif::JobControl& job) {
         std::set<std::string> unique;
@@ -65,8 +65,9 @@ struct Mount {
             throw std::runtime_error(catalog.lastError());
         std::map<std::string,const neoshared::bif::LooseArchiveInfo*> archives;
         for(const auto& archive:catalog.archives()) archives.emplace(neoshared::genericPathToUtf8(archive.resolvedPath),&archive);
-        for(const auto& path:paths) {
-            job.update(indices.size(),paths.size(),"Indexing mounted resources: "+neoshared::pathToUtf8(path));
+        for(std::size_t n=0;n<paths.size();++n) {
+            const auto& path=paths[n];
+            job.update(n,paths.size(),"Indexing mounted resources: "+neoshared::pathToUtf8(path));
             const auto a=archives.find(neoshared::genericPathToUtf8(path));
             if(a==archives.end()||!a->second->valid)
                 throw std::runtime_error("Invalid mounted archive: "+neoshared::pathToUtf8(path));
@@ -85,13 +86,15 @@ struct Mount {
         }
     }
     std::optional<std::size_t> find(const Key& key) const {
-        for(std::size_t n=0;n<indices.size();++n) {
-            resourceLoadJob().check();
-            if(const auto i=indices[n].find(key);i!=indices[n].end()) {
-                if(i->second.size()!=1) throw std::runtime_error("Ambiguous resource in "+neoshared::pathToUtf8(paths[n])+": "+key.first);
-                // Unreadable high-priority resources are errors, not fallthrough.
-                return i->second.front();
+        resourceLoadJob().check();
+        if(const auto i=index.find(key);i!=index.end()) {
+            if(i->second.size()!=1) {
+                const auto& entry=catalog.resources().at(i->second.front());
+                const auto& archive=catalog.archives().at(entry.archiveIndex);
+                throw std::runtime_error("Ambiguous resource in "+neoshared::pathToUtf8(archive.resolvedPath)+": "+key.first);
             }
+            // Unreadable high-priority resources are errors, not fallthrough.
+            return i->second.front();
         }
         return {};
     }
@@ -307,8 +310,10 @@ std::vector<GameResourceEntry> GameResourceSession::resources(const std::vector<
             entries.emplace(Key{lower(name),type},GameResourceEntry{lower(name),type,source});
     };
     const auto mount=[&](const Mount& mounted) {
-        for(std::size_t i=0;i<mounted.indices.size();++i)for(const auto& [key,indices]:mounted.indices[i])
-            add(key.first,key.second,neoshared::pathToUtf8(mounted.paths[i]));
+        for(const auto& [key,indices]:mounted.index) {
+            const auto& resource=mounted.catalog.resources().at(indices.front());
+            add(key.first,key.second,neoshared::pathToUtf8(mounted.catalog.archives().at(resource.archiveIndex).resolvedPath));
+        }
     };
     const auto& base=*state_->base;
     mount(base.overrides);

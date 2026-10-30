@@ -1,6 +1,7 @@
 #include "core/ResourceContext.hpp"
 #include <neoshared/PathUtf8.hpp>
 #include <neoshared/bif/KeyBifArchive.hpp>
+#include <neoshared/bif/LooseArchiveCatalog.hpp>
 #include <algorithm>
 #include <cctype>
 #include <fstream>
@@ -161,6 +162,24 @@ ResourceResolver traceResources(ResourceResolver resolver,std::shared_ptr<Resour
             trace->record(requester,name,type,r?&*r:nullptr);return r;}
         catch(const neoshared::bif::JobCancelled&) {throw;}
         catch(const std::exception& e) {trace->record(requester,name,type,nullptr,e.what());throw;}
+    };
+}
+ResourceResolver archiveResources(std::shared_ptr<const neoshared::bif::LooseArchiveCatalog> catalog) {
+    using Key=std::pair<std::string,std::uint16_t>;
+    std::map<Key,std::size_t> index;
+    for(const auto& entry:catalog->resources())
+        index.emplace(Key{lowerResourceName(entry.resref),entry.type},entry.index);
+    return [catalog=std::move(catalog),index=std::make_shared<const std::map<Key,std::size_t>>(std::move(index))](
+        const std::string& name,std::uint16_t type)->std::optional<neoshared::ResourceDocument> {
+        const auto found=index->find({resourceKey(name),type});
+        if(found==index->end())return {};
+        const auto& entry=catalog->resources().at(found->second);
+        const auto& archive=catalog->archives().at(entry.archiveIndex);
+        neoshared::ResourceDocument source{neoshared::pathToUtf8(archive.resolvedPath)+"#"+entry.fileName(),
+            entry.fileName(),neoshared::pathToUtf8(archive.resolvedPath),entry.type,{}, {archive.resolvedPath}};
+        std::string error;
+        if(!catalog->readResource(entry.index,source.bytes,error,resourceLoadJob()))throw std::runtime_error(error);
+        return source;
     };
 }
 ResourceResolver directoryResources(const std::filesystem::path& directory,ResourceResolver fallback) {
