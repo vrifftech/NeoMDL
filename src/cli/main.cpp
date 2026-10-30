@@ -128,44 +128,47 @@ int main(int argc, char** argv) {
         std::vector<Conversion> conversions;
         std::vector<std::filesystem::path> inputs=paths;
         const auto count=mode?paths.size():1u;
-        for (std::size_t i=0;i<count;++i) {
-            const auto& path=paths[i];
-            Conversion conversion;
-            conversion.result.source=neoshared::pathToUtf8(path);
-            conversion.result.game=options.game;
-            try {
-                auto request=modelInput(path);
-                inputs.push_back(request.input);
-                if(mode) {
-                    auto planned=neomdl::planConversion(request.input,*mode,directory,naming);
-                    planned.mdx=request.mdx; request=std::move(planned);
-                } else if(paths.size()==2)request.mdx=paths[1];
-                if(asciiOutput)request.asciiOutput=asciiOutput;
-                if(packedOutput)request.packedOutput=packedOutput;
-                auto files=neomdl::conversionInputs(request); inputs.insert(inputs.end(),files.begin(),files.end());
-                conversion.outputs=neomdl::conversionOutputs(request,options);
-                if(request.asciiOutput||request.packedOutput)conversion.reportPath=neomdl::conversionReportPath(request);
-                conversion.request=std::move(request);
-            } catch(const std::exception& error) {
-                conversion.result.error=error.what();
-                if(mode||asciiOutput||packedOutput) {
-                    conversion.reportPath=directory.empty()?path:directory/path.filename();
-                    conversion.reportPath+=".report.txt";
-                    conversion.outputs={conversion.reportPath};
+        {
+            neomdl::ResourceLoadScope planning(neomdl::resourceLoadJob());
+            for (std::size_t i=0;i<count;++i) {
+                const auto& path=paths[i];
+                Conversion conversion;
+                conversion.result.source=neoshared::pathToUtf8(path);
+                conversion.result.game=options.game;
+                try {
+                    auto request=modelInput(path);
+                    inputs.push_back(request.input);
+                    if(mode) {
+                        auto planned=neomdl::planConversion(request.input,*mode,directory,naming);
+                        planned.mdx=request.mdx; request=std::move(planned);
+                    } else if(paths.size()==2)request.mdx=paths[1];
+                    if(asciiOutput)request.asciiOutput=asciiOutput;
+                    if(packedOutput)request.packedOutput=packedOutput;
+                    auto files=neomdl::conversionInputs(request); inputs.insert(inputs.end(),files.begin(),files.end());
+                    conversion.outputs=neomdl::conversionOutputs(request,options);
+                    if(request.asciiOutput||request.packedOutput)conversion.reportPath=neomdl::conversionReportPath(request);
+                    conversion.request=std::move(request);
+                } catch(const std::exception& error) {
+                    conversion.result.error=error.what();
+                    if(mode||asciiOutput||packedOutput) {
+                        conversion.reportPath=directory.empty()?path:directory/path.filename();
+                        conversion.reportPath+=".report.txt";
+                        conversion.outputs={conversion.reportPath};
+                    }
                 }
+                conversions.push_back(std::move(conversion));
             }
-            conversions.push_back(std::move(conversion));
-        }
-        for (const auto& replacement:options.replacements) {
-            neomdl::ConversionRequest donor; donor.input=replacement.donor;
-            auto files=neomdl::conversionInputs(donor); inputs.insert(inputs.end(),files.begin(),files.end());
-        }
-        if(options.layout)inputs.push_back(*options.layout);
-        auto destinations=inputs;
-        for(const auto& conversion:conversions)
-            for(const auto& output:conversion.outputs) {
-                neoshared::checkResourceOutput(output,destinations); destinations.push_back(output);
+            for (const auto& replacement:options.replacements) {
+                neomdl::ConversionRequest donor; donor.input=replacement.donor;
+                auto files=neomdl::conversionInputs(donor); inputs.insert(inputs.end(),files.begin(),files.end());
             }
+            if(options.layout)inputs.push_back(*options.layout);
+            auto destinations=inputs;
+            for(const auto& conversion:conversions)
+                for(const auto& output:conversion.outputs) {
+                    neoshared::checkResourceOutput(output,destinations); destinations.push_back(output);
+                }
+        }
         if (mode&&!directory.empty()) std::filesystem::create_directories(directory);
         int failures=0;
         for(auto& conversion:conversions) {

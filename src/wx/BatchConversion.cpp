@@ -107,13 +107,16 @@ void showBatchConversion(wxWindow* parent, ConversionMode mode, const AuthoringJ
             const auto destination = neosettings::pathFromWx(directory->GetPath());
             std::vector<ConversionRequest> requests;
             std::vector<std::filesystem::path> inputs, outputs;
-            for (const auto& path : paths) {
-                requests.push_back(planConversion(path, mode, destination, style));
-                auto source = conversionInputs(requests.back()); inputs.insert(inputs.end(), source.begin(), source.end());
-                auto target = conversionOutputs(requests.back(), options); outputs.insert(outputs.end(), target.begin(), target.end());
+            {
+                ResourceLoadScope planning(resourceLoadJob());
+                for (const auto& path : paths) {
+                    requests.push_back(planConversion(path, mode, destination, style));
+                    auto source = conversionInputs(requests.back()); inputs.insert(inputs.end(), source.begin(), source.end());
+                    auto target = conversionOutputs(requests.back(), options); outputs.insert(outputs.end(), target.begin(), target.end());
+                }
+                auto reserved = inputs;
+                for (const auto& output : outputs) { neoshared::checkResourceOutput(output, reserved); reserved.push_back(output); }
             }
-            auto reserved = inputs;
-            for (const auto& output : outputs) { neoshared::checkResourceOutput(output, reserved); reserved.push_back(output); }
             if (!confirmCompanionOverwrite(&dialog, outputs)) return;
             saveAsciiNamingPreference(style);
             std::filesystem::create_directories(destination);
