@@ -4,7 +4,6 @@
 #include <fstream>
 #include <neoshared/bif/KeyBifArchive.hpp>
 #include <neoshared/bif/LooseArchiveCatalog.hpp>
-#include <neoshared/bif/ResourceDocument.hpp>
 #include <neoshared/bif/ResourceQuery.hpp>
 #include <neoshared/game/OverrideAliases.hpp>
 #include <neoshared/PathUtf8.hpp>
@@ -336,12 +335,25 @@ ResourceResolver GameResourceSession::resolver() const {
         const auto read=[&](const Mount& mount,std::size_t index,const std::string& layer) {
             const auto& item=mount.catalog.resources().at(index);
             const auto& owner=mount.catalog.archives().at(item.archiveIndex);
-            auto r=neoshared::bif::readResourceDocument(b.key,mount.catalog,{neoshared::bif::ResourceSource::LooseArchive,index},job);
+            neoshared::ResourceDocument r;
+            const auto& source=item.overrideFile?item.directPath:owner.resolvedPath;
+            r.fileName=item.fileName();r.type=item.type;
+            r.identity=component(neoshared::genericPathToUtf8(source))+
+                component(std::to_string(item.archiveResourceIndex))+component(std::to_string(item.resourceId))+
+                component(std::to_string(item.type))+component(r.fileName);
+            r.sourceDescription=neoshared::genericPathToUtf8(source);
             r.protectedInputs={owner.resolvedPath};
             if(item.overrideFile) {
+                r.sourceDescription+=" ("+owner.overrideAlias+", precedence "+std::to_string(owner.overridePrecedence)+
+                    ", root "+neoshared::genericPathToUtf8(owner.resolvedPath)+")";
                 r.protectedInputs.push_back(item.directPath);
-                if(!owner.overrideIniPath.empty())r.protectedInputs.push_back(owner.overrideIniPath);
-            }
+                if(!owner.overrideIniPath.empty()) {
+                    r.protectedInputs.push_back(owner.overrideIniPath);
+                    r.sourceDescription+=" ["+neoshared::genericPathToUtf8(owner.overrideIniPath)+"]";
+                }
+            } else r.sourceDescription+=" :: "+r.fileName+" (archive snapshot; Save As creates a separate file)";
+            std::string error;
+            if(!mount.catalog.readResource(index,r.bytes,error,job))throw std::runtime_error(error);
             return stamp(std::move(r),layer);
         };
         if(auto i=b.overrides.find(key)) {
@@ -354,8 +366,22 @@ ResourceResolver GameResourceSession::resolver() const {
         const auto i=b.keyIndex.find(key);if(i==b.keyIndex.end()) return {};
         if(i->second.size()!=1) throw std::runtime_error("Ambiguous KEY resource: "+key.first);
         const auto index=i->second.front();const auto& item=b.key.resources().at(index);
-        auto r=neoshared::bif::readResourceDocument(b.key,b.globals.catalog,{neoshared::bif::ResourceSource::KeyBif,index},job);
-        r.protectedInputs={b.key.keyPath(),b.key.bifs().at(item.bifIndex).resolvedPath};
+        const auto& owner=b.key.bifs().at(item.bifIndex);
+        neoshared::ResourceDocument r;
+        r.fileName=item.fileName();r.type=item.type;
+        r.identity=component(neoshared::genericPathToUtf8(owner.resolvedPath))+
+            component(std::to_string(item.tableIndex))+component(std::to_string(item.resourceId))+
+            component(std::to_string(item.type))+component(r.fileName);
+        r.sourceDescription=neoshared::genericPathToUtf8(owner.resolvedPath)+" :: "+r.fileName+
+            " (archive snapshot; Save As creates a separate file)";
+        r.protectedInputs={b.key.keyPath(),owner.resolvedPath};
+        r.bytes.reserve(item.size);
+        std::string error;
+        job.update(0,item.size,"Reading "+r.fileName);
+        if(!b.key.streamResource(index,[&](const std::uint8_t* data,std::size_t size,std::string&) {
+            r.bytes.insert(r.bytes.end(),data,data+size);
+            job.update(r.bytes.size(),item.size,"Reading "+r.fileName);return true;
+        },error,job))throw std::runtime_error(error);
         return stamp(std::move(r),"KEY/BIF");
     };
 }
