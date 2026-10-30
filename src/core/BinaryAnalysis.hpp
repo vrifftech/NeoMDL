@@ -14,6 +14,8 @@ struct BinaryAnalysis {
 
 BinaryAnalysis readBinaryAnalysis(const std::filesystem::path& path,
     const neoshared::bif::JobControl& job = {});
+BinaryAnalysis readBinaryAnalysis(const std::filesystem::path& path,
+    std::vector<std::uint8_t> primary, const neoshared::bif::JobControl& job = {});
 std::string binaryAnalysisReport(const BinaryAnalysis& analysis,
     const neoshared::bif::JobControl& job = {});
 

@@ -759,7 +759,7 @@ public:
         read->Bind(wxEVT_BUTTON,[&,read](wxCommandEvent&) {
             try {
                 BinaryAnalysis result;
-                if (!runJob_("Reading binary structures",[&](const auto& job) { result = readBinaryAnalysis(paths_[0],job); })) return;
+                if (!runJob_("Reading binary structures",[&](const auto& job) { result = readBinaryAnalysis(paths_[0],data_.bytes[0],job); })) return;
                 const auto previous = paths_[file_];
                 paths_ = std::move(result.paths); data_.bytes[0] = std::move(result.mdl);
                 if (result.mdx) data_.bytes[1] = std::move(*result.mdx);

@@ -12,13 +12,22 @@ namespace neomdl {
 
 BinaryAnalysis readBinaryAnalysis(const std::filesystem::path& input,const neoshared::bif::JobControl& job) {
     ResourceLoadScope scope(job);
+    return readBinaryAnalysis(input,readResourceFile(input),job);
+}
+
+BinaryAnalysis readBinaryAnalysis(const std::filesystem::path& input,
+    std::vector<std::uint8_t> primary,const neoshared::bif::JobControl& job) {
+    ResourceLoadScope scope(job);
     BinaryAnalysis result;
     const auto path = std::filesystem::absolute(input);
     const auto directory = path.parent_path();
-    result.paths[0] = resourceKey(neoshared::pathToUtf8(path.extension())) == ".mdx"
+    const bool mdxInput=resourceKey(neoshared::pathToUtf8(path.extension())) == ".mdx";
+    result.paths[0] = mdxInput
         ? uniqueResourceFile(directory,modelFileStem(path)+".mdl").value() : path;
-    result.mdl = readResourceFile(result.paths[0]);
-    if (const auto mdx = uniqueResourceFile(directory,modelFileStem(path)+".mdx")) {
+    result.mdl = mdxInput ? readResourceFile(result.paths[0]) : std::move(primary);
+    if (mdxInput) {
+        result.paths[1]=path;result.mdx=std::move(primary);
+    } else if (const auto mdx = uniqueResourceFile(directory,modelFileStem(path)+".mdx")) {
         result.paths[1] = *mdx; result.mdx = readResourceFile(*mdx);
     }
     result.layout = model::inspectPackedLayout(result.mdl,result.mdx,job);
