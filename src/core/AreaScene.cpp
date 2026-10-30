@@ -126,7 +126,7 @@ void AreaScene::swap(AreaScene& other) noexcept {
     swap(weather_,other.weather_);swap(weatherResources_,other.weatherResources_);
     swap(weatherObjects_,other.weatherObjects_);swap(detachedWeather_,other.detachedWeather_);
     swap(nextWeatherInstance_,other.nextWeatherInstance_);swap(weatherCamera_,other.weatherCamera_);
-    swap(objects_,other.objects_);swap(rooms_,other.rooms_);swap(walkableMaterials_,other.walkableMaterials_);swap(path_,other.path_);
+    swap(objects_,other.objects_);swap(rooms_,other.rooms_);swap(walkableMaterials_,other.walkableMaterials_);swap(surfaceTable_,other.surfaceTable_);swap(path_,other.path_);
     swap(trackAnimations_,other.trackAnimations_);swap(worldAnimationEvents_,other.worldAnimationEvents_);
     swap(worldAnimationEvent_,other.worldAnimationEvent_);
     swap(miniGame_,other.miniGame_);swap(trackFollowers_,other.trackFollowers_);
@@ -302,8 +302,10 @@ void AreaScene::loadResource(neoshared::ResourceDocument layout, const ResourceR
     pending.identity_=layout.identity.empty()?"neomdl:layout:"+layout.fileName:layout.identity;
     pending.trace_=std::move(trace);
     if(resolver) {
-        if(const auto surface=resolver("surfacemat",0x07e1u))
+        if(auto surface=resolver("surfacemat",0x07e1u)) {
             pending.walkableMaterials_=engineWalkableMaterialMask(surface->bytes);
+            pending.surfaceTable_=std::move(*surface);
+        }
         else pending.diagnostics_.push_back(
             "surfacemat.2da is unavailable; automatic WalkCheck room queries have no material input.");
     }
@@ -370,8 +372,9 @@ void AreaScene::loadResource(neoshared::ResourceDocument layout, const ResourceR
             room.id = static_cast<LightRoomId>(index) + 1u;
             require(byName.emplace(key(room.name),room.id).second, "duplicate room name: " + room.name);
             source->markRoomModel();
-            if(const auto walkmesh=resolver?resolver(room.name,0x07e0u):std::nullopt)
-                room.walkmesh=neoshared::bwm::readBwm(walkmesh->bytes,walkmesh->fileName,job);
+            room.walkmeshSource=resolver?resolver(room.name,0x07e0u):std::nullopt;
+            if(room.walkmeshSource)
+                room.walkmesh=neoshared::bwm::readBwm(room.walkmeshSource->bytes,room.walkmeshSource->fileName,job);
             else pending.diagnostics_.push_back(room.name+
                 ": engine WOK resource is unavailable; its room-position query has no triangles.");
             auto partition=partitionK2Room(source->model());
@@ -455,6 +458,11 @@ void AreaScene::loadResource(neoshared::ResourceDocument layout, const ResourceR
     pending.bindAnimationOwners();
     *this = std::move(pending);
     transaction.committed=true;
+}
+
+void AreaScene::replaceRoomWalkmesh(const std::string& name,const neoshared::bwm::BwmFile& mesh) {
+    auto& room=*std::find_if(rooms_.begin(),rooms_.end(),[&](const auto& candidate){return key(candidate.name)==key(name);});
+    room.walkmesh=mesh;
 }
 
 void AreaScene::loadModuleArea(const std::string& area,const std::string& scope,

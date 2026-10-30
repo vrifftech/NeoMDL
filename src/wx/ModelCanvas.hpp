@@ -76,6 +76,20 @@ public:
 };
 wxDECLARE_EVENT(EVT_AREA_POLYGON, AreaPolygonEvent);
 
+enum class WalkmeshTool {View,Select,Paint};
+using WalkmeshFace=std::pair<std::string,std::uint32_t>;
+struct WalkmeshLayer {std::string room;std::shared_ptr<neoshared::bwm::BwmFile> mesh;};
+class WalkmeshEvent : public wxCommandEvent {
+public:
+    using wxCommandEvent::wxCommandEvent;
+    wxEvent* Clone() const override {return new WalkmeshEvent(*this);}
+    AreaGizmoPhase phase{AreaGizmoPhase::Preview};
+    bool painting{};
+    std::optional<WalkmeshFace> face;
+};
+wxDECLARE_EVENT(EVT_WALKMESH_EDIT, WalkmeshEvent);
+model::Vec3 walkmeshMaterialColor(std::uint32_t material);
+
 std::string triggerDetectionReport(const TriggerDetectionResult&);
 
 struct DialogueActorAnimation {
@@ -404,6 +418,13 @@ public:
     std::optional<model::Vec3> snappedAreaPoint(model::Vec3 position,bool snapZ=true) const;
     float snappedAreaHeading(float heading) const;
     void setAreaMarkers(std::vector<AreaEditorMarker> markers,std::string selected);
+    void setWalkmeshLayers(std::vector<WalkmeshLayer> layers);
+    void configureWalkmesh(bool visible,bool xray,WalkmeshTool tool,std::string room);
+    const std::set<WalkmeshFace>& selectedWalkmeshFaces() const noexcept {return walkmeshSelection_;}
+    void setWalkmeshSelection(std::set<WalkmeshFace> faces);
+    bool walkmeshDragging() const noexcept {return walkmeshDrag_.has_value();}
+    void cancelWalkmeshStroke();
+    void updateRoomWalkmesh(const std::string& room,const neoshared::bwm::BwmFile& mesh) {areaScene_.replaceRoomWalkmesh(room,mesh);Refresh(false);}
     void moveAreaMarker(const std::string& path,model::Vec3 position);
     void setAreaPolygon(std::vector<model::Vec3> points,bool vertices);
     void beginAreaPolygon(std::optional<float> planeZ={},float zOffset=0.0f,std::optional<std::size_t> vertexLimit=kAreaTriggerVertexLimit);
@@ -544,6 +565,10 @@ private:
     void onSize(wxSizeEvent& event);
     void onErase(wxEraseEvent& event);
     void onMouse(wxMouseEvent& event);
+    bool handleWalkmesh(wxMouseEvent& event);
+    std::optional<WalkmeshFace> pickWalkmesh(wxPoint point) const;
+    void emitWalkmesh(AreaGizmoPhase phase,bool painting,std::optional<WalkmeshFace> face={});
+    void drawWalkmeshOverlay();
     void onKey(wxKeyEvent& event);
     void onFocusLost(wxFocusEvent& event);
     void onCaptureLost(wxMouseCaptureLostEvent& event);
@@ -769,6 +794,13 @@ private:
     };
     std::optional<MeshPick> meshPick_;
     std::set<LightOwnerId> selectedAreaOwners_;
+    std::vector<WalkmeshLayer> walkmeshLayers_;
+    std::set<WalkmeshFace> walkmeshSelection_,walkmeshSelectionBefore_;
+    WalkmeshTool walkmeshTool_{WalkmeshTool::View};
+    bool walkmeshVisible_{},walkmeshXray_{};
+    std::string walkmeshRoom_;
+    struct WalkmeshDrag {wxPoint start,current;bool additive{},painting{};};
+    std::optional<WalkmeshDrag> walkmeshDrag_;
     AreaGizmoMode gizmoMode_{AreaGizmoMode::None};
     model::Vec3 gizmoPosition_{};
     float gizmoHeading_{},gizmoSize_{};

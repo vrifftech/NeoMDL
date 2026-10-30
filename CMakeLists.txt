@@ -241,6 +241,7 @@ if(NEOMDL_BUILD_WX_GUI OR NEOMDL_BUILD_WX_MODULE)
             src/wx/BatchConversion.cpp
             src/wx/BinaryTools.cpp
             src/wx/ModelCanvas.cpp
+            src/wx/WalkmeshOverlay.cpp
             src/wx/SceneAudioPlayback.cpp
             src/wx/SceneAudioDevice.cpp
             src/wx/ModelEditorPanel.cpp)

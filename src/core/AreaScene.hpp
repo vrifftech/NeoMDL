@@ -38,6 +38,7 @@ struct AreaRoom {
     bool background{};
     std::vector<LightRoomId> influencingRooms;
     std::optional<neoshared::bwm::BwmFile> walkmesh;
+    std::optional<neoshared::ResourceDocument> walkmeshSource;
 };
 
 // NeoMDL's visual area host. LYT/VIS are scene metadata, not ASCII MDL.
@@ -239,6 +240,8 @@ public:
     void clear(LightScene& lights);
     bool empty() const noexcept { return identity_.empty(); }
     const std::vector<AreaRoom>& rooms() const noexcept { return rooms_; }
+    const std::optional<neoshared::ResourceDocument>& surfaceTable() const noexcept {return surfaceTable_;}
+    void replaceRoomWalkmesh(const std::string& name,const neoshared::bwm::BwmFile& mesh);
     const std::filesystem::path& path() const noexcept { return path_; }
     model::Bounds bounds() const noexcept;
     std::vector<AreaMeshInstance> meshInstances(bool includeReferences = true, bool dangly = true,
@@ -354,6 +357,7 @@ private:
     WorldAnimationFrameInput worldAnimationFrameInput_{};
     std::vector<AreaRoom> rooms_;
     std::optional<std::uint32_t> walkableMaterials_;
+    std::optional<neoshared::ResourceDocument> surfaceTable_;
     std::filesystem::path path_;
     std::optional<LightRoomId> currentRoom_;
     std::optional<LightRoomId> automaticCurrentRoom_;

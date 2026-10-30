@@ -1842,6 +1842,7 @@ void ModelCanvas::refreshMaterials() {
 }
 
 void ModelCanvas::setDocument(const ModelDocument* document, bool preserveCamera) {
+    setWalkmeshLayers({});
     cancelAreaPolygon();polygonPoints_.clear();areaMarkers_.clear();
     cancelAreaGizmo();gizmoMode_=AreaGizmoMode::None;
     selectedAreaOwners_.clear();
@@ -3774,8 +3775,8 @@ void ModelCanvas::onSize(wxSizeEvent& event) {
 void ModelCanvas::onErase(wxEraseEvent&) {}
 
 void ModelCanvas::onMouse(wxMouseEvent& event) {
-    try {if(handleAreaPolygon(event)||handleAreaGizmo(event))return;}
-    catch(const std::exception& e) {cancelAreaPolygon();cancelAreaGizmo();wxMessageBox(wxString::FromUTF8(e.what()),"Area editing",wxOK|wxICON_ERROR,this);return;}
+    try {if(handleWalkmesh(event)||handleAreaPolygon(event)||handleAreaGizmo(event))return;}
+    catch(const std::exception& e) {cancelWalkmeshStroke();cancelAreaPolygon();cancelAreaGizmo();wxMessageBox(wxString::FromUTF8(e.what()),"Area editing",wxOK|wxICON_ERROR,this);return;}
     advanceCamera();
     if (event.ButtonDown()) SetFocus();
     if(event.LeftDown()&&event.ControlDown()&&pickingCamera_&&document_&&document_->isOpen()) {
@@ -3810,7 +3811,7 @@ void ModelCanvas::onMouse(wxMouseEvent& event) {
     if (event.RightDown() || event.MiddleDown() || event.GetWheelRotation() != 0)
         selectionStart_.reset();
     if (event.LeftUp()) {
-        if (selectionStart_ && !event.ControlDown()) {
+        if (selectionStart_ && !event.ControlDown() && walkmeshTool_==WalkmeshTool::View) {
             if(const auto marker=pickAreaMarker(event.GetPosition())) {
                 meshPick_.reset();
                 wxCommandEvent selection(EVT_AREA_MARKER_PICKED,GetId());selection.SetEventObject(this);
@@ -3976,6 +3977,7 @@ void ModelCanvas::considerMeshPick(const render::MeshSubmission& submission) {
 }
 
 void ModelCanvas::onKey(wxKeyEvent& event) {
+    if(walkmeshDrag_) {if(event.GetKeyCode()==WXK_ESCAPE)cancelWalkmeshStroke();return;}
     if(polygonDrawing_||polygonDrag_) {
         if(event.GetEventType()==wxEVT_KEY_DOWN) {
             if(event.GetKeyCode()==WXK_ESCAPE) {cancelAreaPolygon();return;}
@@ -4007,6 +4009,7 @@ void ModelCanvas::onKey(wxKeyEvent& event) {
 }
 
 void ModelCanvas::onFocusLost(wxFocusEvent& event) {
+    cancelWalkmeshStroke();
     if(polygonDrag_)cancelAreaPolygon();
     cancelAreaGizmo();
     selectionStart_.reset();
@@ -4015,6 +4018,7 @@ void ModelCanvas::onFocusLost(wxFocusEvent& event) {
 }
 
 void ModelCanvas::onCaptureLost(wxMouseCaptureLostEvent&) {
+    cancelWalkmeshStroke();
     if(polygonDrag_)cancelAreaPolygon();
     cancelAreaGizmo();
     selectionStart_.reset();
@@ -4773,6 +4777,7 @@ void ModelCanvas::drawScene() {
     drawNodeHelpers(transforms);
     drawAreaCameraGlyphs();
     drawAreaGizmo();
+    drawWalkmeshOverlay();
     drawAreaEditorOverlay();
     glPolygonMode(GL_FRONT_AND_BACK, GL_FILL);
     glDisable(GL_BLEND);
