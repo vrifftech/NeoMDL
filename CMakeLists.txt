@@ -87,6 +87,7 @@ add_library(neomdl_core
     src/core/AreaScene.cpp
     src/core/RoomConnections.cpp
     src/core/RoomEditing.cpp
+    src/core/ModelTransform.cpp
     src/core/TriggerScene.cpp
     src/core/TriggerRuntime.cpp
     src/core/TrapObjectEvents.cpp

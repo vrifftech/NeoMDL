@@ -2,6 +2,7 @@
 #include "core/BinaryEditing.hpp"
 #include "core/BinaryGameConversion.hpp"
 #include "core/BinaryAnalysis.hpp"
+#include "core/ModelTransform.hpp"
 #include "NeoWxUi.hpp"
 #include <neoshared/texture/FileUtil.hpp>
 #include <neoshared/PathUtf8.hpp>
@@ -25,6 +26,7 @@
 #include <wx/valtext.h>
 
 #include <algorithm>
+#include <cmath>
 #include <cstring>
 #include <iomanip>
 #include <limits>
@@ -307,13 +309,14 @@ private:
 };
 
 std::optional<BinaryEditResult> saveBinaryCopy(wxWindow* parent,BinaryModelFile& file,std::size_t node,
-    const std::map<std::size_t,BinaryMeshEdit>& edits,const AuthoringJob& runJob) {
+    const std::map<std::size_t,BinaryMeshEdit>& edits,const AuthoringJob& runJob,const std::optional<PlanarTransform>& transform={}) {
     BinarySaveControls controls(file.model.game);
     wxFileDialog output(parent,"Save Edited Binary Copy",neosettings::pathToWx(file.path.parent_path()),
         neosettings::pathToWx(file.path.stem())+"-edited.mdl","Binary MDL (*.mdl)|*.mdl",wxFD_SAVE | wxFD_OVERWRITE_PROMPT);
     output.SetCustomizeHook(controls);
     if (output.ShowModal()!=wxID_OK) return {};
     std::vector<CollisionOutput> outputs;
+    auto protectedInputs=file.inputs;
     std::map<std::size_t,std::size_t> nodeOffsets;
     const auto destination=neosettings::pathFromWx(output.GetPath());
     if (!runJob("Preparing binary copy",[&](const auto& job) {
@@ -321,7 +324,39 @@ std::optional<BinaryEditResult> saveBinaryCopy(wxWindow* parent,BinaryModelFile&
         file.model=model::decodePackedModelBytes(file.mdl,file.mdx ? *file.mdx : emptyMdx,
             neoshared::pathToUtf8(file.path),job,false);
         outputs=binaryEditOutputs(file,edits,destination,job);
-        if (controls.game!=file.model.game) nodeOffsets=switchBinaryGame(outputs.front().bytes,job);
+        if(transform) {
+            const auto inputName=resourceKey(neoshared::pathToUtf8(file.path.stem())),outputName=resourceKey(neoshared::pathToUtf8(destination.stem()));
+            std::map<std::uint16_t,neoshared::ResourceDocument> edited;
+            auto& source=edited[2002];source.fileName=inputName+".mdl";source.type=2002;source.bytes=outputs.front().bytes;
+            if(file.mdx) {auto& stream=edited[3008];stream.fileName=inputName+".mdx";stream.type=3008;stream.bytes=outputs[1].bytes;}
+            const auto local=directoryResources(file.path.parent_path());
+            const auto resolver=[edited=std::move(edited),local,inputName](const std::string& name,std::uint16_t type)->std::optional<neoshared::ResourceDocument> {
+                if(resourceKey(name)==inputName)if(const auto found=edited.find(type);found!=edited.end())return found->second;
+                return local(name,type);
+            };
+            auto models=transformModelResources(inputName,outputName,resolver,*transform);
+            std::vector<CollisionOutput> transformed;
+            for(auto& model:models) {
+                auto path=destination.parent_path()/neoshared::pathFromUtf8(model.fileName);
+                if(resourceKey(neoshared::pathToUtf8(path.stem()))==outputName) {path=destination;if(model.type==3008)path.replace_extension(".mdx");}
+                transformed.push_back({std::move(path),std::move(model.bytes)});
+                protectedInputs.insert(protectedInputs.end(),model.protectedInputs.begin(),model.protectedInputs.end());
+            }
+            for(std::size_t i=file.mdx?2:1;i<outputs.size();++i) {
+                auto mesh=neoshared::bwm::readBwm(outputs[i].bytes,neoshared::pathToUtf8(outputs[i].path));transformWalkmesh(mesh,*transform);
+                if(mesh.type==0) {
+                    const auto apply=[&](auto& point){const auto p=transform->direction({point[0],point[1],point[2]});point={p.x,p.y,p.z};};
+                    apply(mesh.position);for(auto& point:mesh.usePoints)apply(point);for(auto& point:mesh.doorUsePoints)apply(point);
+                }
+                outputs[i].bytes=neoshared::bwm::writeBwm(mesh);transformed.push_back(std::move(outputs[i]));
+            }
+            outputs=std::move(transformed);
+        }
+        if (controls.game!=file.model.game) {
+            for(std::size_t i=0;i<outputs.size();++i)if(i==0||resourceKey(neoshared::pathToUtf8(outputs[i].path.extension()))==".mdl") {
+                auto offsets=switchBinaryGame(outputs[i].bytes,job);if(i==0)nodeOffsets=std::move(offsets);
+            }
+        }
         else for (const auto& item : file.model.nodes) nodeOffsets.emplace(*item.packedOffset,*item.packedOffset);
     })) return {};
     std::vector<std::filesystem::path> companions,destinations;
@@ -329,7 +364,7 @@ std::optional<BinaryEditResult> saveBinaryCopy(wxWindow* parent,BinaryModelFile&
         destinations.push_back(item.path);
         if (item.path!=destination) companions.push_back(item.path);
     }
-    neoshared::checkResourceOutputs(destinations,file.inputs);
+    neoshared::checkResourceOutputs(destinations,protectedInputs);
     if (!confirmCompanionOverwrite(parent,companions)) return {};
     if (!runJob("Saving binary copy",[&](const auto& job) {
         job.check();
@@ -448,6 +483,13 @@ std::optional<BinaryEditResult> editBinaryMeshFields(wxWindow* parent, const Aut
         const char* uvLabels[]{"Scroll X","Scroll Y","Jitter amount","Jitter speed"};
         for (unsigned i=0;i<4;++i) number(uv,uvForm,uvLabels[i],236+i*4,model::BinaryType::Float32);
         uv->SetSizer(uvForm);pages->AddPage(uv,"UV Animation");
+        auto* wholeModel=new wxPanel(pages);auto* modelForm=new wxBoxSizer(wxVERTICAL);
+        modelForm->Add(new wxStaticText(wholeModel,wxID_ANY,"Rotate whole model around Z (degrees)"),0,wxALL,8);
+        auto* modelAngle=new wxSpinCtrlDouble(wholeModel,wxID_ANY,{},wxDefaultPosition,wxDefaultSize,wxSP_ARROW_KEYS,-360,360,0,90);modelAngle->SetDigits(4);modelForm->Add(modelAngle,0,wxEXPAND|wxALL,8);
+        auto* modelFlipX=new wxCheckBox(wholeModel,wxID_ANY,"Flip X");auto* modelFlipY=new wxCheckBox(wholeModel,wxID_ANY,"Flip Y");
+        modelForm->Add(modelFlipX,0,wxALL,8);modelForm->Add(modelFlipY,0,wxALL,8);
+        auto* modelHelp=new wxStaticText(wholeModel,wxID_ANY,"Save Copy applies flips, then rotation around the model origin. Geometry, normals, tangent bases, animation keys and collision companions follow the transform. Referenced models are saved as separate copies.\n\nFor a placed room, use Rooms / VIS in the module designer to coordinate its LYT position, WOK and contained placements.");modelHelp->Wrap(dialog.FromDIP(550));modelForm->Add(modelHelp,0,wxEXPAND|wxALL,8);
+        wholeModel->SetSizer(modelForm);pages->AddPage(wholeModel,"Whole model");
         layout->Add(pages,1,wxEXPAND | wxALL,dialog.FromDIP(10));
         auto* batch=new wxCheckBox(&dialog,wxID_ANY,wxString::Format(
             "Apply this mesh's changed properties to %zu selected meshes",selectedOffsets.size()));
@@ -561,7 +603,9 @@ std::optional<BinaryEditResult> editBinaryMeshFields(wxWindow* parent, const Aut
                         for (const auto& field : source.headerFields) target.headerFields[field.first]=field.second;
                     }
                 }
-                const auto output=saveBinaryCopy(&dialog,file,current,outputEdits,runJob);
+                std::optional<PlanarTransform> transform;
+                if(modelAngle->GetValue()!=0||modelFlipX->GetValue()||modelFlipY->GetValue())transform=planarTransform(float(modelAngle->GetValue()),modelFlipX->GetValue(),modelFlipY->GetValue());
+                const auto output=saveBinaryCopy(&dialog,file,current,outputEdits,runJob,transform);
                 if (output) {saved=*output;dialog.EndModal(wxID_OK);}
             } catch (const std::exception& error) { wxui::showError(&dialog,error); }
         });
