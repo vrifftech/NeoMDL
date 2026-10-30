@@ -68,7 +68,6 @@ struct ChunkMeshDraw {
     neomdl::model::NodeMaterialState materialState;
     neomdl::model::GameVersion game{neomdl::model::GameVersion::Kotor2};
     neomdl::model::Mat4 world=neomdl::model::identityMatrix();
-    float time{};
     bool fog{};
     // Owner frame for engine light/camera conversion; distinct from a rigid
     // mesh's owner*node draw matrix. Chunk scale is retained from initialize.

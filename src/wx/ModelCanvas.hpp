@@ -496,7 +496,6 @@ public:
     ReferenceReattachResult restoreReferenceAttachments(
         std::optional<std::size_t> ownerReference);
     const neomdl::model::Pose* pose() const noexcept { return pose_ ? &*pose_ : nullptr; }
-    double materialTime() const noexcept { return materialTime_; }
     void frameModel();
     neomdl::render::RendererStatistics rendererStatistics() const noexcept { return meshRenderer_.statistics(); }
 
@@ -575,7 +574,7 @@ private:
         const AreaObject* retainedObject,std::optional<std::size_t> retainedReference);
     void refreshAnimatedSubmission(render::MeshSubmission& submission,
         const model::Model& asset,const model::Pose& pose,const model::Mat4& world,
-        const model::EngineFrame& frame,float time,std::uint64_t revision,const neoshared::material::Material& material,
+        const model::EngineFrame& frame,std::uint64_t revision,const neoshared::material::Material& material,
         const ModelDocument* document,const OwnerVisualEffects* effects,
         std::optional<float> textureAngle = {});
     void resetParticleHistoryForAnimationSeek();
@@ -632,7 +631,7 @@ private:
                   bool selected, const neoshared::material::Material& material,
                   const neomdl::model::NodeMaterialState& nodeMaterial,
                   neomdl::model::GameVersion game, bool modelFog, LightOwnerId lightOwner,
-                  const ModelDocument* resources = nullptr, float localTime = -1.0f,
+                  const ModelDocument* resources = nullptr,
                   std::vector<neomdl::render::MeshSubmission>* targetQueue = nullptr,
                   std::uint64_t sceneOwner = 0u, float ownerAlpha = 1.0f,
                   std::uint16_t ownerModelClassification = 0u,
@@ -751,7 +750,6 @@ private:
     bool k2Lights_{};
     bool sceneLightsSelectedThisFrame_{};
     neomdl::model::Mat4 cameraView_=neomdl::model::identityMatrix();
-    double materialTime_{};
     float pendingProcedureElapsed_{};
     std::string proceduralTextureError_;
     neomdl::render::ShaderMeshRenderer meshRenderer_;

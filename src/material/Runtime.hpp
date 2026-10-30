@@ -215,14 +215,13 @@ struct RuntimeMaterial {
     UvState diffuseUv, bumpUv;
 };
 UvState evaluateUv(const neoshared::material::TextureBinding& binding);
-RuntimeMaterial evaluateMaterial(const neoshared::material::Material& material, const SurfaceInputs& surface,
-                                 double seconds);
+RuntimeMaterial evaluateMaterial(const neoshared::material::Material& material, const SurfaceInputs& surface);
 RuntimeMaterial evaluateK2PartTriMeshMaterial(
     const neoshared::material::Material& material, const SurfaceInputs& surface,
-    const K2PartTriMeshInputs& inputs, double seconds);
+    const K2PartTriMeshInputs& inputs);
 RuntimeMaterial evaluateEnginePartTriMeshMaterial(
     const neoshared::material::Material&, const SurfaceInputs&, const EnginePartTriMeshInputs&,
-    EngineMaterialGame, double seconds);
+    EngineMaterialGame);
 struct QueueKey {
     RenderPass pass{RenderPass::Opaque};
     float eyeDepth{};

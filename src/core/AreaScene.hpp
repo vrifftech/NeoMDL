@@ -58,7 +58,6 @@ struct AreaMeshInstance {
     model::EngineFrame ownerFrame{};
     std::uint64_t owner{}, revision{};
     bool staticPart{}, hasTransparency{};
-    float time{};
     const OwnerVisualEffects* ownerEffects{};
     float textureAngleDegrees{};
     float ownerScale{1.0f};

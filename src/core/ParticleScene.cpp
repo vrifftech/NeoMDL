@@ -1132,7 +1132,6 @@ ChunkMeshDraw chunkParticleMesh(const ChunkParticleInstance& instance,
         : m::multiply(instance.world,instance.referenceBases.at(*reference).value()) : instance.world;
     const auto scale=reference ? runtime ? runtime->scale
         : instance.ownerScale*instance.asset->references().at(*reference).visualScale : instance.ownerScale;
-    const auto localTime=runtime&&instance.particles ? runtime->animationTime : instance.time;
     const auto base=m::multiply(owner,m::nodeTransform({}, {},scale));
     const auto& mesh=model.meshes.at(meshIndex);
     const m::DeformedMesh* deformed=nullptr;
@@ -1146,7 +1145,7 @@ ChunkMeshDraw chunkParticleMesh(const ChunkParticleInstance& instance,
     const auto state=mesh.nodeIndex<pose.nodeMaterials.size()?pose.nodeMaterials[mesh.nodeIndex]
         :m::bindNodeMaterial(model.nodes[mesh.nodeIndex]);
     return {&mesh,deformed,material,instance.asset,state,model.game,
-        deformed?base:m::multiply(base,pose.worldTransforms.at(mesh.nodeIndex)),localTime,model.fog,owner,
+        deformed?base:m::multiply(base,pose.worldTransforms.at(mesh.nodeIndex)),model.fog,owner,
         instance.ownerIdentity+(reference ? *reference+1u : 0u)};
 }
 

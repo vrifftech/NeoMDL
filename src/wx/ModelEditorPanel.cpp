@@ -1479,11 +1479,10 @@ private:
                     k2Selection=neomdl::material::selectK2PartTriMeshRenderPath(
                         document_->material(*node.mesh),inputs);
                     rendered=neomdl::material::evaluateK2PartTriMeshMaterial(
-                        document_->material(*node.mesh), surface, inputs,
-                        canvas_->materialTime());
+                        document_->material(*node.mesh), surface, inputs);
                 } else {
                     rendered=neomdl::material::evaluateMaterial(
-                        document_->material(*node.mesh), surface, canvas_->materialTime());
+                        document_->material(*node.mesh), surface);
                 }
                 const char* passName = "opaque";
                 using neomdl::material::RenderPass;

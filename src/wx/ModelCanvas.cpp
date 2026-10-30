@@ -1990,7 +1990,6 @@ void ModelCanvas::setDocument(const ModelDocument* document, bool preserveCamera
     replayAnimationTime_ = 0.0f;
     replayAnimationLoop_ = false;
     compatibilityRunId_.reset();
-    materialTime_ = 0.0;
     pose_.reset();
     danglyState_ = {};
     resetWorldClock(false);
@@ -2705,8 +2704,6 @@ void ModelCanvas::setAnimation(std::optional<std::size_t> index, float time,
         }
     }
     collectAnimationRuntimeEvents();
-    materialTime_ = animationRuntime_.empty()
-        ? 0.0 : animationRuntime_.primaryTime();
     rebuildPose(seek);
     if (seek) {
         resetParticleHistoryForAnimationSeek();
@@ -2730,7 +2727,6 @@ neomdl::model::AnimationPlayResult ModelCanvas::playAnimationRun(
                                     playbackRate, flags, startTime);
     collectAnimationRuntimeEvents();
     if (result) {
-        materialTime_ = animationRuntime_.primaryTime();
         rebuildPose(false);
         Refresh(false);
     }
@@ -2755,7 +2751,6 @@ ModelCanvas::playOutOfOrderAnimationRun(
         controlTimes, duration);
     collectAnimationRuntimeEvents();
     if (result) {
-        materialTime_ = animationRuntime_.primaryTime();
         rebuildPose(false);
         Refresh(false);
     }
@@ -2786,7 +2781,6 @@ bool ModelCanvas::setAnimationRunTime(std::uint64_t id, float time,
     } else {
         replayAnimationIndex_.reset();
     }
-    materialTime_ = animationRuntime_.primaryTime();
     rebuildPose(true);
     resetParticleHistoryForAnimationSeek();
     updateSceneBounds();
@@ -2813,7 +2807,6 @@ void ModelCanvas::clearAnimationRuns() {
     replayAnimationTime_ = 0.0f;
     replayAnimationLoop_ = false;
     compatibilityRunId_.reset();
-    materialTime_ = 0.0;
     rebuildPose(true);
     resetParticleHistoryForAnimationSeek();
     updateSceneBounds();
@@ -2835,8 +2828,6 @@ void ModelCanvas::resetDynamics() {
     pendingEmitterSceneAnimating_=false;emitterPrewarmTrace_={};emitterFrameTrace_={};
     particleScene_.resetSimulation();
     referenceScene_.reset();
-    materialTime_ = animationRuntime_.empty()
-        ? 0.0 : animationRuntime_.primaryTime();
     rebuildPose(true);
     updateSceneBounds();
     Refresh(false);
@@ -2901,8 +2892,6 @@ bool ModelCanvas::advanceMainOwner(float seconds,bool evaluatePose) {
     if(lifetime.expired())return applied;
     collectAnimationRuntimeEvents();
     pose_=animationRuntime_.pose();++poseRevision_;
-    if(animationRuntime_.empty())materialTime_+=seconds;
-    else materialTime_=animationRuntime_.primaryRunId()?animationRuntime_.primaryTime():pose_->time;
     if(dialogueMainLip_)dialogueMainLip_=std::any_of(animationRuntime_.runs().begin(),animationRuntime_.runs().end(),
         [](const auto& run){return (run.flags&0x200u)!=0;});
     referenceScene_.synchronize(*pose_,false);
@@ -2954,7 +2943,7 @@ void ModelCanvas::animateRenderOwner(LightOwnerId id) {
 
 void ModelCanvas::refreshAnimatedSubmission(render::MeshSubmission& submission,
         const model::Model& asset,const model::Pose& pose,const model::Mat4& world,
-        const model::EngineFrame& frame,float time,std::uint64_t revision,const neoshared::material::Material& material,
+        const model::EngineFrame& frame,std::uint64_t revision,const neoshared::material::Material& material,
         const ModelDocument* document,const OwnerVisualEffects* effects,
         std::optional<float> textureAngle) {
     const auto& mesh=*submission.mesh;
@@ -2971,7 +2960,7 @@ void ModelCanvas::refreshAnimatedSubmission(render::MeshSubmission& submission,
     std::vector<render::MeshSubmission> refreshed;std::string failure;
     glPushMatrix();const auto modelView=model::multiply(cameraView_,drawWorld);glLoadMatrixf(modelView.values.data());
     drawMesh(mesh,deformed,submission.parameters.selected,material,pose.nodeMaterials[mesh.nodeIndex],
-        asset.game,asset.fog,submission.lightOwner.value_or(0),document,time,&refreshed,
+        asset.game,asset.fog,submission.lightOwner.value_or(0),document,&refreshed,
         submission.sceneOwner,submission.ownerAlpha,asset.classification,submission.ownerHasTransparency,
         submission.ownerCameraDistance,false,effects,&world,textureAngle,
         engineParts.empty()?nullptr:&engineParts[mesh.nodeIndex],&failure,submission.eyeDepth);
@@ -2990,7 +2979,7 @@ void ModelCanvas::refreshOwnerSubmission(render::MeshSubmission& submission,Ligh
         const AreaObject* retainedObject,std::optional<std::size_t> retainedReference) {
     const auto refresh=[&](const model::Model& asset,const model::Pose& pose,const model::Mat4& world,
             const model::EngineFrame& frame,const SceneAnimationOwner& animationOwner,
-            float time,std::uint64_t revision,const ModelDocument& document,
+            std::uint64_t revision,const ModelDocument& document,
             std::optional<std::size_t> reference,const OwnerVisualEffects* effects,
             std::optional<float> textureAngle={}) {
         ownerLightSpheres_[id]={model::transformPoint(world,{}),animationOwner.sphere().radius};
@@ -2999,16 +2988,16 @@ void ModelCanvas::refreshOwnerSubmission(render::MeshSubmission& submission,Ligh
         }
         const auto meshIndex=*asset.nodes[submission.mesh->nodeIndex].mesh;
         const auto& material=reference?document.referenceMaterial(*reference,meshIndex):document.material(meshIndex);
-        refreshAnimatedSubmission(submission,asset,pose,world,frame,time,revision,material,&document,effects,textureAngle);
+        refreshAnimatedSubmission(submission,asset,pose,world,frame,revision,material,&document,effects,textureAngle);
     };
     if(id==mainLightOwner) {
         refresh(document_->model(),*pose_,referenceScene_.mainWorld(),referenceScene_.mainFrame(),mainAnimationOwner_,
-            materialTime_,poseRevision_,*document_,{},&ownerEffects_[0]);return;
+            poseRevision_,*document_,{},&ownerEffects_[0]);return;
     }
     for(std::size_t i=0;i<referenceScene_.instances().size();++i)if(id==i+1u) {
         const auto& runtime=*referenceScene_.instance(i);
         refresh(document_->references()[i].model,runtime.pose,runtime.world,runtime.frame,runtime.animationOwner,
-            runtime.animationTime,referenceScene_.revision(),*document_,i,&ownerEffects_[i+1u]);return;
+            referenceScene_.revision(),*document_,i,&ownerEffects_[i+1u]);return;
     }
     const auto* object=retainedObject;
     const auto reference=retainedReference;
@@ -3016,7 +3005,6 @@ void ModelCanvas::refreshOwnerSubmission(render::MeshSubmission& submission,Ligh
     const auto& asset=reference?object->document()->references()[*reference].model:object->document()->model();
     refresh(asset,runtime?runtime->pose:object->pose(),runtime?runtime->world:object->world(),
         runtime?runtime->frame:object->frame(),runtime?runtime->animationOwner:object->animationOwner(),
-        runtime?runtime->animationTime:static_cast<float>(object->animation().empty()?object->elapsed():object->animation().primaryTime()),
         (id<<32u)^object->revision(),*object->document(),reference,object->ownerVisualEffects(reference),
         submission.mesh?std::optional<float>{object->textureRotationDegrees(*submission.mesh)}:std::nullopt);
 }
@@ -4454,7 +4442,7 @@ void ModelCanvas::drawScene() {
         drawMesh(mesh, deformed, selected, document_->material(meshIndex), materialState,
             model.game, model.fog,
             mainQueue == &staticMeshQueue_ ? AreaScene::sceneDynamicLightOwner : mainLightOwner,
-            nullptr, -1.0f, mainQueue, mainOwner, 1.0f,
+            nullptr, mainQueue, mainOwner, 1.0f,
             model.classification, mainOwnerHasTransparency,
             mainOwnerDistance, true, engineScene ? &ownerEffects_[0] : nullptr, &mainBase,
             {}, mainEngineParts.empty()?nullptr:&mainEngineParts[mesh.nodeIndex]);
@@ -5291,7 +5279,7 @@ void ModelCanvas::queueAreaRooms() {
         const auto before=queue->size();
         glPushMatrix();glMultMatrixf(draw.world.values.data());
         drawMesh(mesh,draw.deformed,selectedAreaOwners_.count(draw.owner)!=0,*draw.material,draw.state,draw.asset->game,draw.asset->fog,
-            draw.owner,draw.document,draw.time,queue,draw.staticPart?0:draw.owner+1u,
+            draw.owner,draw.document,queue,draw.staticPart?0:draw.owner+1u,
             draw.ownerEffects?draw.ownerEffects->colorShift[3]:1.0f,
             draw.asset->classification,draw.hasTransparency,
             distance,true,
@@ -5394,7 +5382,7 @@ void ModelCanvas::drawReferenceModels() {
                 document_->referenceMaterial(instanceIndex,meshIndex), materialState,
                 reference.model.game, reference.model.fog,
                 static_cast<LightOwnerId>(instanceIndex) + 1u,
-                nullptr, runtime->animationTime, targetQueue, sceneOwner, 1.0f,
+                nullptr, targetQueue, sceneOwner, 1.0f,
                 reference.model.classification, ownerHasTransparency,
                 cameraDistance, true, !model::engineSceneStageOrder(reference.model.game).empty()
                     ? &ownerEffects_[instanceIndex+1u] : nullptr, &runtime->world,
@@ -5774,7 +5762,7 @@ void ModelCanvas::queueChunkModels() {
                 const auto modelView=model::multiply(cameraView_,draw.world);
                 glPushMatrix();glLoadMatrixf(modelView.values.data());
                 drawMesh(*draw.mesh,draw.deformed,false,*draw.material,draw.materialState,draw.game,draw.fog,
-                    owner.id,draw.resources,draw.time,queue,sceneOwner,1.0f,asset.classification,
+                    owner.id,draw.resources,queue,sceneOwner,1.0f,asset.classification,
                     transparent,distance,false,&effects,&draw.ownerFrame,{},
                     engineParts.empty()?nullptr:&engineParts[draw.mesh->nodeIndex]);
                 glPopMatrix();
@@ -5793,7 +5781,7 @@ void ModelCanvas::queueChunkModels() {
                         const auto& pose=runtime?runtime->pose:source->pose;
                         const OwnerVisualEffects effects;
                         refreshAnimatedSubmission(live,asset,pose,current.ownerFrame,
-                            runtime?runtime->frame:source->references->mainFrame(),current.time,(++particleRevision_)<<32u,
+                            runtime?runtime->frame:source->references->mainFrame(),(++particleRevision_)<<32u,
                             *current.material,current.resources,&effects);
                         ownerLightSpheres_[current.ownerIdentity]={model::transformPoint(current.ownerFrame,{}),animation->sphere().radius};
                     };
@@ -5856,7 +5844,7 @@ bool ModelCanvas::queueParticles(float elapsedSeconds,bool sceneAnimating,
                     drawMesh(*chunkDraw.mesh,chunkDraw.deformed,false,*chunkDraw.material,
                              chunkDraw.materialState,chunkDraw.game,chunkDraw.fog,
                              chunkDraw.ownerIdentity,
-                             chunkDraw.resources,chunkDraw.time,&current,0u,1.0f,0u,
+                             chunkDraw.resources,&current,0u,1.0f,0u,
                              false,0.0f,false,nullptr,&chunkDraw.ownerFrame);
                     glPopMatrix();
                     // One asset can have several simultaneous skin poses. A
@@ -6030,8 +6018,7 @@ void ModelCanvas::queueLightsabers() {
             material::EnginePartTriMeshInputs inputs;
             inputs.engineHardware=options_.engineHardware;
             parameters.material=material::evaluateEnginePartTriMeshMaterial(authored,surface,inputs,
-                material::EngineMaterialGame::Kotor1,source.chunk ? (instance->reference
-                    ?source.references->instance(*instance->reference)->animationTime:source.chunk->time) : materialTime_);
+                material::EngineMaterialGame::Kotor1);
             auto& mat=parameters.material;
             mat.k2PartTriMeshState=false;mat.useLightmap=mat.useBumpMap=mat.useEnvironmentMap=false;
             mat.renderPath=material::TriMeshRenderPath::Flat;
@@ -6393,7 +6380,7 @@ void ModelCanvas::drawMesh(const neomdl::model::Mesh& mesh,
                            bool selected, const neoshared::material::Material& material,
                            const neomdl::model::NodeMaterialState& nodeMaterial,
                            neomdl::model::GameVersion game, bool modelFog, LightOwnerId lightOwner,
-                           const ModelDocument* resources, float localTime,
+                           const ModelDocument* resources,
                            std::vector<neomdl::render::MeshSubmission>* targetQueue,
                            std::uint64_t sceneOwner, float ownerAlpha,
                            std::uint16_t ownerModelClassification,
@@ -6417,7 +6404,6 @@ void ModelCanvas::drawMesh(const neomdl::model::Mesh& mesh,
     surface.selfIllumination=nodeMaterial.selfIllumination;
     surface.vertexAlpha=mesh.hasVertexColors && std::any_of(mesh.vertices.begin(),mesh.vertices.end(),
         [](const auto& vertex) {return vertex.color[3]!=255;});
-    const auto sampledTime=localTime>=0?localTime:materialTime_;
     // PartDraw executes Mat before PartTriMesh::Draw rejects its Part alpha.
     // Preserve the material event even when no geometry is drawn. Skin has
     // no TriMesh alpha early-out; its shell still executes (0x10fdc1).
@@ -6442,8 +6428,7 @@ void ModelCanvas::drawMesh(const neomdl::model::Mesh& mesh,
     parameters.material=neomdl::material::evaluateEnginePartTriMeshMaterial(
         material,surface,inputs,
         game==model::GameVersion::Kotor1 ? material::EngineMaterialGame::Kotor1
-                                        : material::EngineMaterialGame::Kotor2,
-        sampledTime);
+                                        : material::EngineMaterialGame::Kotor2);
     if(mesh.animated) {
         parameters.engineAnimMesh=true;
         parameters.material.renderPath=material::TriMeshRenderPath::Flat;

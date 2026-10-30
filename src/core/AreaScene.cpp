@@ -1194,7 +1194,7 @@ std::vector<AreaMeshInstance> AreaScene::meshInstances(bool includeReferences,bo
     for(const auto& object:objects_) {
         const auto& document=*object->document();
         const auto append=[&](const model::Model& asset,const model::Pose& pose,const model::Mat4& outer,
-                              const model::EngineFrame& frame,std::optional<std::size_t> reference,float time) {
+                              const model::EngineFrame& frame,std::optional<std::size_t> reference) {
             const bool isStatic=object->staticPrimary()&&!reference;
             if(isStatic) {
                 if(object->room()&&!roomActive(static_cast<LightRoomId>(*object->room()))) return;
@@ -1229,7 +1229,7 @@ std::vector<AreaMeshInstance> AreaScene::meshInstances(bool includeReferences,bo
                     drawWorld=model::multiply(outer,scale);
                 }
                 draw.world=draw.deformed?drawWorld:model::multiply(drawWorld,pose.worldTransforms[mesh.nodeIndex]);
-                draw.staticPart=isStatic;draw.hasTransparency=transparent;draw.time=time;
+                draw.staticPart=isStatic;draw.hasTransparency=transparent;
                 draw.ownerEffects=isStatic?nullptr:object->ownerVisualEffects(reference);
                 draw.textureAngleDegrees=isStatic?0.0f:object->textureRotationDegrees(mesh);
                 draw.owner=isStatic?sceneDynamicLightOwner:object->ownerId(reference);
@@ -1239,11 +1239,10 @@ std::vector<AreaMeshInstance> AreaScene::meshInstances(bool includeReferences,bo
                 result.push_back(std::move(draw));
             }
         };
-        append(document.model(),object->pose(),object->world(),object->frame(),{},static_cast<float>(object->animation().empty()
-            ?object->elapsed():object->animation().primaryTime()));
+        append(document.model(),object->pose(),object->world(),object->frame(),{});
         if(includeReferences) for(std::size_t i=0;i<object->references().instances().size();++i) {
             const auto& ref=object->references().instances()[i];
-            if(ref.active&&ref.sceneMember) append(document.references()[i].model,ref.pose,ref.world,ref.frame,i,ref.animationTime);
+            if(ref.active&&ref.sceneMember) append(document.references()[i].model,ref.pose,ref.world,ref.frame,i);
         }
     }
     return result;

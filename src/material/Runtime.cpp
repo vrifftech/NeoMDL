@@ -308,7 +308,7 @@ UvState evaluateUv(const neoshared::material::TextureBinding& binding) {
 
     return result;
 }
-RuntimeMaterial evaluateMaterial(const neoshared::material::Material& m,const SurfaceInputs& surface,double) {
+RuntimeMaterial evaluateMaterial(const neoshared::material::Material& m,const SurfaceInputs& surface) {
     RuntimeMaterial r;
     const auto& p=props(m.diffuse);
     const auto& b=props(m.bumpMap);
@@ -356,7 +356,7 @@ RuntimeMaterial evaluateMaterial(const neoshared::material::Material& m,const Su
 
 RuntimeMaterial evaluateEnginePartTriMeshMaterial(
     const neoshared::material::Material& material, const SurfaceInputs& surface,
-    const EnginePartTriMeshInputs& inputs, EngineMaterialGame game, double) {
+    const EnginePartTriMeshInputs& inputs, EngineMaterialGame game) {
     RuntimeMaterial result;
     const auto& diffuse=props(material.diffuse);
     const auto selection=selectEnginePartTriMeshRenderPath(material,inputs,game);
@@ -480,8 +480,8 @@ RuntimeMaterial evaluateEnginePartTriMeshMaterial(
 }
 RuntimeMaterial evaluateK2PartTriMeshMaterial(
     const neoshared::material::Material& material, const SurfaceInputs& surface,
-    const K2PartTriMeshInputs& inputs, double seconds) {
-    return evaluateEnginePartTriMeshMaterial(material,surface,inputs,EngineMaterialGame::Kotor2,seconds);
+    const K2PartTriMeshInputs& inputs) {
+    return evaluateEnginePartTriMeshMaterial(material,surface,inputs,EngineMaterialGame::Kotor2);
 }
 std::vector<std::size_t> renderQueueOrder(const std::vector<QueueKey>& keys) {
     std::vector<std::size_t> order(keys.size());std::iota(order.begin(),order.end(),0u);
