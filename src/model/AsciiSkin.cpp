@@ -70,7 +70,7 @@ Vec3 engineModelRotateVector(Quaternion orientation,Vec3 value) noexcept {
     return rotate(orientation,value);
 }
 
-static bool parseSkinValue(const Line& line,Reader& reader,RawNode& raw,GameVersion) {
+static bool parseSkinValue(const Line& line,Reader& reader,RawNode& raw) {
     const auto& field=line.tokens.front();
     auto& mesh=*raw.mesh;
     if(equal(field,"weights")) {
@@ -230,7 +230,7 @@ bool parseRetainedSkin(const Line& line,Reader& reader,RawNode& raw) {
     return true;
 }
 
-bool parseSkinField(const Line& initial,Reader& reader,RawNode& raw,GameVersion game) {
+bool parseSkinField(const Line& initial,Reader& reader,RawNode& raw) {
     if(parseRetainedSkin(initial,reader,raw)) return true;
     bool handled=false;
 
@@ -238,7 +238,7 @@ bool parseSkinField(const Line& initial,Reader& reader,RawNode& raw,GameVersion 
     for(const auto* field:{"weights","qbone_ref_inv","tbone_ref_inv","boneconstantindices"}) {
         const auto line=reader.fieldLine(initial.bufferOffset);
         if(equal(line.tokens.front(),field))
-            handled=parseSkinValue(line,reader,raw,game) || handled;
+            handled=parseSkinValue(line,reader,raw) || handled;
     }
     return handled;
 }

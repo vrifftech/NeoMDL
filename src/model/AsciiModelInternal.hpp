@@ -198,7 +198,7 @@ struct RawNode {
 void initializeNode(RawNode& raw, GameVersion game);
 bool parseNodeField(const Line& line, Reader& reader, RawNode& raw, GameVersion game);
 bool parseMeshField(const Line& line, Reader& reader, RawNode& raw, GameVersion game);
-bool parseSkinField(const Line& line, Reader& reader, RawNode& raw, GameVersion game);
+bool parseSkinField(const Line& line, Reader& reader, RawNode& raw);
 bool parseControllerExtension(const Line& line, Reader& reader, RawNode& raw);
 void parseBaseTransformFields(const Line& line, Reader& reader, RawNode& raw);
 bool parseControllerField(const Line& line, Reader& reader, RawNode& raw, GameVersion game,

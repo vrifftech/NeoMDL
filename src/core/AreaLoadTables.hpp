@@ -13,10 +13,6 @@ namespace neomdl::detail {
 inline void areaTableRequire(bool value,const std::string& message) {
     if(!value)throw std::runtime_error("Area load: "+message);
 }
-inline std::string areaTableLower(std::string value) {
-    for(auto& c:value)if(c>='A'&&c<='Z')c=char(c+32);
-    return value;
-}
 struct AreaLoadTables {
     ResourceResolver resolver;
     std::map<std::string,neo2da::TwoDAFile> files;

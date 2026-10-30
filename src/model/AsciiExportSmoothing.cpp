@@ -28,10 +28,6 @@ struct Corner {
 };
 struct Relation { std::size_t first,second; std::vector<std::size_t> corners; };
 
-Vec3 subtract(Vec3 a,Vec3 b) { return {a.x-b.x,a.y-b.y,a.z-b.z}; }
-Vec3 cross(Vec3 a,Vec3 b) {
-    return {a.y*b.z-a.z*b.y,a.z*b.x-a.x*b.z,a.x*b.y-a.y*b.x};
-}
 double difference(Vec3 a,Vec3 b) {
     const double x=static_cast<double>(a.x)-b.x;
     const double y=static_cast<double>(a.y)-b.y;

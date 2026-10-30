@@ -771,8 +771,8 @@ public:
         return ok;
     }
     const SceneEffectsSettings& sceneEffects() const noexcept { return canvas_->sceneEffects(); }
-    bool setSceneEffects(SceneEffectsSettings settings,std::string& error,bool resetHistory=true) {
-        return canvas_->setSceneEffects(std::move(settings),error,resetHistory);
+    bool setSceneEffects(SceneEffectsSettings settings,std::string& error) {
+        return canvas_->setSceneEffects(std::move(settings),error);
     }
     void frameModel() { canvas_->frameModel(); canvas_->SetFocus(); }
     AreaScene prepareAreaLoad() { return canvas_->prepareAreaLoad(); }

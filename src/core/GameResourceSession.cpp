@@ -1,6 +1,5 @@
 #include "core/GameResourceSession.hpp"
 #include "core/DialogueRuntime.hpp"
-#include "core/DialogueAudioSource.hpp"
 #include <fstream>
 #include <neoshared/bif/KeyBifArchive.hpp>
 #include <neoshared/bif/LooseArchiveCatalog.hpp>

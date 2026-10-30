@@ -927,7 +927,7 @@ bool parseMeshField(const Line& initial,Reader& reader,RawNode& raw,GameVersion 
         return true;
     }
     bool handled=false;
-    if(raw.node.flags==0x61u) handled=parseSkinField(initial,reader,raw,game);
+    if(raw.node.flags==0x61u) handled=parseSkinField(initial,reader,raw);
     const auto stage=[&](const char* field) {
         const auto line=reader.fieldLine(offset);
         if(equal(line.tokens.front(),field)) {
