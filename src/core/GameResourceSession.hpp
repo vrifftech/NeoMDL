@@ -57,6 +57,7 @@ public:
     const std::vector<std::string>& diagnostics() const noexcept;
 
     ResourceResolver resolver() const;
+    ResourceResolver installationResolver() const;
     // Voice stream candidates are a separate engine path from archive lookup.
     // The type argument selects engine source type 8 or its type-4 retry.
     ResourceResolver voiceResolver() const;

@@ -324,6 +324,11 @@ std::vector<GameResourceEntry> GameResourceSession::resources(const std::vector<
     for(auto& [key,entry]:entries)result.push_back(std::move(entry));
     return result;
 }
+ResourceResolver GameResourceSession::installationResolver() const {
+    GameResourceSession session;session.state_=std::make_shared<State>();
+    session.state_->base=state_->base;session.state_->identity=state_->base->identity;
+    return session.resolver();
+}
 ResourceResolver GameResourceSession::resolver() const {
     const auto state=state_;
     if(!state) return {};
