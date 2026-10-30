@@ -3272,8 +3272,7 @@ private:
 
     void buildMenus() {
         auto* bar = new wxMenuBar;
-        fileMenu_ = new wxMenu;
-        auto* file = fileMenu_;
+        auto* file = new wxMenu;
         file->Append(ID_Open, "&Open Model...\tCtrl+O");
         file->Append(ID_Reload, "&Reload Model\tCtrl+R", "Reload the model from disk and reset its preview.");
         file->Append(ID_SaveAscii, "Save &ASCII\tCtrl+S", "Save the text in the ASCII editor.");
@@ -4441,7 +4440,6 @@ private:
     RenderOptions options_;
     int asciiNormalMode_{};
     bool dark_{};
-    wxMenu* fileMenu_{};
     wxMenu* viewMenu_{};
     wxMenu* sceneMenu_{};
     wxMenu* developerMenu_{};

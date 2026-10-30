@@ -214,7 +214,7 @@ inline Vec3 normalizeTangentBasis(Vec3 v) {
     const float reciprocal=1.0f/length;
     return {v.x*reciprocal,v.y*reciprocal,v.z*reciprocal};
 }
-inline Vec3 tangentBasisNormal(Vec3 bitangent,Vec3 tangent,Vec3) {
+inline Vec3 tangentBasisNormal(Vec3 bitangent,Vec3 tangent) {
     // Subtract the products before rounding. Collapsed UV derivatives can
     // be almost parallel, so separately rounded products lose the basis axis.
     return {

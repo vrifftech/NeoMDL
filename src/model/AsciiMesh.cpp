@@ -1644,8 +1644,7 @@ std::vector<TangentBasis> tangentFaceBases(const Mesh& mesh,const neoshared::bif
             basis.bitangent=normalize(tangentUvDerivative(p,q,uv,precise,0u));
             basis.tangent=normalize(tangentUvDerivative(p,q,uv,precise,1u));
         }
-        const auto area=cross(p,subtract(source.generatedPositions.at(c),source.generatedPositions.at(b)));
-        basis.normal=tangentBasisNormal(basis.bitangent,basis.tangent,area);
+        basis.normal=tangentBasisNormal(basis.bitangent,basis.tangent);
         const auto n=source.firstCornerNormals.at(i);
         const auto alignment=(basis.normal.x*n.x+basis.normal.y*n.y)+basis.normal.z*n.z;
         if(alignment<0.0f) {basis.tangent=negate(basis.tangent);basis.normal=negate(basis.normal);}

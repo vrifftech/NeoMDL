@@ -2917,7 +2917,7 @@ void reconstructTangentUvPrecision(Writer& out,const Model& model,const Model& f
                 TangentBasis basis;
                 basis.bitangent=normalized(faceDerivative(face,precise,0u));
                 basis.tangent=normalized(faceDerivative(face,precise,1u));
-                basis.normal=ascii::tangentBasisNormal(basis.bitangent,basis.tangent,{});
+                basis.normal=ascii::tangentBasisNormal(basis.bitangent,basis.tangent);
                 const auto n=source->firstCornerNormals[face];
                 if((basis.normal.x*n.x+basis.normal.y*n.y)+basis.normal.z*n.z<0.0f) {
                     basis.tangent={-basis.tangent.x,-basis.tangent.y,-basis.tangent.z};
@@ -3247,7 +3247,7 @@ void reconstructTangentUvDomains(Writer& out,const Model& model,const Model& fra
         const auto faceBasis=[&](std::size_t face,const std::array<Vec3,2>& axes) {
             TangentBasis basis;
             basis.bitangent=axes[0];basis.tangent=axes[1];
-            basis.normal=ascii::tangentBasisNormal(basis.bitangent,basis.tangent,{});
+            basis.normal=ascii::tangentBasisNormal(basis.bitangent,basis.tangent);
             const auto n=source->firstCornerNormals[face];
             if((basis.normal.x*n.x+basis.normal.y*n.y)+basis.normal.z*n.z<0.0f) {
                 basis.tangent={-basis.tangent.x,-basis.tangent.y,-basis.tangent.z};
@@ -3737,7 +3737,7 @@ void reconstructTangentDirections(Writer& out,const Model& model,const Model& fr
         const auto basisFor=[&](std::size_t face,const std::array<std::array<double,2>,3>& precise) {
             TangentBasis value;value.bitangent=normalize(derivative(face,precise,0u));
             value.tangent=normalize(derivative(face,precise,1u));
-            value.normal=ascii::tangentBasisNormal(value.bitangent,value.tangent,{});
+            value.normal=ascii::tangentBasisNormal(value.bitangent,value.tangent);
             const auto n=source->firstCornerNormals[face];
             if((value.normal.x*n.x+value.normal.y*n.y)+value.normal.z*n.z<0.0f) {
                 value.tangent={-value.tangent.x,-value.tangent.y,-value.tangent.z};
@@ -4398,7 +4398,7 @@ void reconstructTangentDirections(Writer& out,const Model& model,const Model& fr
                 const auto considerCoordinates=[&](const Coordinates& u,const Coordinates& v,Vec3 bitangent,Vec3 tangent) {
                     out.job().check();
                     TangentBasis newRaw;newRaw.bitangent=bitangent;newRaw.tangent=tangent;
-                    newRaw.normal=ascii::tangentBasisNormal(newRaw.bitangent,newRaw.tangent,{});
+                    newRaw.normal=ascii::tangentBasisNormal(newRaw.bitangent,newRaw.tangent);
                     const auto n=source->firstCornerNormals[face];
                     if((newRaw.normal.x*n.x+newRaw.normal.y*n.y)+newRaw.normal.z*n.z<0.0f) {
                         newRaw.tangent={-newRaw.tangent.x,-newRaw.tangent.y,-newRaw.tangent.z};
@@ -5023,7 +5023,7 @@ void reconstructTangentPositionPrecision(Writer& out,const Model& model,const Mo
                         const auto b=normalize(ascii::tangentPositionDerivative(facePositions[f],high,faceUv[f],uv,0u));
                         const auto t=normalize(ascii::tangentPositionDerivative(facePositions[f],high,faceUv[f],uv,1u));
                         const auto reference=axis?b:t;
-                        const auto normal=ascii::tangentBasisNormal(b,t,{});
+                        const auto normal=ascii::tangentBasisNormal(b,t);
                         const double x=double(reference.y)*n.z-double(reference.z)*n.y;
                         const double y=double(reference.z)*n.x-double(reference.x)*n.z;
                         const double z=double(reference.x)*n.y-double(reference.y)*n.x;
@@ -5064,7 +5064,7 @@ void reconstructTangentPositionPrecision(Writer& out,const Model& model,const Mo
                         TangentBasis value;
                         value.bitangent=normalize(ascii::tangentPositionDerivative(facePositions[f],high,faceUv[f],uv,0u));
                         value.tangent=normalize(ascii::tangentPositionDerivative(facePositions[f],high,faceUv[f],uv,1u));
-                        value.normal=ascii::tangentBasisNormal(value.bitangent,value.tangent,{});
+                        value.normal=ascii::tangentBasisNormal(value.bitangent,value.tangent);
                         const auto n=source.firstCornerNormals[f];
                         if((value.normal.x*n.x+value.normal.y*n.y)+value.normal.z*n.z<0.0f) {
                             value.tangent={-value.tangent.x,-value.tangent.y,-value.tangent.z};
@@ -5548,7 +5548,7 @@ void reconstructCancelledTangentSums(Writer& out,const Model& model,const Model&
                 std::set<std::array<std::uint32_t,3>> seen;
                 for(const auto& tangent:tangents) {
                     TangentBasis value;value.bitangent=bases[face].bitangent;value.tangent=tangent.first;
-                    value.normal=ascii::tangentBasisNormal(value.bitangent,value.tangent,{});
+                    value.normal=ascii::tangentBasisNormal(value.bitangent,value.tangent);
                     const auto normal=existing.vertices[ids[rotation]].normal;
                     if((value.normal.x*normal.x+value.normal.y*normal.y)+value.normal.z*normal.z<0.0f) {
                         value.tangent={-value.tangent.x,-value.tangent.y,-value.tangent.z};value.normal={-value.normal.x,-value.normal.y,-value.normal.z};
@@ -5573,8 +5573,8 @@ void reconstructCancelledTangentSums(Writer& out,const Model& model,const Model&
                 const auto n=ascii::normalizeTangentBasis(target.normal);
                 std::size_t axis=0u;for(std::size_t c=1;c<3u;++c) if(std::abs(component(n,c))<std::abs(component(n,axis))) axis=c;
                 Vec3 unit{};if(axis==0u) unit.x=1.0f;else if(axis==1u) unit.y=1.0f;else unit.z=1.0f;
-                const auto u=ascii::normalizeTangentBasis(ascii::tangentBasisNormal(n,unit,{}));
-                const auto v=ascii::tangentBasisNormal(n,u,{});
+                const auto u=ascii::normalizeTangentBasis(ascii::tangentBasisNormal(n,unit));
+                const auto v=ascii::tangentBasisNormal(n,u);
                 const double radius=std::tan(std::acos(-1.0)/180.0)*std::cos(std::acos(-1.0)/8.0);
                 for(std::size_t side=0;side<8u;++side) {
                     const double angle=side*std::acos(-1.0)/4.0;
