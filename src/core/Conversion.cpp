@@ -278,9 +278,9 @@ ConversionReport convertFile(const ConversionRequest& request, const ConversionO
             neoshared::checkResourceOutput(conversionReportPath(request), discovered);
             inputs.push_back(conversionReportPath(request));
         }
-        for (const auto& output : outputs) {
-            neoshared::checkResourceOutput(output.path, inputs); inputs.push_back(output.path);
-        }
+        std::vector<std::filesystem::path> destinations;
+        for (const auto& output : outputs) destinations.push_back(output.path);
+        neoshared::checkResourceOutputs(destinations, inputs);
         job.check();
         for (const auto& output : outputs) {
             neoshared::texture::writeFileBytes(output.path, output.bytes);

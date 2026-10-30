@@ -163,11 +163,10 @@ int main(int argc, char** argv) {
                 auto files=neomdl::conversionInputs(donor); inputs.insert(inputs.end(),files.begin(),files.end());
             }
             if(options.layout)inputs.push_back(*options.layout);
-            auto destinations=inputs;
+            std::vector<std::filesystem::path> destinations;
             for(const auto& conversion:conversions)
-                for(const auto& output:conversion.outputs) {
-                    neoshared::checkResourceOutput(output,destinations); destinations.push_back(output);
-                }
+                destinations.insert(destinations.end(),conversion.outputs.begin(),conversion.outputs.end());
+            neoshared::checkResourceOutputs(destinations,inputs);
         }
         if (mode&&!directory.empty()) std::filesystem::create_directories(directory);
         int failures=0;

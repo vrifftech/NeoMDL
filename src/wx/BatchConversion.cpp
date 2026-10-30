@@ -114,8 +114,7 @@ void showBatchConversion(wxWindow* parent, ConversionMode mode, const AuthoringJ
                     auto source = conversionInputs(requests.back()); inputs.insert(inputs.end(), source.begin(), source.end());
                     auto target = conversionOutputs(requests.back(), options); outputs.insert(outputs.end(), target.begin(), target.end());
                 }
-                auto reserved = inputs;
-                for (const auto& output : outputs) { neoshared::checkResourceOutput(output, reserved); reserved.push_back(output); }
+                neoshared::checkResourceOutputs(outputs, inputs);
             }
             if (!confirmCompanionOverwrite(&dialog, outputs)) return;
             saveAsciiNamingPreference(style);

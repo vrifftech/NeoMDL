@@ -301,14 +301,13 @@ bool AsciiEditor::save(bool choosePath) {
             }), protectedInputs.end());
         }
         protectedInputs.insert(protectedInputs.end(), replacementInputs_.begin(), replacementInputs_.end());
-        neoshared::checkResourceOutput(path, protectedInputs);
-        protectedInputs.push_back(path);
         auto outputs=collisionOutputs(collisions_,path,false);
-        std::vector<std::filesystem::path> companions;
+        std::vector<std::filesystem::path> companions,destinations{path};
         for(const auto& output:outputs) {
-            neoshared::checkResourceOutput(output.path,protectedInputs);protectedInputs.push_back(output.path);
+            destinations.push_back(output.path);
             companions.push_back(output.path);
         }
+        neoshared::checkResourceOutputs(destinations,protectedInputs);
         if((choosePath || savePath_.empty()) && !confirmCompanionOverwrite(this,companions)) return false;
         const auto buffer = text();
         neoshared::texture::writeFileBytes(path, std::vector<std::uint8_t>(buffer.begin(), buffer.end()));

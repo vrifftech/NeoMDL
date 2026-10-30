@@ -3886,17 +3886,15 @@ private:
         options.includeAnimations=controls.includeAnimations;
         try {
             const auto output=neosettings::pathFromWx(file.GetPath());
-            neoshared::checkResourceOutput(output,protectedInputs);
-            protectedInputs.push_back(output);
             auto reportPath=output;reportPath+=".report.txt";
-            neoshared::checkResourceOutput(reportPath,protectedInputs);protectedInputs.push_back(reportPath);
             const auto collisions=collisionOutputs(editor->collisions(),output,false);
             std::vector<std::filesystem::path> companionPaths{reportPath};
+            std::vector<std::filesystem::path> destinations{output,reportPath};
             for(const auto& collision:collisions) {
-                neoshared::checkResourceOutput(collision.path,protectedInputs);
-                protectedInputs.push_back(collision.path);
+                destinations.push_back(collision.path);
                 companionPaths.push_back(collision.path);
             }
+            neoshared::checkResourceOutputs(destinations,protectedInputs);
             model::AsciiExportResult exported;
             ConversionReport report;report.source=document.sourceDescription();report.game=document.model().game;
             std::vector<std::uint8_t> bytes;
@@ -3958,12 +3956,9 @@ private:
         try {
             const auto output=neosettings::pathFromWx(file.GetPath());
             auto companion=output;companion.replace_extension(".mdx");
-            neoshared::checkResourceOutput(output,protectedInputs);
-            protectedInputs.push_back(output);
-            neoshared::checkResourceOutput(companion,protectedInputs);
-            protectedInputs.push_back(companion);
             auto reportPath=output;reportPath+=".report.txt";
-            neoshared::checkResourceOutput(reportPath,protectedInputs);protectedInputs.push_back(reportPath);
+            neoshared::checkResourceOutputs({output,companion,reportPath},protectedInputs);
+            protectedInputs.insert(protectedInputs.end(),{output,companion,reportPath});
             model::PackedExportResult exported;
             ConversionReport report;report.source=document.sourceDescription();report.game=controls.game;
             std::vector<CollisionOutput> collisions;
@@ -3979,11 +3974,12 @@ private:
                 job.check();
             })) return;
             std::vector<std::filesystem::path> companionPaths{companion,reportPath};
+            std::vector<std::filesystem::path> collisionPaths;
             for(const auto& collision:collisions) {
-                neoshared::checkResourceOutput(collision.path,protectedInputs);
-                protectedInputs.push_back(collision.path);
+                collisionPaths.push_back(collision.path);
                 companionPaths.push_back(collision.path);
             }
+            neoshared::checkResourceOutputs(collisionPaths,protectedInputs);
             if(!confirmCompanionOverwrite(this,companionPaths)) return;
             neoshared::texture::writeFileBytes(companion,exported.mdx);
             neoshared::texture::writeFileBytes(output,exported.mdl);

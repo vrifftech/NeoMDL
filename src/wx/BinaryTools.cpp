@@ -324,12 +324,12 @@ std::optional<BinaryEditResult> saveBinaryCopy(wxWindow* parent,BinaryModelFile&
         if (controls.game!=file.model.game) nodeOffsets=switchBinaryGame(outputs.front().bytes,job);
         else for (const auto& item : file.model.nodes) nodeOffsets.emplace(*item.packedOffset,*item.packedOffset);
     })) return {};
-    auto reserved=file.inputs;
-    std::vector<std::filesystem::path> companions;
+    std::vector<std::filesystem::path> companions,destinations;
     for (const auto& item : outputs) {
-        neoshared::checkResourceOutput(item.path,reserved);reserved.push_back(item.path);
+        destinations.push_back(item.path);
         if (item.path!=destination) companions.push_back(item.path);
     }
+    neoshared::checkResourceOutputs(destinations,file.inputs);
     if (!confirmCompanionOverwrite(parent,companions)) return {};
     if (!runJob("Saving binary copy",[&](const auto& job) {
         job.check();
