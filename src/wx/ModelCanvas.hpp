@@ -88,6 +88,7 @@ public:
     std::optional<WalkmeshFace> face;
 };
 wxDECLARE_EVENT(EVT_WALKMESH_EDIT, WalkmeshEvent);
+wxDECLARE_EVENT(EVT_ROOM_EDGE_PICKED, wxCommandEvent);
 model::Vec3 walkmeshMaterialColor(std::uint32_t material);
 
 std::string triggerDetectionReport(const TriggerDetectionResult&);
@@ -425,6 +426,10 @@ public:
     bool walkmeshDragging() const noexcept {return walkmeshDrag_.has_value();}
     void cancelWalkmeshStroke();
     void updateRoomWalkmesh(const std::string& room,const neoshared::bwm::BwmFile& mesh) {areaScene_.replaceRoomWalkmesh(room,mesh);Refresh(false);}
+    void setRoomConnections(std::vector<RoomConnection> connections);
+    void configureRoomConnections(bool visible,bool xray,std::optional<std::size_t> selected);
+    void setRoomVisibility(LightRoomId from,LightRoomId to,bool visible) {areaScene_.setRoomVisibility(from,to,visible);Refresh(false);}
+    void replaceAreaVisibility(const std::vector<std::uint8_t>& bytes) {areaScene_.replaceRoomVisibility(bytes);Refresh(false);}
     void moveAreaMarker(const std::string& path,model::Vec3 position);
     void setAreaPolygon(std::vector<model::Vec3> points,bool vertices);
     void beginAreaPolygon(std::optional<float> planeZ={},float zOffset=0.0f,std::optional<std::size_t> vertexLimit=kAreaTriggerVertexLimit);
@@ -569,6 +574,8 @@ private:
     std::optional<WalkmeshFace> pickWalkmesh(wxPoint point) const;
     void emitWalkmesh(AreaGizmoPhase phase,bool painting,std::optional<WalkmeshFace> face={});
     void drawWalkmeshOverlay();
+    void drawRoomConnections();
+    std::optional<std::size_t> pickRoomConnection(wxPoint point) const;
     void onKey(wxKeyEvent& event);
     void onFocusLost(wxFocusEvent& event);
     void onCaptureLost(wxMouseCaptureLostEvent& event);
@@ -801,6 +808,9 @@ private:
     std::string walkmeshRoom_;
     struct WalkmeshDrag {wxPoint start,current;bool additive{},painting{};};
     std::optional<WalkmeshDrag> walkmeshDrag_;
+    std::vector<RoomConnection> roomConnections_;
+    std::optional<std::size_t> selectedRoomConnection_;
+    bool roomConnectionsVisible_{},roomConnectionsXray_{};
     AreaGizmoMode gizmoMode_{AreaGizmoMode::None};
     model::Vec3 gizmoPosition_{};
     float gizmoHeading_{},gizmoSize_{};

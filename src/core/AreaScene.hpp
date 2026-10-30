@@ -41,6 +41,16 @@ struct AreaRoom {
     std::optional<neoshared::ResourceDocument> walkmeshSource;
 };
 
+struct RoomVisibilityBlock {std::string room;std::vector<std::string> visible;};
+struct RoomConnection {
+    std::uint32_t edge{};
+    std::int32_t target{-1};
+    model::Vec3 first{},second{},targetFirst{},targetSecond{};
+    std::optional<std::uint32_t> targetEdge;
+    float gap{};
+    bool reciprocal{},aligned{};
+};
+
 // NeoMDL's visual area host. LYT/VIS are scene metadata, not ASCII MDL.
 // Static Parts, retained animated room Gobs, references and track Gobs have
 // distinct ownership. A failed resource/partition load leaves this host intact.
@@ -242,6 +252,12 @@ public:
     const std::vector<AreaRoom>& rooms() const noexcept { return rooms_; }
     const std::optional<neoshared::ResourceDocument>& surfaceTable() const noexcept {return surfaceTable_;}
     void replaceRoomWalkmesh(const std::string& name,const neoshared::bwm::BwmFile& mesh);
+    const std::string& visibilityName() const noexcept {return visibilityName_;}
+    const std::optional<neoshared::ResourceDocument>& visibilitySource() const noexcept {return visibilitySource_;}
+    void replaceRoomVisibility(const std::vector<std::uint8_t>& bytes,const neoshared::bif::JobControl& job=resourceLoadJob());
+    void setRoomVisibility(LightRoomId from,LightRoomId to,bool visible);
+    std::vector<std::uint8_t> visibilityBytes() const;
+    std::vector<RoomConnection> roomConnections(LightRoomId room) const;
     const std::filesystem::path& path() const noexcept { return path_; }
     model::Bounds bounds() const noexcept;
     std::vector<AreaMeshInstance> meshInstances(bool includeReferences = true, bool dangly = true,
@@ -358,6 +374,9 @@ private:
     std::vector<AreaRoom> rooms_;
     std::optional<std::uint32_t> walkableMaterials_;
     std::optional<neoshared::ResourceDocument> surfaceTable_;
+    std::optional<neoshared::ResourceDocument> visibilitySource_;
+    std::string visibilityName_;
+    std::vector<RoomVisibilityBlock> visibilityBlocks_;
     std::filesystem::path path_;
     std::optional<LightRoomId> currentRoom_;
     std::optional<LightRoomId> automaticCurrentRoom_;

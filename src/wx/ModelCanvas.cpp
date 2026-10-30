@@ -563,6 +563,7 @@ void ModelCanvas::installArea(AreaScene pending,PreparedSceneAudioPlayback sound
     Refresh(false);
 }
 void ModelCanvas::clearArea() {
+    setRoomConnections({});
     cancelAreaPolygon();polygonPoints_.clear();areaMarkers_.clear();
     cancelAreaGizmo();gizmoMode_=AreaGizmoMode::None;
     selectedAreaOwners_.clear();
@@ -1842,7 +1843,7 @@ void ModelCanvas::refreshMaterials() {
 }
 
 void ModelCanvas::setDocument(const ModelDocument* document, bool preserveCamera) {
-    setWalkmeshLayers({});
+    setWalkmeshLayers({});setRoomConnections({});
     cancelAreaPolygon();polygonPoints_.clear();areaMarkers_.clear();
     cancelAreaGizmo();gizmoMode_=AreaGizmoMode::None;
     selectedAreaOwners_.clear();
@@ -3812,7 +3813,11 @@ void ModelCanvas::onMouse(wxMouseEvent& event) {
         selectionStart_.reset();
     if (event.LeftUp()) {
         if (selectionStart_ && !event.ControlDown() && walkmeshTool_==WalkmeshTool::View) {
-            if(const auto marker=pickAreaMarker(event.GetPosition())) {
+            if(roomConnectionsVisible_) {
+                const auto edge=pickRoomConnection(event.GetPosition());
+                wxCommandEvent selection(EVT_ROOM_EDGE_PICKED,GetId());selection.SetEventObject(this);
+                selection.SetInt(edge?int(*edge):-1);ProcessWindowEvent(selection);
+            } else if(const auto marker=pickAreaMarker(event.GetPosition())) {
                 meshPick_.reset();
                 wxCommandEvent selection(EVT_AREA_MARKER_PICKED,GetId());selection.SetEventObject(this);
                 selection.SetString(wxString::FromUTF8(marker->c_str()));ProcessWindowEvent(selection);
@@ -4778,6 +4783,7 @@ void ModelCanvas::drawScene() {
     drawAreaCameraGlyphs();
     drawAreaGizmo();
     drawWalkmeshOverlay();
+    drawRoomConnections();
     drawAreaEditorOverlay();
     glPolygonMode(GL_FRONT_AND_BACK, GL_FILL);
     glDisable(GL_BLEND);

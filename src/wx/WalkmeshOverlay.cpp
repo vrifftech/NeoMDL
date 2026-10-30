@@ -11,6 +11,7 @@
 
 namespace neomdl::ui {
 wxDEFINE_EVENT(EVT_WALKMESH_EDIT,WalkmeshEvent);
+wxDEFINE_EVENT(EVT_ROOM_EDGE_PICKED,wxCommandEvent);
 
 model::Vec3 walkmeshMaterialColor(std::uint32_t material) {
     static const auto colors=[] {
@@ -155,6 +156,56 @@ void ModelCanvas::drawWalkmeshOverlay() {
         const auto& drag=*walkmeshDrag_;glVertex2i(drag.start.x,drag.start.y);glVertex2i(drag.current.x,drag.start.y);
         glVertex2i(drag.current.x,drag.current.y);glVertex2i(drag.start.x,drag.current.y);glEnd();
         glMatrixMode(GL_PROJECTION);glPopMatrix();glMatrixMode(GL_MODELVIEW);
+    }
+    glPopMatrix();glPopAttrib();
+}
+
+void ModelCanvas::setRoomConnections(std::vector<RoomConnection> connections) {
+    roomConnections_=std::move(connections);selectedRoomConnection_.reset();Refresh(false);
+}
+
+void ModelCanvas::configureRoomConnections(bool visible,bool xray,std::optional<std::size_t> selected) {
+    if(visible!=roomConnectionsVisible_) {meshPick_.reset();selectionStart_.reset();}
+    roomConnectionsVisible_=visible;roomConnectionsXray_=xray;selectedRoomConnection_=selected;Refresh(false);
+}
+
+std::optional<std::size_t> ModelCanvas::pickRoomConnection(wxPoint point) const {
+    auto closest=float(FromDIP(8));std::optional<std::size_t> result;
+    for(std::size_t i=0;i<roomConnections_.size();++i) {
+        const auto& edge=roomConnections_[i];const auto a=gizmoScreenPoint(edge.first),b=gizmoScreenPoint(edge.second);
+        if(a.z<=pickingCamera_->nearClip||b.z<=pickingCamera_->nearClip)continue;
+        const auto dx=b.x-a.x,dy=b.y-a.y,squared=dx*dx+dy*dy;
+        const auto t=squared==0?0.0f:std::clamp(((point.x-a.x)*dx+(point.y-a.y)*dy)/squared,0.0f,1.0f);
+        const auto distance=std::hypot(point.x-a.x-dx*t,point.y-a.y-dy*t);
+        if(distance<closest) {closest=distance;result=i;}
+    }
+    return result;
+}
+
+void ModelCanvas::drawRoomConnections() {
+    if(!roomConnectionsVisible_)return;
+    glPushAttrib(GL_ENABLE_BIT|GL_LINE_BIT|GL_CURRENT_BIT|GL_DEPTH_BUFFER_BIT);
+    glDisable(GL_LIGHTING);glDisable(GL_TEXTURE_2D);glDisable(GL_FOG);glDisable(GL_BLEND);
+    if(roomConnectionsXray_)glDisable(GL_DEPTH_TEST);else glEnable(GL_DEPTH_TEST);
+    glDepthMask(GL_FALSE);glPushMatrix();glLoadMatrixf(cameraView_.values.data());
+    glLineWidth(2.0f*float(GetContentScaleFactor()));glBegin(GL_LINES);
+    for(const auto& edge:roomConnections_) {
+        if(edge.target==-1)glColor3f(0.6f,0.65f,0.7f);
+        else if(!edge.targetEdge)glColor3f(1,0.25f,0.2f);
+        else if(!edge.aligned||!edge.reciprocal)glColor3f(1,0.6f,0.15f);
+        else glColor3f(0.2f,1,0.4f);
+        glVertex3f(edge.first.x,edge.first.y,edge.first.z);glVertex3f(edge.second.x,edge.second.y,edge.second.z);
+    }
+    glEnd();
+    if(selectedRoomConnection_) {
+        const auto& edge=roomConnections_.at(*selectedRoomConnection_);glLineWidth(5.0f*float(GetContentScaleFactor()));
+        glColor3f(1,0.9f,0.15f);glBegin(GL_LINES);glVertex3f(edge.first.x,edge.first.y,edge.first.z);glVertex3f(edge.second.x,edge.second.y,edge.second.z);glEnd();
+        if(edge.targetEdge) {
+            glColor3f(0.2f,0.8f,1);glBegin(GL_LINES);glVertex3f(edge.targetFirst.x,edge.targetFirst.y,edge.targetFirst.z);glVertex3f(edge.targetSecond.x,edge.targetSecond.y,edge.targetSecond.z);glEnd();
+            glLineWidth(2.0f*float(GetContentScaleFactor()));glColor3f(1,0.6f,0.15f);glBegin(GL_LINES);
+            glVertex3f(edge.first.x,edge.first.y,edge.first.z);glVertex3f(edge.targetSecond.x,edge.targetSecond.y,edge.targetSecond.z);
+            glVertex3f(edge.second.x,edge.second.y,edge.second.z);glVertex3f(edge.targetFirst.x,edge.targetFirst.y,edge.targetFirst.z);glEnd();
+        }
     }
     glPopMatrix();glPopAttrib();
 }

@@ -85,6 +85,7 @@ add_library(neomdl_core
     src/core/DirtyArea.cpp
     src/core/AreaObject.cpp
     src/core/AreaScene.cpp
+    src/core/RoomConnections.cpp
     src/core/TriggerScene.cpp
     src/core/TriggerRuntime.cpp
     src/core/TrapObjectEvents.cpp

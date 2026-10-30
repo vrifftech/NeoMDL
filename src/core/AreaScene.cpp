@@ -136,6 +136,7 @@ void AreaScene::swap(AreaScene& other) noexcept {
     swap(currentRoomOverride_,other.currentRoomOverride_);
     swap(ignoreVisibility_,other.ignoreVisibility_);
     swap(activeRooms_,other.activeRooms_);swap(ownedLightIds_,other.ownedLightIds_);
+    swap(visibilitySource_,other.visibilitySource_);swap(visibilityName_,other.visibilityName_);swap(visibilityBlocks_,other.visibilityBlocks_);
 }
 AreaScene& AreaScene::operator=(AreaScene&& other) noexcept {
     if(this!=&other) {AreaScene old;swap(old);swap(other);}
@@ -418,14 +419,22 @@ void AreaScene::loadResource(neoshared::ResourceDocument layout, const ResourceR
         }
     }
     require(sawRooms, "missing roomcount block");
-    const auto visibilityName = neoshared::pathToUtf8(std::filesystem::u8path(layout.fileName).stem());
-    std::string visibility;
-    if (resolver) {
-        if (const auto resource = resolver(visibilityName,0x0bb9u)) {
-            visibility.assign(resource->bytes.begin(),resource->bytes.end());
-            require(visibility.find('\0') == std::string::npos, "embedded NUL in visibility resource");
-        }
-    }
+    pending.visibilityName_=neoshared::pathToUtf8(std::filesystem::u8path(layout.fileName).stem());
+    if(resolver)pending.visibilitySource_=resolver(pending.visibilityName_,0x0bb9u);
+    pending.replaceRoomVisibility(pending.visibilitySource_?pending.visibilitySource_->bytes:std::vector<std::uint8_t>{},job);
+    // Caller unregisters the old host before moving a successfully loaded replacement.
+    require(ownedLightIds_.empty(), "load into a fresh host or clear registered state first");
+    job.check();
+    pending.bindAnimationOwners();
+    *this = std::move(pending);
+    transaction.committed=true;
+}
+
+void AreaScene::replaceRoomVisibility(const std::vector<std::uint8_t>& bytes,const neoshared::bif::JobControl& job) {
+    visibilityBlocks_.clear();std::unordered_map<std::string,LightRoomId> byName;
+    for(auto& room:rooms_) {room.influencingRooms.clear();byName.emplace(key(room.name),room.id);}
+    const std::string visibility(bytes.begin(),bytes.end());
+    require(visibility.find('\0')==std::string::npos,"embedded NUL in visibility resource");
     const auto visLines = lines(visibility);
     for (std::size_t line = 0; line < visLines.size(); ++line) {
         job.update(line,visLines.size(),"Reading area visibility");
@@ -437,6 +446,7 @@ void AreaScene::loadResource(neoshared::ResourceDocument layout, const ResourceR
                 "truncated visibility block");
         const auto first = byName.find(key(source));
         require(first != byName.end(), "visibility names unknown room: " + source);
+        RoomVisibilityBlock block;block.room=source;
         for (long long index = 0; index < count; ++index) {
             job.check();
             require(++line < visLines.size(), "truncated visibility block");
@@ -445,19 +455,15 @@ void AreaScene::loadResource(neoshared::ResourceDocument layout, const ResourceR
             record >> destination;
             const auto second = byName.find(key(destination));
             require(second != byName.end(), "visibility names unknown room: " + destination);
-            auto& forward = pending.rooms_[static_cast<std::size_t>(first->second-1u)].influencingRooms;
+            block.visible.push_back(destination);
+            auto& forward = rooms_[static_cast<std::size_t>(first->second-1u)].influencingRooms;
             if (std::find(forward.begin(),forward.end(),second->second) != forward.end()) continue;
             // Scene::SetVisibility adds both directions in insertion order.
             forward.push_back(second->second);
-            pending.rooms_[static_cast<std::size_t>(second->second-1u)].influencingRooms.push_back(first->second);
+            rooms_[static_cast<std::size_t>(second->second-1u)].influencingRooms.push_back(first->second);
         }
+        visibilityBlocks_.push_back(std::move(block));
     }
-    // Caller unregisters the old host before moving a successfully loaded replacement.
-    require(ownedLightIds_.empty(), "load into a fresh host or clear registered state first");
-    job.check();
-    pending.bindAnimationOwners();
-    *this = std::move(pending);
-    transaction.committed=true;
 }
 
 void AreaScene::replaceRoomWalkmesh(const std::string& name,const neoshared::bwm::BwmFile& mesh) {
