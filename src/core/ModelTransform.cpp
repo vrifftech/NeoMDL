@@ -4,6 +4,7 @@
 #include <model/PackedLayout.hpp>
 #include <algorithm>
 #include <cmath>
+#include <set>
 
 namespace neomdl {
 namespace {
@@ -75,6 +76,24 @@ void transformBinaryModel(std::vector<std::uint8_t>& mdl,std::optional<std::vect
         const PlanarTransform& transform,const std::map<std::string,std::string>& names) {
     const auto layout=model::inspectPackedLayout(mdl,mdx);const auto base=layout.payloadOffset;
     ByteView source(mdl.data(),mdl.size(),"Model transform",{});Buffer output{mdl};
+    std::set<std::string> proceduralNames;std::set<std::size_t> proceduralNodes,baseNodes,controlledOrientations;
+    for(const auto& region:layout.structures)if(region.name.rfind("Node: ",0)==0&&(source.u16(region.offset)&(model::kNodeEmitter|model::kNodeCamera)))proceduralNames.insert(resourceKey(region.name));
+    for(const auto& region:layout.structures)if(proceduralNames.count(resourceKey(region.name)))proceduralNodes.insert(region.offset);
+    for(const auto& region:layout.structures)if(region.name.rfind("Node: ",0)==0) {
+        const auto& parent=layout.structures[*region.parent];if(parent.name.rfind("Model: ",0)==0||baseNodes.count(parent.offset))baseNodes.insert(region.offset);
+    }
+    auto basis=transform.facing({0,0,0,1});if(!transform.mirrored) {basis.x=-basis.x;basis.y=-basis.y;basis.z=-basis.z;}
+    const model::Quaternion inverseBasis{-basis.x,-basis.y,-basis.z,basis.w};
+    const auto nodePosition=[&](std::size_t node,Vec3 value) {
+        if(proceduralNodes.count(base+source.u32(node+12)))return transform.mirrored?Vec3{-value.x,value.y,value.z}:value;
+        return transform.direction(value);
+    };
+    const auto nodeOrientation=[&](std::size_t node,model::Quaternion value) {
+        // Procedural Parts keep their own axes; compensate attached child frames.
+        if(proceduralNodes.count(base+source.u32(node+12)))value=model::engineQuaternionProduct(basis,value);
+        if(proceduralNodes.count(node))value=model::engineQuaternionProduct(value,inverseBasis);
+        return transform.orientation(value);
+    };
     std::optional<Buffer> stream;if(mdx)stream.emplace(Buffer{*mdx});
     const auto vector=[&](std::size_t at){output.vec3(at,transform.direction(source.vec3(at,"vector")));};
     const auto quaternion=[&](std::size_t at) {const auto v=transform.orientation({source.f32(at+4),source.f32(at+8),source.f32(at+12),source.f32(at)});output.quaternion(at,v);};
@@ -100,7 +119,10 @@ void transformBinaryModel(std::vector<std::uint8_t>& mdl,std::optional<std::vect
                 if(field.name!="Position"&&field.name!="Normal"&&field.name.rfind("Tangent basis ",0)!=0)continue;
                 for(std::size_t offset=0;offset<field.size;offset+=12) {const auto pos=at+row*region.stride+field.offset+offset;stream->vec3(pos,transform.direction(input.vec3(pos,"vertex channel")));}
             }
-        } else if(region.name.rfind("Node: ",0)==0) {vector(at+16);quaternion(at+28);}
+        } else if(region.name.rfind("Node: ",0)==0) {
+            output.vec3(at+16,nodePosition(at,source.vec3(at+16,"node position")));
+            output.quaternion(at+28,nodeOrientation(at,{source.f32(at+32),source.f32(at+36),source.f32(at+40),source.f32(at+28)}));
+        }
         else if(region.name=="Mesh") {box(at+20);vector(at+48);}
         else if(region.name=="AABB node")box(at);
         else if(region.name=="CPU vertices"||region.name=="Rest positions"||region.name=="Position samples"||region.name=="Saber positions"||region.name=="Saber normals"||region.name=="Inverse translations")
@@ -116,14 +138,15 @@ void transformBinaryModel(std::vector<std::uint8_t>& mdl,std::optional<std::vect
             for(std::size_t i=0;i<region.count;++i) {
                 const auto record=at+i*16;const auto type=source.u32(record);const auto rows=source.u16(record+6);const auto first=source.u16(record+10);const auto flags=source.u8(record+12);
                 if(type==model::kControllerPosition&&(flags&15)==3&&((flags&0xf0)==0||(flags&0xf0)==0x10))for(std::size_t row=0;row<std::size_t(rows)*((flags&0xf0)==0x10?3:1);++row) {
-                    const auto pos=(first+row*3)*4;values.vec3(pos,transform.direction(source.vec3(data+pos,"position key")));
+                    const auto pos=(first+row*3)*4;values.vec3(pos,nodePosition(node,source.vec3(data+pos,"position key")));
                 }
                 if(type==model::kControllerOrientation&&rows&&(flags&0xf0)==0&&((flags&15)==2||(flags&15)==4)) {
+                    controlledOrientations.insert(node);
                     if((flags&15)==2) {
                         const auto position=values.append(std::size_t(rows)*16);output.u16(record+10,std::uint16_t(position/4));output.u8(record+12,4);
-                        for(std::size_t row=0;row<rows;++row) {const auto q=transform.orientation(model::unpackEngineControllerQuaternion(source.u32(data+(first+row)*4),layout.game));values.f32(position+row*16,q.x);values.f32(position+row*16+4,q.y);values.f32(position+row*16+8,q.z);values.f32(position+row*16+12,q.w);}
+                        for(std::size_t row=0;row<rows;++row) {const auto q=nodeOrientation(node,model::unpackEngineControllerQuaternion(source.u32(data+(first+row)*4),layout.game));values.f32(position+row*16,q.x);values.f32(position+row*16+4,q.y);values.f32(position+row*16+8,q.z);values.f32(position+row*16+12,q.w);}
                     } else for(std::size_t row=0;row<rows;++row) {
-                        const auto pos=(first+row*4)*4;const auto q=transform.orientation({source.f32(data+pos),source.f32(data+pos+4),source.f32(data+pos+8),source.f32(data+pos+12)});
+                        const auto pos=(first+row*4)*4;const auto q=nodeOrientation(node,{source.f32(data+pos),source.f32(data+pos+4),source.f32(data+pos+8),source.f32(data+pos+12)});
                         values.f32(pos,q.x);values.f32(pos+4,q.y);values.f32(pos+8,q.z);values.f32(pos+12,q.w);
                     }
                 }
@@ -141,6 +164,18 @@ void transformBinaryModel(std::vector<std::uint8_t>& mdl,std::optional<std::vect
                 const auto pool=std::stoul(region.name.substr(11));output.u32(base+source.u32(mesh+188)+pool*4,std::uint32_t(target-base));output.u32(base+source.u32(mesh+176)+pool*4,std::uint32_t(count+2));
             } else if(primitive==5) {const auto count=drawCount(region);for(std::size_t i=1;i<count;++i)output.u16(at+i*2,source.u16(at+(count-i)*2));}
         }
+    }
+    for(const auto node:baseNodes)if(!controlledOrientations.count(node)&&(proceduralNodes.count(node)||proceduralNodes.count(base+source.u32(node+12)))) {
+        // CreateInstanceTreeR seeds Part orientation through controllers, not the node header.
+        ByteView current(output.bytes.data(),output.bytes.size(),"Transformed base controller",{});
+        const auto count=current.u32(node+60),words=current.u32(node+72);
+        const auto keysAt=base+current.u32(node+56),dataAt=base+current.u32(node+68);
+        const std::vector<std::uint8_t> keys(output.bytes.begin()+keysAt,output.bytes.begin()+keysAt+count*16),values(output.bytes.begin()+dataAt,output.bytes.begin()+dataAt+words*4);
+        const auto data=output.append((words+5)*4);output.copy(data,values.data(),values.size());output.f32(data+words*4,0);
+        const auto q=nodeOrientation(node,{0,0,0,1});output.f32(data+(words+1)*4,q.x);output.f32(data+(words+2)*4,q.y);output.f32(data+(words+3)*4,q.z);output.f32(data+(words+4)*4,q.w);
+        const auto records=output.append((count+1)*16);output.copy(records,keys.data(),keys.size());const auto record=records+count*16;
+        output.u32(record,model::kControllerOrientation);output.u16(record+4,0xffffu);output.u16(record+6,1);output.u16(record+8,std::uint16_t(words));output.u16(record+10,std::uint16_t(words+1));output.u8(record+12,4);
+        output.u32(node+56,std::uint32_t(records-base));output.u32(node+60,count+1);output.u32(node+64,count+1);output.u32(node+68,std::uint32_t(data-base));output.u32(node+72,words+5);output.u32(node+76,words+5);
     }
     for(const auto& [at,name]:dependencies(mdl,layout))if(const auto found=names.find(name);found!=names.end()) {std::fill_n(output.bytes.begin()+at,32,0);output.string(at,found->second,32);}
     if(base)output.u32(4,std::uint32_t(output.bytes.size()-base));
