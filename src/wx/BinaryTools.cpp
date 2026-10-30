@@ -40,6 +40,7 @@ double binaryNumber(const std::vector<std::uint8_t>& bytes,std::size_t offset,mo
     for (std::size_t i=0;i<model::binaryTypeWidth(type);++i) word|=std::uint32_t(bytes[offset+i])<<(8*i);
     if (type==model::BinaryType::Float32) {float value;std::memcpy(&value,&word,4);return value;}
     if (type==model::BinaryType::Int16) return static_cast<std::int16_t>(word);
+    if (type==model::BinaryType::Int32) return static_cast<std::int32_t>(word);
     return word;
 }
 
@@ -454,8 +455,8 @@ std::optional<BinaryEditResult> editBinaryMeshFields(wxWindow* parent, const Aut
         const auto number=[&](wxPanel* panel,wxFlexGridSizer* form,const char* label,std::size_t offset,model::BinaryType type) {
             form->Add(new wxStaticText(panel,wxID_ANY,label),0,wxALIGN_CENTER_VERTICAL);
             const bool floating=type==model::BinaryType::Float32;
-            const double minimum=floating ? -std::numeric_limits<float>::max() : type==model::BinaryType::Int16 ? -32768.0 : 0.0;
-            const double maximum=floating ? std::numeric_limits<float>::max() : type==model::BinaryType::Int16 ? 32767.0 : 4294967295.0;
+            const double minimum=floating ? -std::numeric_limits<float>::max() : type==model::BinaryType::Int16 ? -32768.0 : type==model::BinaryType::Int32 ? -2147483648.0 : 0.0;
+            const double maximum=floating ? std::numeric_limits<float>::max() : type==model::BinaryType::Int16 ? 32767.0 : type==model::BinaryType::Int32 ? 2147483647.0 : 4294967295.0;
             auto* control=new wxSpinCtrlDouble(panel,wxID_ANY,{},wxDefaultPosition,wxSize(dialog.FromDIP(180),wxDefaultCoord),
                 wxSP_ARROW_KEYS,minimum,maximum,0.0,floating ? 0.01 : 1.0);
             control->SetDigits(floating ? 9 : 0);form->Add(control,1,wxEXPAND);
@@ -465,7 +466,7 @@ std::optional<BinaryEditResult> editBinaryMeshFields(wxWindow* parent, const Aut
         auto* materialForm=new wxFlexGridSizer(2,dialog.FromDIP(7),dialog.FromDIP(10));materialForm->AddGrowableCol(1);
         const char* colours[]{"Diffuse R","Diffuse G","Diffuse B","Ambient R","Ambient G","Ambient B"};
         for (unsigned i=0;i<6;++i) number(material,materialForm,colours[i],60+i*4,model::BinaryType::Float32);
-        number(material,materialForm,"Transparency hint (ordering)",84,model::BinaryType::UInt32);
+        number(material,materialForm,"Transparency hint (ordering)",84,model::BinaryType::Int32);
         const bool k2=file.model.game==model::GameVersion::Kotor2;
         wxCheckBox* dirt=nullptr;wxCheckBox* noHologram=nullptr;
         if (k2) {

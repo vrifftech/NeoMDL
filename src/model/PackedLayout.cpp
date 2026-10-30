@@ -226,7 +226,7 @@ private:
         const std::size_t size = result_.game == GameVersion::Kotor1 ? 332 : 340;
         Fields fields{{0,8,Type::UInt32,"Function tokens"},{20,12,Type::Float32,"Bounds minimum"},
             {32,12,Type::Float32,"Bounds maximum"},{44,4,Type::Float32,"Sphere radius"},{48,12,Type::Float32,"Sphere center"},
-            {60,12,Type::Float32,"Diffuse"},{72,12,Type::Float32,"Ambient"},{84,4,Type::UInt32,"Transparency hint"},
+            {60,12,Type::Float32,"Diffuse"},{72,12,Type::Float32,"Ambient"},{84,4,Type::Int32,"Transparency hint"},
             {88,32,Type::String,"Base texture"},{120,32,Type::String,"Secondary texture"},
             {212,4,Type::Offset32,"Trailing index source"},{216,4,Type::UInt32,"Trailing index token"},
             {220,4,Type::UInt32,"Trailing index count"},{224,4,Type::UInt32,"Primitive"},
