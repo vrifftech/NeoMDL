@@ -1843,7 +1843,7 @@ void ModelCanvas::refreshMaterials() {
 }
 
 void ModelCanvas::setDocument(const ModelDocument* document, bool preserveCamera) {
-    setWalkmeshLayers({});setRoomConnections({});
+    setWalkmeshLayers({});setRoomConnections({});roomMovePreview_.reset();
     cancelAreaPolygon();polygonPoints_.clear();areaMarkers_.clear();
     cancelAreaGizmo();gizmoMode_=AreaGizmoMode::None;
     selectedAreaOwners_.clear();
@@ -3574,7 +3574,7 @@ bool ModelCanvas::handleAreaGizmo(wxMouseEvent& event) {
         }
         return true;
     }
-    if(!event.LeftDown()||event.ControlDown()||event.RightIsDown()||event.MiddleIsDown()||
+    if(!event.LeftDown()||event.AltDown()||event.ControlDown()||event.RightIsDown()||event.MiddleIsDown()||
         gizmoMode_==AreaGizmoMode::None||!pickingCamera_||gizmoSize_==0.0f)return false;
     const auto origin=gizmoScreenPoint(gizmoPosition_);
     if(origin.z<=pickingCamera_->nearClip)return false;
@@ -3776,7 +3776,7 @@ void ModelCanvas::onSize(wxSizeEvent& event) {
 void ModelCanvas::onErase(wxEraseEvent&) {}
 
 void ModelCanvas::onMouse(wxMouseEvent& event) {
-    try {if(handleWalkmesh(event)||handleAreaPolygon(event)||handleAreaGizmo(event))return;}
+    try {if(handleAreaGizmo(event)||handleWalkmesh(event)||handleAreaPolygon(event))return;}
     catch(const std::exception& e) {cancelWalkmeshStroke();cancelAreaPolygon();cancelAreaGizmo();wxMessageBox(wxString::FromUTF8(e.what()),"Area editing",wxOK|wxICON_ERROR,this);return;}
     advanceCamera();
     if (event.ButtonDown()) SetFocus();
@@ -5246,17 +5246,26 @@ void ModelCanvas::queueAreaRooms() {
         engineOwners.emplace(owner,EngineAreaOwner{queue,distance});
         engineFrames.emplace(&pose,engineCollapsedHitPose(asset,pose,frame));
     };
+    const auto previewFrame=[&](std::optional<std::size_t> room,model::Mat4& world,model::EngineFrame& frame) {
+        if(roomMovePreview_&&room&&*room==roomMovePreview_->room) {
+            const auto delta=roomMovePreview_->offset;world.values[12]+=delta.x;world.values[13]+=delta.y;world.values[14]+=delta.z;
+            frame.position.x+=delta.x;frame.position.y+=delta.y;frame.position.z+=delta.z;
+        }
+    };
     for(const auto& object:areaScene_.objects()) {
+        auto world=object->world();auto frame=object->frame();previewFrame(object->room(),world,frame);
         if(!object->staticPrimary())rememberK1Owner(object->ownerId(),object->document()->model(),
-            object->pose(),object->world(),object->frame(),object->animationOwner(),object->ownerVisualEffects());
+            object->pose(),world,frame,object->animationOwner(),object->ownerVisualEffects());
         if(options_.showReferences)for(std::size_t i=0;i<object->references().instances().size();++i) {
             const auto& reference=object->references().instances()[i];
-            if(reference.active&&reference.sceneMember)
+            if(reference.active&&reference.sceneMember) {
+                auto world=reference.world;auto frame=reference.frame;previewFrame(object->room(),world,frame);
                 rememberK1Owner(object->ownerId(i),object->document()->references()[i].model,
-                    reference.pose,reference.world,reference.frame,reference.animationOwner,object->ownerVisualEffects(i));
+                    reference.pose,world,frame,reference.animationOwner,object->ownerVisualEffects(i));
+            }
         }
     }
-    for(const auto& draw:areaScene_.meshInstances(options_.showReferences,options_.danglySimulation,lastScenePlanes_)) {
+    for(const auto& draw:areaScene_.meshInstances(options_.showReferences,options_.danglySimulation,lastScenePlanes_,roomMovePreview_)) {
         if(!draw.staticPart&&!engineOwnerAdmitted(draw.owner,draw.asset->classification))continue;
         const auto& mesh=*draw.mesh;
         const auto& node=draw.asset->nodes[mesh.nodeIndex];

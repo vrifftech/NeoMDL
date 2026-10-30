@@ -50,6 +50,7 @@ struct RoomConnection {
     float gap{};
     bool reciprocal{},aligned{};
 };
+struct RoomMovePreview {LightRoomId room{};model::Vec3 offset{};};
 
 // NeoMDL's visual area host. LYT/VIS are scene metadata, not ASCII MDL.
 // Static Parts, retained animated room Gobs, references and track Gobs have
@@ -251,6 +252,7 @@ public:
     bool empty() const noexcept { return identity_.empty(); }
     const std::vector<AreaRoom>& rooms() const noexcept { return rooms_; }
     const std::optional<neoshared::ResourceDocument>& surfaceTable() const noexcept {return surfaceTable_;}
+    const neoshared::ResourceDocument& layoutSource() const noexcept {return layoutSource_;}
     void replaceRoomWalkmesh(const std::string& name,const neoshared::bwm::BwmFile& mesh);
     const std::string& visibilityName() const noexcept {return visibilityName_;}
     const std::optional<neoshared::ResourceDocument>& visibilitySource() const noexcept {return visibilitySource_;}
@@ -261,7 +263,7 @@ public:
     const std::filesystem::path& path() const noexcept { return path_; }
     model::Bounds bounds() const noexcept;
     std::vector<AreaMeshInstance> meshInstances(bool includeReferences = true, bool dangly = true,
-        const std::vector<model::TriggerPlane>& planes = {}) const;
+        const std::vector<model::TriggerPlane>& planes = {},const std::optional<RoomMovePreview>& preview={}) const;
 
     // CSWSArea::GetRoomIndex queries scoped WOK triangles in LYT order.
     // The position comes from the engine caller/host, never from an MDL box.
@@ -375,6 +377,7 @@ private:
     std::optional<std::uint32_t> walkableMaterials_;
     std::optional<neoshared::ResourceDocument> surfaceTable_;
     std::optional<neoshared::ResourceDocument> visibilitySource_;
+    neoshared::ResourceDocument layoutSource_;
     std::string visibilityName_;
     std::vector<RoomVisibilityBlock> visibilityBlocks_;
     std::filesystem::path path_;

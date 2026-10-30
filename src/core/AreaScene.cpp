@@ -136,7 +136,7 @@ void AreaScene::swap(AreaScene& other) noexcept {
     swap(currentRoomOverride_,other.currentRoomOverride_);
     swap(ignoreVisibility_,other.ignoreVisibility_);
     swap(activeRooms_,other.activeRooms_);swap(ownedLightIds_,other.ownedLightIds_);
-    swap(visibilitySource_,other.visibilitySource_);swap(visibilityName_,other.visibilityName_);swap(visibilityBlocks_,other.visibilityBlocks_);
+    swap(layoutSource_,other.layoutSource_);swap(visibilitySource_,other.visibilitySource_);swap(visibilityName_,other.visibilityName_);swap(visibilityBlocks_,other.visibilityBlocks_);
 }
 AreaScene& AreaScene::operator=(AreaScene&& other) noexcept {
     if(this!=&other) {AreaScene old;swap(old);swap(other);}
@@ -420,6 +420,7 @@ void AreaScene::loadResource(neoshared::ResourceDocument layout, const ResourceR
     }
     require(sawRooms, "missing roomcount block");
     pending.visibilityName_=neoshared::pathToUtf8(std::filesystem::u8path(layout.fileName).stem());
+    pending.layoutSource_=std::move(layout);
     if(resolver)pending.visibilitySource_=resolver(pending.visibilityName_,0x0bb9u);
     pending.replaceRoomVisibility(pending.visibilitySource_?pending.visibilitySource_->bytes:std::vector<std::uint8_t>{},job);
     // Caller unregisters the old host before moving a successfully loaded replacement.
@@ -1203,7 +1204,7 @@ model::Bounds AreaScene::bounds() const noexcept {
     return result;
 }
 std::vector<AreaMeshInstance> AreaScene::meshInstances(bool includeReferences,bool dangly,
-        const std::vector<model::TriggerPlane>& planes) const {
+        const std::vector<model::TriggerPlane>& planes,const std::optional<RoomMovePreview>& preview) const {
     std::vector<AreaMeshInstance> result;
     for(const auto& object:objects_) {
         const auto& document=*object->document();
@@ -1214,6 +1215,7 @@ std::vector<AreaMeshInstance> AreaScene::meshInstances(bool includeReferences,bo
                 if(object->room()&&!roomActive(static_cast<LightRoomId>(*object->room()))) return;
             }
             const auto* staticRoom=isStatic&&object->room()?room(static_cast<LightRoomId>(*object->room())):nullptr;
+            const bool moving=preview&&object->room()&&*object->room()==preview->room;
             const auto* animationOwner=isStatic?nullptr:reference
                 ?&object->references().animationOwner(*reference):&object->animationOwner();
             const bool transparent=model::ownerTreeHasTransparency(asset,
@@ -1227,7 +1229,7 @@ std::vector<AreaMeshInstance> AreaScene::meshInstances(bool includeReferences,bo
                 // of the ordinary part's MDX/index drawing stream.
                 if(asset.nodes[mesh.nodeIndex].aabb ? mesh.faces.empty() : indices.empty()) continue;
                 if(!asset.sceneNodeAdmission.empty()&&!asset.sceneNodeAdmission[mesh.nodeIndex]) continue;
-                if(staticRoom&&asset.game==model::GameVersion::Kotor2&&!asset.nodes[mesh.nodeIndex].aabb&&
+                if(staticRoom&&!moving&&asset.game==model::GameVersion::Kotor2&&!asset.nodes[mesh.nodeIndex].aabb&&
                    std::any_of(planes.begin(),planes.end(),[&](const auto& plane){return above(staticRoom->meshBounds[i],plane)>0.0f;}))continue;
                 AreaMeshInstance draw;
                 draw.document=&document;draw.asset=&asset;draw.pose=&pose;draw.mesh=&mesh;
@@ -1243,6 +1245,12 @@ std::vector<AreaMeshInstance> AreaScene::meshInstances(bool includeReferences,bo
                     drawWorld=model::multiply(outer,scale);
                 }
                 draw.world=draw.deformed?drawWorld:model::multiply(drawWorld,pose.worldTransforms[mesh.nodeIndex]);
+                if(moving) {
+                    const auto delta=preview->offset;
+                    draw.world.values[12]+=delta.x;draw.world.values[13]+=delta.y;draw.world.values[14]+=delta.z;
+                    draw.ownerWorld.values[12]+=delta.x;draw.ownerWorld.values[13]+=delta.y;draw.ownerWorld.values[14]+=delta.z;
+                    draw.ownerFrame.position.x+=delta.x;draw.ownerFrame.position.y+=delta.y;draw.ownerFrame.position.z+=delta.z;
+                }
                 draw.staticPart=isStatic;draw.hasTransparency=transparent;
                 draw.ownerEffects=isStatic?nullptr:object->ownerVisualEffects(reference);
                 draw.textureAngleDegrees=isStatic?0.0f:object->textureRotationDegrees(mesh);

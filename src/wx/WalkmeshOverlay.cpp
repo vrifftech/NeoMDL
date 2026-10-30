@@ -26,7 +26,7 @@ model::Vec3 walkmeshMaterialColor(std::uint32_t material) {
 }
 
 void ModelCanvas::setWalkmeshLayers(std::vector<WalkmeshLayer> layers) {
-    cancelWalkmeshStroke();walkmeshLayers_=std::move(layers);walkmeshSelection_.clear();Refresh(false);
+    cancelWalkmeshStroke();walkmeshLayers_=std::move(layers);walkmeshSelection_.clear();walkmeshVertices_.clear();Refresh(false);
 }
 
 void ModelCanvas::configureWalkmesh(bool visible,bool xray,WalkmeshTool tool,std::string room) {
@@ -37,6 +37,9 @@ void ModelCanvas::configureWalkmesh(bool visible,bool xray,WalkmeshTool tool,std
 void ModelCanvas::setWalkmeshSelection(std::set<WalkmeshFace> faces) {
     walkmeshSelection_=std::move(faces);Refresh(false);
 }
+void ModelCanvas::setWalkmeshVertices(std::set<WalkmeshVertex> vertices) {
+    walkmeshVertices_=std::move(vertices);Refresh(false);
+}
 
 void ModelCanvas::emitWalkmesh(AreaGizmoPhase phase,bool painting,std::optional<WalkmeshFace> face) {
     WalkmeshEvent event(EVT_WALKMESH_EDIT,GetId());event.SetEventObject(this);
@@ -45,8 +48,8 @@ void ModelCanvas::emitWalkmesh(AreaGizmoPhase phase,bool painting,std::optional<
 
 void ModelCanvas::cancelWalkmeshStroke() {
     if(!walkmeshDrag_)return;
-    const auto painting=walkmeshDrag_->painting;walkmeshDrag_.reset();
-    walkmeshSelection_=std::move(walkmeshSelectionBefore_);
+    const auto painting=walkmeshDrag_->painting,vertices=walkmeshDrag_->vertices;walkmeshDrag_.reset();
+    (vertices?walkmeshVertices_:walkmeshSelection_)=std::move(walkmeshSelectionBefore_);
     if(HasCapture())ReleaseMouse();
     emitWalkmesh(AreaGizmoPhase::Cancel,painting);Refresh(false);
 }
@@ -68,6 +71,20 @@ std::optional<WalkmeshFace> ModelCanvas::pickWalkmesh(wxPoint point) const {
     return result;
 }
 
+std::optional<WalkmeshVertex> ModelCanvas::pickWalkmeshVertex(wxPoint point) const {
+    auto closest=float(FromDIP(9));std::optional<WalkmeshVertex> result;
+    for(const auto& layer:walkmeshLayers_) {
+        if(!walkmeshRoom_.empty()&&layer.room!=walkmeshRoom_)continue;
+        for(std::size_t i=0;i<layer.mesh->vertices.size();++i) {
+            const auto& vertex=layer.mesh->vertices[i];const auto screen=gizmoScreenPoint({vertex[0],vertex[1],vertex[2]});
+            if(screen.z<=pickingCamera_->nearClip)continue;
+            const auto distance=std::hypot(screen.x-point.x,screen.y-point.y);
+            if(distance<closest) {closest=distance;result=WalkmeshVertex{layer.room,std::uint32_t(i)};}
+        }
+    }
+    return result;
+}
+
 bool ModelCanvas::handleWalkmesh(wxMouseEvent& event) {
     if(walkmeshDrag_) {
         if(event.RightDown()) {cancelWalkmeshStroke();return true;}
@@ -82,23 +99,26 @@ bool ModelCanvas::handleWalkmesh(wxMouseEvent& event) {
                 const auto drag=*walkmeshDrag_;walkmeshDrag_.reset();if(HasCapture())ReleaseMouse();
                 if(drag.painting)emitWalkmesh(AreaGizmoPhase::Commit,true);
                 else {
-                    if(!drag.additive)walkmeshSelection_.clear();
+                    auto& selection=drag.vertices?walkmeshVertices_:walkmeshSelection_;
+                    if(!drag.additive)selection.clear();
                     if(std::abs(drag.current.x-drag.start.x)>FromDIP(4)||std::abs(drag.current.y-drag.start.y)>FromDIP(4)) {
                         const wxRect box(wxPoint(std::min(drag.start.x,drag.current.x),std::min(drag.start.y,drag.current.y)),
                             wxPoint(std::max(drag.start.x,drag.current.x),std::max(drag.start.y,drag.current.y)));
                         for(const auto& layer:walkmeshLayers_) {
                             if(!walkmeshRoom_.empty()&&layer.room!=walkmeshRoom_)continue;
-                            for(std::size_t i=0;i<layer.mesh->faces.size();++i) {
-                                const auto& face=layer.mesh->faces[i];model::Vec3 center{};
-                                for(const auto index:face.vertices) {const auto& v=layer.mesh->vertices[index];center.x+=v[0]/3;center.y+=v[1]/3;center.z+=v[2]/3;}
+                            const auto count=drag.vertices?layer.mesh->vertices.size():layer.mesh->faces.size();
+                            for(std::size_t i=0;i<count;++i) {
+                                model::Vec3 center{};
+                                if(drag.vertices) {const auto& v=layer.mesh->vertices[i];center={v[0],v[1],v[2]};}
+                                else for(const auto index:layer.mesh->faces[i].vertices) {const auto& v=layer.mesh->vertices[index];center.x+=v[0]/3;center.y+=v[1]/3;center.z+=v[2]/3;}
                                 const auto screen=gizmoScreenPoint(center);
                                 if(screen.z>pickingCamera_->nearClip&&screen.z<sceneFarClip_&&box.Contains(int(screen.x),int(screen.y)))
-                                    walkmeshSelection_.emplace(layer.room,std::uint32_t(i));
+                                    selection.emplace(layer.room,std::uint32_t(i));
                             }
                         }
-                    } else if(const auto face=pickWalkmesh(drag.current)) {
-                        if(drag.additive&&walkmeshSelection_.count(*face))walkmeshSelection_.erase(*face);
-                        else walkmeshSelection_.insert(*face);
+                    } else if(const auto picked=drag.vertices?pickWalkmeshVertex(drag.current):pickWalkmesh(drag.current)) {
+                        if(drag.additive&&selection.count(*picked))selection.erase(*picked);
+                        else selection.insert(*picked);
                     }
                     emitWalkmesh(AreaGizmoPhase::Commit,false);
                 }
@@ -110,8 +130,8 @@ bool ModelCanvas::handleWalkmesh(wxMouseEvent& event) {
     if(!walkmeshVisible_||walkmeshTool_==WalkmeshTool::View||event.AltDown()||event.ControlDown()||
         !event.LeftDown()||event.RightIsDown()||event.MiddleIsDown())return false;
     resetCameraInput();selectionStart_.reset();meshPick_.reset();SetFocus();
-    walkmeshSelectionBefore_=walkmeshSelection_;
-    walkmeshDrag_=WalkmeshDrag{event.GetPosition(),event.GetPosition(),event.ShiftDown(),walkmeshTool_==WalkmeshTool::Paint};
+    walkmeshSelectionBefore_=walkmeshTool_==WalkmeshTool::Vertices?walkmeshVertices_:walkmeshSelection_;
+    walkmeshDrag_=WalkmeshDrag{event.GetPosition(),event.GetPosition(),event.ShiftDown(),walkmeshTool_==WalkmeshTool::Paint,walkmeshTool_==WalkmeshTool::Vertices};
     CaptureMouse();
     if(walkmeshDrag_->painting) {
         walkmeshSelection_.clear();emitWalkmesh(AreaGizmoPhase::Begin,true);
@@ -122,7 +142,7 @@ bool ModelCanvas::handleWalkmesh(wxMouseEvent& event) {
 
 void ModelCanvas::drawWalkmeshOverlay() {
     if(!walkmeshVisible_)return;
-    glPushAttrib(GL_ENABLE_BIT|GL_LINE_BIT|GL_CURRENT_BIT|GL_DEPTH_BUFFER_BIT|GL_POLYGON_BIT|GL_COLOR_BUFFER_BIT);
+    glPushAttrib(GL_ENABLE_BIT|GL_LINE_BIT|GL_POINT_BIT|GL_CURRENT_BIT|GL_DEPTH_BUFFER_BIT|GL_POLYGON_BIT|GL_COLOR_BUFFER_BIT);
     glDisable(GL_LIGHTING);glDisable(GL_TEXTURE_2D);glDisable(GL_CULL_FACE);glDisable(GL_FOG);
     if(walkmeshXray_)glDisable(GL_DEPTH_TEST);else glEnable(GL_DEPTH_TEST);
     glDepthMask(GL_FALSE);glEnable(GL_BLEND);glBlendFunc(GL_SRC_ALPHA,GL_ONE_MINUS_SRC_ALPHA);
@@ -149,6 +169,20 @@ void ModelCanvas::drawWalkmeshOverlay() {
         }
     }
     glEnd();
+    if(walkmeshTool_==WalkmeshTool::Vertices) {
+        glPointSize(5.0f*float(GetContentScaleFactor()));glColor4f(0.95f,0.95f,1,1);glBegin(GL_POINTS);
+        for(const auto& layer:walkmeshLayers_) {
+            if(!walkmeshRoom_.empty()&&layer.room!=walkmeshRoom_)continue;
+            for(const auto& vertex:layer.mesh->vertices)glVertex3fv(vertex.data());
+        }
+        glEnd();glPointSize(10.0f*float(GetContentScaleFactor()));glColor4f(1,0.85f,0.1f,1);glBegin(GL_POINTS);
+        for(const auto& layer:walkmeshLayers_) {
+            if(!walkmeshRoom_.empty()&&layer.room!=walkmeshRoom_)continue;
+            for(auto selected=walkmeshVertices_.lower_bound({layer.room,0});selected!=walkmeshVertices_.end()&&selected->first==layer.room;++selected)
+                glVertex3fv(layer.mesh->vertices.at(selected->second).data());
+        }
+        glEnd();
+    }
     if(walkmeshDrag_&&!walkmeshDrag_->painting) {
         const auto size=GetClientSize();glDisable(GL_DEPTH_TEST);
         glMatrixMode(GL_PROJECTION);glPushMatrix();glLoadIdentity();glOrtho(0,size.x,size.y,0,-1,1);
