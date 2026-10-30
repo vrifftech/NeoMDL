@@ -28,7 +28,7 @@ std::filesystem::path collisionPath(const std::filesystem::path& model,Collision
     if (suffix) result.replace_extension();
     if(kind==CollisionKind::Room) result.replace_extension(".wok");
     else if(kind==CollisionKind::Placeable) result.replace_extension(".pwk");
-    else {result.replace_extension();result+="_dwk"+std::to_string(static_cast<int>(kind)-1)+".dwk";}
+    else {result.replace_extension();result+=std::to_string(static_cast<int>(kind)-1)+".dwk";}
     if (suffix) result += ".ascii";
     return result;
 }

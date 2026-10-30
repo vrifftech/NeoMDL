@@ -50,6 +50,7 @@ std::map<std::size_t,std::size_t> switchBinaryGame(std::vector<std::uint8_t>& md
             // ResetTriMesh replaces these process callbacks in both engines.
             output.u32(at,0);output.u32(at+4,0);
             std::fill_n(output.bytes.begin()+at+314,k2 ? 10 : 2,0);
+            if (k2) {output.u16(at+316,1);output.u16(at+318,1);}
         } else if (region.name.rfind("Animation: ",0)==0) {
             const auto at=relocate(region.offset);
             output.u32(at,0);output.u32(at+4,0);

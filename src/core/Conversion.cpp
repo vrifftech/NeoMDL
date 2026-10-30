@@ -31,7 +31,7 @@ std::optional<CollisionKind> standaloneCollision(const std::filesystem::path& in
     if (extension != ".dwk") return {};
     const auto stem = resourceKey(neoshared::pathToUtf8(path.stem()));
     for (int state = 1; state <= 2; ++state) {
-        const auto suffix = "_dwk" + std::to_string(state);
+        const auto suffix = std::to_string(state);
         if (stem.size() >= suffix.size() && stem.compare(stem.size() - suffix.size(), suffix.size(), suffix) == 0)
             return static_cast<CollisionKind>(state + 1);
     }

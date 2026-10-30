@@ -20,7 +20,7 @@ int main(int argc, char** argv) {
                      "--refine-tangent-rounding allows smoothing export to move selected source coordinates by one float step to improve tangents.\n"
                      "--refine-normal-rounding allows the same position adjustment to improve normals on overlapping opposite-wound triangles.\n"
                      "Packed export compiles ASCII input to an x86 MDL and same-name MDX pair.\n";
-        std::cout << "PWK, _dwk0/1/2.DWK and WOK companions load and export with the model; --model-only omits them.\n"
+        std::cout << "PWK, model0.DWK/model1.DWK/model2.DWK and WOK companions load and export with the model; --model-only omits them.\n"
                      "--collision-from=wok|pwk|dwk0|dwk1|dwk2:NODE creates/replaces a companion from a model mesh.\n"
                      "--layout=area.lyt or --placement=X,Y,Z supplies room placement for --collision-from=wok:NODE.\n"
                      "--rebuild-aabb regenerates every MDL AABB tree from its collision faces.\n"
