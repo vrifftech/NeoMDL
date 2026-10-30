@@ -143,9 +143,11 @@ std::vector<ResourceDependency> ResourceTrace::entries() const {
     std::lock_guard<std::mutex> lock(mutex_);return entries_;
 }
 std::vector<std::filesystem::path> ResourceTrace::inputs() const {
+    std::lock_guard<std::mutex> lock(mutex_);
+    std::set<std::filesystem::path> seen;
     std::vector<std::filesystem::path> result;
-    for(const auto& d:entries()) for(const auto& p:d.inputs)
-        if(std::find(result.begin(),result.end(),p)==result.end()) result.push_back(p);
+    for(const auto& d:entries_) for(const auto& p:d.inputs)
+        if(seen.insert(p).second) result.push_back(p);
     return result;
 }
 ResourceResolver traceResources(ResourceResolver resolver,std::shared_ptr<ResourceTrace> trace,std::string requester) {

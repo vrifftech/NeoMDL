@@ -1062,9 +1062,10 @@ std::vector<ResourceDependency> AreaScene::dependencies() const {
     return result;
 }
 std::vector<std::filesystem::path> AreaScene::openPaths() const {
+    std::set<std::filesystem::path> seen;
     std::vector<std::filesystem::path> result;
     for(const auto& d:dependencies())for(const auto& p:d.inputs)
-        if(std::find(result.begin(),result.end(),p)==result.end())result.push_back(p);
+        if(seen.insert(p).second)result.push_back(p);
     return result;
 }
 
