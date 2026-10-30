@@ -6,6 +6,7 @@
 #include <cmath>
 #include <iomanip>
 #include <map>
+#include <memory>
 #include <sstream>
 #include <stdexcept>
 
@@ -129,7 +130,19 @@ AreaLoadPlan readAreaLoad(const std::string& area,const std::string& scope,
     AreaLoadPlan plan;plan.game=options.game;plan.area=resourceKey(area);plan.scopeIdentity=scope;
     plan.trace=std::make_shared<ResourceTrace>();plan.resolver=traceResources(std::move(supplied),plan.trace,scope+"/"+plan.area);
     const auto required=[&](const std::string& name,std::uint16_t type) {
-        const auto r=plan.resolver(name,type);require(bool(r),"missing scoped "+name+"."+resourceExtension(type));return *r;
+        auto r=plan.resolver(name,type);require(bool(r),"missing scoped "+name+"."+resourceExtension(type));return std::move(*r);
+    };
+    struct Template {std::string identity;std::unique_ptr<const GffFile> file;};
+    std::map<std::pair<std::string,std::uint16_t>,Template> templateFiles;
+    const auto readTemplate=[&](const std::string& name,std::uint16_t type,const char* signature)->const Template& {
+        const auto key=std::make_pair(name,type);
+        auto found=templateFiles.find(key);
+        if(found==templateFiles.end()) {
+            auto resource=required(name,type);
+            auto file=std::make_unique<GffFile>();loadGff(*file,resource,signature);
+            found=templateFiles.emplace(key,Template{std::move(resource.identity),std::move(file)}).first;
+        }
+        return found->second;
     };
     const auto are=required(plan.area,0x7dc),git=required(plan.area,0x7e7);
     GffFile a,g;loadGff(a,are,"ARE ");loadGff(g,git,"GIT ");
@@ -238,11 +251,11 @@ AreaLoadPlan readAreaLoad(const std::string& area,const std::string& scope,
             AreaPlacement p;p.kind=family.kind;p.sourceIndex=n;p.label=std::string(family.list)+"["+std::to_string(n)+"]";
             try {
                 p.templateResref=resref(placement,"TemplateResRef");
-                GffFile t;const GffStruct* data=&placement;
+                const GffStruct* data=&placement;
                 if(templates) {
                     require(!p.templateResref.empty(),p.label+" has UseTemplates but no TemplateResRef");
-                    const auto r=required(p.templateResref,family.type);p.templateIdentity=r.identity;
-                    loadGff(t,r,family.signature);data=t.root();
+                    const auto& t=readTemplate(p.templateResref,family.type,family.signature);
+                    p.templateIdentity=t.identity;data=t.file->root();
                 }
                 const auto& tagSource=templates&&family.kind==AreaObjectKind::Door&&options.game==model::GameVersion::Kotor2&&field(placement,"Tag")?placement:*data;
                 const auto tag=string(tagSource,"Tag");if(!tag.empty())p.label+=" "+tag;
@@ -348,11 +361,11 @@ AreaLoadPlan readAreaLoad(const std::string& area,const std::string& scope,
                 require(placement.typeid_==1u,"wrong struct ID in TriggerList");
                 record.objectId=dword(placement,"ObjectId",0x7f000000u);
                 record.templateResref=resref(placement,"TemplateResRef");
-                GffFile t;const GffStruct* data=&placement;
+                const GffStruct* data=&placement;
                 if(templates) {
                     require(!record.templateResref.empty(),"TriggerList["+std::to_string(n)+"] has UseTemplates but no TemplateResRef");
-                    const auto r=required(record.templateResref,0x7f0);record.templateIdentity=r.identity;
-                    loadGff(t,r,"UTT ");data=t.root();
+                    const auto& t=readTemplate(record.templateResref,0x7f0,"UTT ");
+                    record.templateIdentity=t.identity;data=t.file->root();
                 }
                 // K1 0x1a0fbe / K2 Desktop 0x41d164: the UTT owns object
                 // fields; only transition links and placement/geometry are
@@ -463,10 +476,10 @@ AreaLoadPlan readAreaLoad(const std::string& area,const std::string& scope,
                 if(placement.typeid_!=6u)continue; // LoadSounds admits struct type 6
                 AreaSoundRecord record;record.sourceIndex=n;
                 record.templateResref=resref(placement,"TemplateResRef");
-                GffFile t;const GffStruct* data=&placement;
+                const GffStruct* data=&placement;
                 if(templates) {
-                    const auto resource=required(record.templateResref,0x7f3);
-                    loadGff(t,resource,"UTS ");data=t.root();record.templateIdentity=resource.identity;
+                    const auto& t=readTemplate(record.templateResref,0x7f3,"UTS ");
+                    record.templateIdentity=t.identity;data=t.file->root();
                 }
                 // The engine typed GFF readers return their supplied value on
                 // an absent field or a different field type.

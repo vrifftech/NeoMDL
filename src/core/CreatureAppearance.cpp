@@ -181,8 +181,8 @@ CreatureAppearanceState readCreatureAppearance(const GffStruct& data,bool useEqu
 
 
     state.race=byte(data,"Race",6u);
-    Tables raceTables{resolver,{}};
-    const auto raceCount=static_cast<std::uint8_t>(raceTables.table("racialtypes").rowCount());
+    Tables tables{resolver,{}};
+    const auto raceCount=static_cast<std::uint8_t>(tables.table("racialtypes").rowCount());
     require(state.race<raceCount,"Race is outside engine racialtypes entries");
     // LoadCreature 0x625699/0x6256c1: Appearance_Type is already the current
     // disguised row. PM_Appearance is retained exclusively for restoration.
@@ -194,7 +194,6 @@ CreatureAppearanceState readCreatureAppearance(const GffStruct& data,bool useEqu
         // ReadItemsFromGff selects LoadFromTemplate or LoadItem. LoadItem
         // resolves EquippedRes before InventoryRes, then reads embedded data.
         try {
-            Tables tables{resolver,{}};
             if(useEquipmentTemplates)equipment.push_back(loadItem(resref(entry,"EquippedRes"),entry.typeid_,tables,game));
             else if(const auto* reference=typed<GffResRefField>(entry,"EquippedRes"))equipment.push_back(loadItem(reference->GetString(),entry.typeid_,tables,game));
             else if(const auto* reference=typed<GffResRefField>(entry,"InventoryRes"))equipment.push_back(loadItem(reference->GetString(),entry.typeid_,tables,game));
@@ -351,8 +350,8 @@ std::shared_ptr<ModelDocument> assembleCreatureAppearance(const CreatureAppearan
     const model::AsciiResourceResolver& asciiResources) {
     ResourceLoadScope work(job);job.update(0,0,"Assembling creature "+appearance.bodyModel);
     const auto load=[&](const std::string& name) {
-        const auto resource=resolver(name,kMdlResourceType);require(bool(resource),"missing scoped object model: "+name);
-        auto document=std::make_shared<ModelDocument>();document->openResource(*resource,resolver,job,appearance.game,asciiResources,true,false);
+        auto resource=resolver(name,kMdlResourceType);require(bool(resource),"missing scoped object model: "+name);
+        auto document=std::make_shared<ModelDocument>();document->openResource(std::move(*resource),resolver,job,appearance.game,asciiResources,true,false);
         require(document->model().game==appearance.game,"GIT object game differs from the selected area: "+name);return document;
     };
     const auto body=load(appearance.bodyModel);std::vector<VisualModelAttachment> attachments;
