@@ -22,7 +22,7 @@ namespace neomdl {
 const neoshared::bif::JobControl& resourceLoadJob() noexcept;
 class ResourceLoadScope final {
 public:
-    explicit ResourceLoadScope(const neoshared::bif::JobControl& job);
+    explicit ResourceLoadScope(const neoshared::bif::JobControl& job, bool freshDirectories = false);
     ~ResourceLoadScope();
     ResourceLoadScope(const ResourceLoadScope&)=delete;
     ResourceLoadScope& operator=(const ResourceLoadScope&)=delete;

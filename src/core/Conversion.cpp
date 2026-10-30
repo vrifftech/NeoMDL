@@ -259,7 +259,7 @@ void writeConversionReport(const std::filesystem::path& path, const ConversionRe
 
 ConversionReport convertFile(const ConversionRequest& request, const ConversionOptions& options,
     const std::vector<std::filesystem::path>& batchInputs, const neoshared::bif::JobControl& job) {
-    ResourceLoadScope scope(job);
+    ResourceLoadScope scope(job, true);
     const auto started = std::chrono::steady_clock::now();
     ConversionReport report; report.source = neoshared::pathToUtf8(request.input); report.game = options.game;
     auto inputs = conversionInputs(request);

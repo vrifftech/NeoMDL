@@ -21,13 +21,14 @@ const neoshared::bif::JobControl& resourceLoadJob() noexcept {
     static const neoshared::bif::JobControl idle;
     return activeLoadJob?*activeLoadJob:idle;
 }
-ResourceLoadScope::ResourceLoadScope(const neoshared::bif::JobControl& job)
+ResourceLoadScope::ResourceLoadScope(const neoshared::bif::JobControl& job, bool freshDirectories)
     :job_(job),previous_(activeLoadJob) {
     // Texture codecs and chunked file reads already cooperate through this
     // shared operation hook. Nested loads inherit the bridge and supply their
     // current JobControl without keeping a UI callback in a decoded document.
-    // A new load phase refreshes names, including successive batch conversions.
-    loadDirectories.clear();
+    // Nested reads share names. Conversions start a fresh phase because the
+    // preceding file in the batch may have created new companions.
+    if(!previous_ || freshDirectories)loadDirectories.clear();
     if(!previous_) {
         textureOperation_.emplace([prior=neoshared::texture::operationCheckpoint] {
             if(prior)prior();
