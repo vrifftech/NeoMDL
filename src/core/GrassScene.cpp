@@ -82,6 +82,8 @@ GrassSettings grassSettingsFromArea(const std::vector<std::uint8_t>& bytes,const
     for(unsigned i=0;i<4;++i)m.probabilities[i]=fieldFloat(root,probability[i]);
     const auto* wind=dynamic_cast<const neogff::GffIntField*>(root.GetFieldByLabel("WindPower"));
     s.areaWind=static_cast<std::uint8_t>(wind?wind->value:0);
+    const auto* flags=dynamic_cast<const neogff::GffUInt32Field*>(root.GetFieldByLabel("Flags"));
+    if(flags&&(flags->value&1u))s.areaWind=0;
     job.update(0,0,"Decoding grass surface table");
     neo2da::TwoDAFile table;table.loadBytes(tableBytes);job.check();std::optional<std::size_t> column;
     for(std::size_t c=0;c<table.columnCount();++c)if(lower(table.columnLabel(c))=="grass"){column=c;break;}
