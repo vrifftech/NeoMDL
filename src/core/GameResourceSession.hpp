@@ -1,6 +1,7 @@
 #pragma once
 
 #include "core/ModelDocument.hpp"
+#include <neoshared/bif/ModFolder.hpp>
 
 #include <neoshared/game/Installation.hpp>
 
@@ -39,7 +40,8 @@ public:
     GameResourceSession& operator=(GameResourceSession&&) noexcept;
 
     bool open(const neoshared::game::GameInstall& installation,
-              std::string& error, const neoshared::bif::JobControl& job = resourceLoadJob());
+              std::string& error, const neoshared::bif::JobControl& job = resourceLoadJob(),
+              std::shared_ptr<const neoshared::bif::ModFolder> mod = {});
     // Transactional: a failed mount leaves this session and captured resolvers
     // intact. Scope snapshots share only the read-only installation catalog.
     bool openModule(const GameResourceSession& installation,
@@ -56,6 +58,7 @@ public:
     const neoshared::game::GameInstall* installation() const noexcept;
     const std::vector<std::string>& diagnostics() const noexcept;
 
+    std::shared_ptr<const neoshared::bif::ModFolder> modFolder() const;
     ResourceResolver resolver() const;
     ResourceResolver installationResolver() const;
     // Voice stream candidates are a separate engine path from archive lookup.

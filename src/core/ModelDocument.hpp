@@ -16,11 +16,14 @@
 #include <unordered_map>
 #include <vector>
 
+namespace neoshared::bif {class ModFolder;}
+
 namespace neomdl {
 
 struct ModelFileSource {
     std::filesystem::path path;
     neoshared::ResourceDocument resource;
+    std::shared_ptr<const neoshared::bif::ModFolder> mod{};
 };
 ModelFileSource readModelFileSource(const std::filesystem::path& path,
     const neoshared::bif::JobControl& job = resourceLoadJob());

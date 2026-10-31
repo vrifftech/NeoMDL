@@ -108,6 +108,7 @@ struct InstallationState {
     Path root;
     neoshared::bif::KeyBifArchive key;
     Index keyIndex;
+    std::shared_ptr<const neoshared::bif::ModFolder> mod;
     Mount globals;
     Mount overrides;
     std::vector<neoshared::override_aliases::OverrideRoot> overrideRoots;
@@ -167,7 +168,7 @@ GameResourceSession::GameResourceSession(GameResourceSession&&) noexcept=default
 GameResourceSession& GameResourceSession::operator=(GameResourceSession&&) noexcept=default;
 
 bool GameResourceSession::open(const neoshared::game::GameInstall& supplied,std::string& error,
-                               const neoshared::bif::JobControl& job) {
+                               const neoshared::bif::JobControl& job,std::shared_ptr<const neoshared::bif::ModFolder> mod) {
     ResourceLoadScope loading(job);
     error.clear();
     try {
@@ -178,7 +179,7 @@ bool GameResourceSession::open(const neoshared::game::GameInstall& supplied,std:
         const auto* definition=neoshared::game::findGame(*id);
         if(!definition)throw std::runtime_error("Unknown game definition");
         auto next=std::make_shared<State>();next->base=std::make_shared<InstallationState>();
-        auto& b=*next->base;b.installation=supplied;
+        auto& b=*next->base;b.installation=supplied;b.mod=std::move(mod);
         b.game=*id==neoshared::game::GameId::Kotor1?model::GameVersion::Kotor1:model::GameVersion::Kotor2;
         neoshared::game::refreshDerivedPaths(*definition,b.installation);
         b.root=neoshared::game::normalizeConfiguredPath(b.installation.installPath);
@@ -214,7 +215,7 @@ bool GameResourceSession::open(const neoshared::game::GameInstall& supplied,std:
         }
         std::vector<Path> globalPaths;
         for(const auto& file:{"swpc_tex_gui.erf","swpc_tex_tpa.erf"})
-            if(const auto i=globalFiles.find(file);i!=globalFiles.end()) globalPaths.push_back(i->second);
+            if(const auto i=globalFiles.find(file);i!=globalFiles.end())if(!b.mod||!b.mod->archive(i->second))globalPaths.push_back(i->second);
         b.globals.open(b.root,globalPaths,job);
         for(const auto& group:grouped) {
             job.check();
@@ -225,6 +226,18 @@ bool GameResourceSession::open(const neoshared::game::GameInstall& supplied,std:
                 if(const auto i=group.second.find(scope.name+suffix);i!=group.second.end()) scope.archives.push_back(i->second);
             if(group.second.count(scope.name+".mod")||group.second.count(scope.name+".rim")||group.second.count(scope.name+"_s.rim"))
                 b.modules.push_back(std::move(scope));
+        }
+        if(b.mod) {
+            std::map<std::string,ModuleScope> scopes;
+            for(auto& scope:b.modules) {
+                scope.archives.erase(std::remove_if(scope.archives.begin(),scope.archives.end(),[&](const auto& path){return b.mod->archive(path).has_value();}),scope.archives.end());
+                scopes.emplace(scope.name,std::move(scope));
+            }
+            for(const auto& [name,archives]:b.mod->modules()) {
+                auto& scope=scopes[name];scope.name=name;scope.archives.insert(scope.archives.begin(),archives.begin(),archives.end());
+            }
+            b.modules.clear();for(auto& [name,scope]:scopes)b.modules.push_back(std::move(scope));
+            b.diagnostics.push_back("Mod folder has priority: "+neoshared::pathToUtf8(b.mod->root()));
         }
         job.update(0,0,"Discovering override aliases");
         auto aliases=neoshared::override_aliases::discover(b.root,
@@ -258,6 +271,7 @@ bool GameResourceSession::open(const neoshared::game::GameInstall& supplied,std:
         }
         b.diagnostics.push_back("Preview mounts: distinct configured override > shared override aliases in discovery order > selected module archives > GUI/quality-A textures > KEY/BIF. Alias discovery is shared with NeoBIF; configured-directory and archive layer precedence are explicit viewer policy. Save state, other modules and other texture qualities are excluded.");
         next->diagnostics=b.diagnostics;next->identity="neomdl:installation:"+component(pathIdentity(keyPath));
+        if(b.mod)next->identity+=component(b.mod->identity());
         for(const auto& root:b.overrides.catalog.archives())
             next->identity+=component(root.overrideAlias)+component(pathIdentity(root.resolvedPath))+
                 component(root.overrideIniPath.empty()?std::string{}:pathIdentity(root.overrideIniPath));
@@ -278,8 +292,9 @@ bool GameResourceSession::openModule(const GameResourceSession& source,const Mod
         resourceKey(scope.name);
         if(scope.archives.empty()) throw std::runtime_error("A module scope requires an archive");
         auto next=std::make_shared<State>();next->base=source.state_->base;next->module=scope;
-        next->mount.open(next->base->root,scope.archives,job);
-        next->module->archives=next->mount.paths;
+        auto archives=scope.archives;
+        if(next->base->mod)archives.erase(std::remove_if(archives.begin(),archives.end(),[&](const auto& path){return next->base->mod->ownsArchive(path);}),archives.end());
+        next->mount.open(next->base->root,archives,job);
         next->identity="neomdl:module:"+component(next->base->identity)+component(lower(scope.name));
         for(const auto& p:next->mount.paths) next->identity+=component(neoshared::genericPathToUtf8(p));
         next->diagnostics=next->base->diagnostics;
@@ -294,17 +309,23 @@ void GameResourceSession::clear() noexcept {state_.reset();}
 bool GameResourceSession::isOpen() const noexcept {return state_&&state_->base&&state_->base->key.isOpen();}
 const neoshared::game::GameInstall* GameResourceSession::installation() const noexcept {return state_?&state_->base->installation:nullptr;}
 const std::vector<std::string>& GameResourceSession::diagnostics() const noexcept {static const std::vector<std::string> empty;return state_?state_->diagnostics:empty;}
+std::shared_ptr<const neoshared::bif::ModFolder> GameResourceSession::modFolder() const {return state_?state_->base->mod:nullptr;}
 std::vector<ModuleScope> GameResourceSession::modules() const {return state_?state_->base->modules:std::vector<ModuleScope>{};}
 const ModuleScope* GameResourceSession::moduleScope() const noexcept {return state_&&state_->module?&*state_->module:nullptr;}
 const std::string& GameResourceSession::scopeIdentity() const noexcept {static const std::string empty;return state_?state_->identity:empty;}
 std::vector<std::string> GameResourceSession::areaResrefs() const {
     std::set<std::string> names;
-    if(state_&&state_->module) for(const auto& r:state_->mount.catalog.resources()) if(r.type==0x7dc) names.insert(lower(r.resref));
+    if(state_&&state_->module) {
+        for(const auto& r:state_->mount.catalog.resources())if(r.type==0x7dc)names.insert(lower(r.resref));
+        if(state_->base->mod)for(const auto* r:state_->base->mod->resources(state_->module->name))if(r->type==0x7dc)names.insert(lower(r->resref));
+    }
     return {names.begin(),names.end()};
 }
 std::vector<GameResourceEntry> GameResourceSession::resources(const std::vector<std::uint16_t>& types) const {
     std::map<Key,GameResourceEntry> entries;
+    const auto& base=*state_->base;const auto scope=state_->module?state_->module->name:std::string{};
     const auto add=[&](const std::string& name,std::uint16_t type,const std::string& source) {
+        if(base.mod&&base.mod->shadows(name,type,scope))return;
         if(std::find(types.begin(),types.end(),type)!=types.end())
             entries.emplace(Key{lower(name),type},GameResourceEntry{lower(name),type,source});
     };
@@ -314,7 +335,8 @@ std::vector<GameResourceEntry> GameResourceSession::resources(const std::vector<
             add(key.first,key.second,neoshared::pathToUtf8(mounted.catalog.archives().at(resource.archiveIndex).resolvedPath));
         }
     };
-    const auto& base=*state_->base;
+    if(base.mod)for(const auto* r:base.mod->resources(scope))if(std::find(types.begin(),types.end(),r->type)!=types.end())
+        entries.emplace(Key{lower(r->resref),r->type},GameResourceEntry{lower(r->resref),r->type,"Mod folder: "+neoshared::pathToUtf8(base.mod->root())});
     mount(base.overrides);
     if(state_->module)mount(state_->mount);
     mount(base.globals);
@@ -346,7 +368,7 @@ ResourceResolver GameResourceSession::resolver() const {
             const auto& owner=mount.catalog.archives().at(item.archiveIndex);
             neoshared::ResourceDocument r;
             const auto& source=item.overrideFile?item.directPath:owner.resolvedPath;
-            r.fileName=item.fileName();r.type=item.type;
+            r.fileName=item.fileName();r.type=item.type;r.sourcePath=source;
             r.identity=component(neoshared::genericPathToUtf8(source))+
                 component(std::to_string(item.archiveResourceIndex))+component(std::to_string(item.resourceId))+
                 component(std::to_string(item.type))+component(r.fileName);
@@ -365,6 +387,8 @@ ResourceResolver GameResourceSession::resolver() const {
             if(!mount.catalog.readResource(index,r.bytes,error,job))throw std::runtime_error(error);
             return stamp(std::move(r),layer);
         };
+        if(b.mod&&b.mod->shadows(key.first,key.second,state->module?state->module->name:std::string{}))
+            return b.mod->resolve(key.first,key.second,state->module?state->module->name:std::string{},job);
         if(auto i=b.overrides.find(key)) {
             const auto& item=b.overrides.catalog.resources().at(*i);
             const auto& owner=b.overrides.catalog.archives().at(item.archiveIndex);
@@ -383,7 +407,7 @@ ResourceResolver GameResourceSession::resolver() const {
             component(std::to_string(item.type))+component(r.fileName);
         r.sourceDescription=neoshared::genericPathToUtf8(owner.resolvedPath)+" :: "+r.fileName+
             " (archive snapshot; Save As creates a separate file)";
-        r.protectedInputs={b.key.keyPath(),owner.resolvedPath};
+        r.sourcePath=owner.resolvedPath;r.protectedInputs={b.key.keyPath(),owner.resolvedPath};
         r.bytes.reserve(item.size);
         std::string error;
         job.update(0,item.size,"Reading "+r.fileName);
@@ -403,8 +427,14 @@ ResourceResolver GameResourceSession::voiceResolver() const {
         const auto stem=resourceKey(name);
         auto& b=*state->base;
         if(type!=4&&type!=8) return {};
-        const auto& voices=b.voiceIndex(job);
         const auto relative=std::filesystem::path(dialogueVoicePath(stem,b.game)).lexically_normal().generic_string();
+        if(b.mod) {
+            const auto folder=b.game==model::GameVersion::Kotor1?"streamwaves/":"streamvoice/";
+            if(auto result=b.mod->resolveFile(folder+relative+".wav",job))return result;
+            if(type==8)if(auto result=b.mod->resolveFile(folder+relative+".mp3",job))return result;
+            if(b.mod->shadows(stem,type,std::string{}))return b.mod->resolve(stem,type,std::string{},job);
+        }
+        const auto& voices=b.voiceIndex(job);
         const auto nested=dialogueVoiceUsesOverridePaths(stem,b.game);
         const auto overrideCount=nested?std::min<std::size_t>(
             32u,

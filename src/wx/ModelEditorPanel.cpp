@@ -1931,6 +1931,7 @@ class ModelEditorPanelImpl final : public ModelEditorPanel {
 public:
     ModelEditorPanelImpl(wxWindow* parent, neomodules::Context context)
         : ModelEditorPanel(parent, std::move(context)) {
+        if(context_.captureModFolder)modFolder_=context_.captureModFolder();
         tabs_ = new wxAuiNotebook(this, wxID_ANY, wxDefaultPosition, wxDefaultSize,
             wxAUI_NB_TOP | wxAUI_NB_TAB_MOVE | wxAUI_NB_CLOSE_ON_ACTIVE_TAB |
                 wxAUI_NB_SCROLL_BUTTONS);
@@ -1985,7 +1986,7 @@ public:
             ModelFileSource source;
             std::optional<model::GameVersion> asciiGame;
             if (!runJob("Reading model", [&](const neoshared::bif::JobControl& job) {
-                source = readModelFileSource(path, job);
+                source = readModelFileSource(path, job);source.mod=modFolder_;
                 asciiGame = model::modelInputGame(source.resource.bytes, source.resource.sourceDescription, job);
             })) return false;
             if (!asciiGame && !chooseAsciiGame(asciiGame)) return false;
@@ -2056,6 +2057,10 @@ public:
     }
 
     std::size_t documentCount() const override { return tabs_->GetPageCount(); }
+    void resourceContextChanged() override {
+        modFolder_=context_.captureModFolder();installationSessions_.clear();
+        setModuleStatusText("Mod folder changed. Reload model resources to update existing previews.",0);
+    }
     bool canClose() override {
         if (jobRunning_) { cancelJob_.store(true); return false; }
         for (std::size_t index = 0; index < tabs_->GetPageCount(); ++index)
@@ -2110,7 +2115,8 @@ private:
             auto document=std::make_unique<ModelDocument>();
             const auto resources=selected ? page->document().resourceResolver() : captureHostResolver();
             if (!runJob("Loading edited binary model",[&](const auto& job) {
-                document->openFile(saved->path,resources,job);
+                auto source=readModelFileSource(saved->path,job);source.mod=modFolder_;
+                document->openFile(std::move(source),resources,job);
             })) return;
             const auto session=selected ? page->resourceSession() : std::shared_ptr<GameResourceSession>{};
             addDocument(std::move(document),session,resources,selected ? page : nullptr,selected);
@@ -2132,7 +2138,8 @@ private:
             std::optional<model::GameVersion> game = page->document().model().game;
             if (!loadModelWithGame("Reloading model", game,
                 [&](const neoshared::bif::JobControl& job, std::optional<model::GameVersion> target) {
-                    document->openFile(page->document().path(), resources, job, target);
+                    auto source=readModelFileSource(page->document().path(),job);source.mod=modFolder_;
+                    document->openFile(std::move(source), resources, job, target);
                 })) return;
             addDocument(std::move(document), std::move(session), std::move(resources), page);
         } catch (const std::exception& error) {
@@ -2168,7 +2175,7 @@ private:
                 const auto& install = installs[static_cast<std::size_t>(dialog.GetSelection() - 1)];
                 if (!runJob("Indexing model resources", [&](const neoshared::bif::JobControl& job) {
                     std::string error;
-                    if (!session->open(install, error, job)) throw std::runtime_error(error);
+                    if (!session->open(install, error, job,modFolder_)) throw std::runtime_error(error);
                 })) return;
             }
             reloadModel(session ? session->resolver() : ResourceResolver{}, session);
@@ -2354,7 +2361,7 @@ private:
         setModuleStatusText("Indexing " + definition->displayName + " resources...", 0);
         bool opened = false;
         if (!runJob("Indexing installed game", [&](const neoshared::bif::JobControl& job) {
-            opened = session->open(*selected, error, job);
+            opened = session->open(*selected, error, job,modFolder_);
         })) throw neoshared::bif::JobCancelled();
         if (!opened) {
             if (!context_.resolveResource && !context_.captureResourceResolver) {
@@ -2458,7 +2465,7 @@ private:
                 selected.installPath=neosettings::pathFromWx(directory.GetPath());
                 installation=std::make_shared<GameResourceSession>();std::string error;
                 if(!runJob("Indexing game installation",[&](const neoshared::bif::JobControl& job) {
-                    if(!installation->open(selected,error,job))throw std::runtime_error(error);
+                    if(!installation->open(selected,error,job,modFolder_))throw std::runtime_error(error);
                 }))return;
             }
             const auto modules=installation->modules();
@@ -4446,6 +4453,7 @@ private:
     unsigned previewMenuFeatures_{};
     wxMenu* helpMenu_{};
     std::unique_ptr<neogames::OpenGameDirectoryMenu> gameDirectoryMenu_;
+    std::shared_ptr<const neoshared::bif::ModFolder> modFolder_;
     std::map<std::string, std::shared_ptr<GameResourceSession>> installationSessions_;
     bool jobRunning_{};
     std::atomic<bool> cancelJob_{false};

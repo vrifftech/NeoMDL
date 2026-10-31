@@ -2,6 +2,7 @@
 #include <material/ProceduralTexture.hpp>
 #include <material/Runtime.hpp>
 #include "core/ModelDocument.hpp"
+#include <neoshared/bif/ModFolder.hpp>
 #include "core/AsciiMaterials.hpp"
 #include "core/ModelFilenames.hpp"
 #include <model/AsciiModel.hpp>
@@ -244,7 +245,11 @@ bool ModelDocument::openFile(ModelFileSource source,
             return readLocalResource(*mdxPath, kMdxResourceType);
         return localResources(name, type);
     };
-    const auto resolver = overlayResolver(localResolver, fallbackResolver);
+    auto resolver = overlayResolver(localResolver, fallbackResolver);
+    if(source.mod)resolver=[mod=source.mod,lower=std::move(resolver)](const std::string& name,std::uint16_t type)->std::optional<neoshared::ResourceDocument> {
+        if(mod->shadows(name,type))return mod->resolve(name,type,{},resourceLoadJob());
+        return lower(name,type);
+    };
     // AurResGet's standalone authoring path can open .lmt sidecars. The
     // installed game's resource callback has no .lmt type mapping.
     openResource(std::move(source.resource), resolver,job,asciiGame,looseAsciiResources(directory),includeAnimations);
