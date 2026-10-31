@@ -237,7 +237,7 @@ AreaLoadPlan readAreaLoad(const std::string& area,const std::string& scope,
         for(std::size_t n=0;n<list->count();++n) {
             job.update(n,list->count(),"Reading "+std::string(family.list));
             const auto& placement=*list->GetStruct(n);
-            require(placement.typeid_==family.structure,"wrong struct ID in "+std::string(family.list));
+            if(placement.typeid_!=family.structure)continue;
             AreaPlacement p;p.kind=family.kind;p.sourceIndex=n;p.label=std::string(family.list)+"["+std::to_string(n)+"]";
             try {
                 p.templateResref=resref(placement,"TemplateResRef");
@@ -348,7 +348,7 @@ AreaLoadPlan readAreaLoad(const std::string& area,const std::string& scope,
             AreaTriggerRecord record;record.sourceIndex=n;
             try {
                 const auto& placement=*list->GetStruct(n);
-                require(placement.typeid_==1u,"wrong struct ID in TriggerList");
+                if(placement.typeid_!=1u)continue;
                 record.objectId=dword(placement,"ObjectId",0x7f000000u);
                 record.templateResref=resref(placement,"TemplateResRef");
                 const GffStruct* data=&placement;
