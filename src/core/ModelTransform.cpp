@@ -20,12 +20,16 @@ std::pair<Vec3,Vec3> transformedBox(Vec3 low,Vec3 high,const PlanarTransform& tr
     }
     return {minimum,maximum};
 }
-std::vector<std::pair<std::size_t,std::string>> dependencies(const std::vector<std::uint8_t>& bytes,const model::PackedLayout& layout) {
+struct ModelReference {std::size_t offset,width;std::string name;};
+std::vector<ModelReference> dependencies(const std::vector<std::uint8_t>& bytes,const model::PackedLayout& layout) {
     ByteView source(bytes.data(),bytes.size(),"Model transform",{});
-    std::vector<std::pair<std::size_t,std::string>> result;
-    const auto add=[&](std::size_t at) {auto name=resourceKey(source.fixedString(at,32,"model reference"));if(!name.empty()&&name!="null")result.emplace_back(at,std::move(name));};
-    add(layout.payloadOffset+136);
-    for(const auto& region:layout.structures)if(region.name=="Reference")add(region.offset);
+    std::vector<ModelReference> result;
+    const auto add=[&](std::size_t at,std::size_t width) {auto name=resourceKey(source.fixedString(at,width,"model reference"));if(!name.empty()&&name!="null")result.push_back({at,width,std::move(name)});};
+    add(layout.payloadOffset+136,32);
+    for(const auto& region:layout.structures) {
+        if(region.name=="Reference")add(region.offset,32);
+        else if(region.name=="Emitter")add(region.offset+160,16);
+    }
     return result;
 }
 }
@@ -76,9 +80,15 @@ void transformBinaryModel(std::vector<std::uint8_t>& mdl,std::optional<std::vect
         const PlanarTransform& transform,const std::map<std::string,std::string>& names) {
     const auto layout=model::inspectPackedLayout(mdl,mdx);const auto base=layout.payloadOffset;
     ByteView source(mdl.data(),mdl.size(),"Model transform",{});Buffer output{mdl};
-    std::set<std::string> proceduralNames;std::set<std::size_t> proceduralNodes,baseNodes,controlledOrientations;
-    for(const auto& region:layout.structures)if(region.name.rfind("Node: ",0)==0&&(source.u16(region.offset)&(model::kNodeEmitter|model::kNodeCamera)))proceduralNames.insert(resourceKey(region.name));
-    for(const auto& region:layout.structures)if(proceduralNames.count(resourceKey(region.name)))proceduralNodes.insert(region.offset);
+    std::set<std::string> proceduralNames,emitterNames;std::set<std::size_t> proceduralNodes,emitterNodes,baseNodes,controlledOrientations;
+    for(const auto& region:layout.structures)if(region.name.rfind("Node: ",0)==0) {
+        if(source.u16(region.offset)&(model::kNodeEmitter|model::kNodeCamera))proceduralNames.insert(resourceKey(region.name));
+        if(source.u16(region.offset)&model::kNodeEmitter)emitterNames.insert(resourceKey(region.name));
+    }
+    for(const auto& region:layout.structures) {
+        if(proceduralNames.count(resourceKey(region.name)))proceduralNodes.insert(region.offset);
+        if(emitterNames.count(resourceKey(region.name)))emitterNodes.insert(region.offset);
+    }
     for(const auto& region:layout.structures)if(region.name.rfind("Node: ",0)==0) {
         const auto& parent=layout.structures[*region.parent];if(parent.name.rfind("Model: ",0)==0||baseNodes.count(parent.offset))baseNodes.insert(region.offset);
     }
@@ -137,6 +147,9 @@ void transformBinaryModel(std::vector<std::uint8_t>& mdl,std::optional<std::vect
             Buffer values{{mdl.begin()+data,mdl.begin()+data+words*4}};
             for(std::size_t i=0;i<region.count;++i) {
                 const auto record=at+i*16;const auto type=source.u32(record);const auto rows=source.u16(record+6);const auto first=source.u16(record+10);const auto flags=source.u8(record+12);
+                // Particle spin is an angular velocity; a reflected frame reverses its sign.
+                if(transform.mirrored&&emitterNodes.count(node)&&type==136&&(flags&15)==1&&((flags&0xf0)==0||(flags&0xf0)==0x10))
+                    for(std::size_t row=0;row<std::size_t(rows)*((flags&0xf0)==0x10?3:1);++row)values.f32((first+row)*4,-source.f32(data+(first+row)*4));
                 if(type==model::kControllerPosition&&(flags&15)==3&&((flags&0xf0)==0||(flags&0xf0)==0x10))for(std::size_t row=0;row<std::size_t(rows)*((flags&0xf0)==0x10?3:1);++row) {
                     const auto pos=(first+row*3)*4;values.vec3(pos,nodePosition(node,source.vec3(data+pos,"position key")));
                 }
@@ -177,7 +190,7 @@ void transformBinaryModel(std::vector<std::uint8_t>& mdl,std::optional<std::vect
         output.u32(record,model::kControllerOrientation);output.u16(record+4,0xffffu);output.u16(record+6,1);output.u16(record+8,std::uint16_t(words));output.u16(record+10,std::uint16_t(words+1));output.u8(record+12,4);
         output.u32(node+56,std::uint32_t(records-base));output.u32(node+60,count+1);output.u32(node+64,count+1);output.u32(node+68,std::uint32_t(data-base));output.u32(node+72,words+5);output.u32(node+76,words+5);
     }
-    for(const auto& [at,name]:dependencies(mdl,layout))if(const auto found=names.find(name);found!=names.end()) {std::fill_n(output.bytes.begin()+at,32,0);output.string(at,found->second,32);}
+    for(const auto& [at,width,name]:dependencies(mdl,layout))if(const auto found=names.find(name);found!=names.end()) {std::fill_n(output.bytes.begin()+at,width,0);output.string(at,found->second,width);}
     if(base)output.u32(4,std::uint32_t(output.bytes.size()-base));
     mdl=std::move(output.bytes);if(stream)mdx=std::move(stream->bytes);
 }
@@ -193,9 +206,9 @@ std::vector<neoshared::ResourceDocument> transformModelResources(const std::stri
     std::size_t serial=0;
     for(std::size_t i=0;i<pending.size();++i) {
         const auto name=pending[i];const auto& source=sources.at(name);
-        for(const auto& [at,dependency]:dependencies(source.bytes,model::inspectPackedLayout(source.bytes,std::nullopt)))if(!names.count(dependency)) {
+        for(const auto& [at,width,dependency]:dependencies(source.bytes,model::inspectPackedLayout(source.bytes,std::nullopt)))if(!names.count(dependency)) {
             auto resolved=resolver(dependency,mdlType).value();std::string destination=dependency;
-            if(resolved.sourceDescription!=marker)do {destination=outputName.substr(0,10)+"_t"+std::to_string(++serial);}while(resolver(destination,mdlType));
+            if(resolved.sourceDescription!=marker)do {const auto suffix="_t"+std::to_string(++serial);destination=outputName.substr(0,16-suffix.size())+suffix;}while(resolver(destination,mdlType));
             names.emplace(dependency,destination);pending.push_back(dependency);
             sources.emplace(dependency,std::move(resolved));
         }
