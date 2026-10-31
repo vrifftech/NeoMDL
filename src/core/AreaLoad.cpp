@@ -191,9 +191,7 @@ AreaLoadPlan readAreaLoad(const std::string& area,const std::string& scope,
     // two engine ambient channels in the new runtime.
     plan.settings.ambient=environment.day.globalAmbient;
     plan.settings.diffuse=environment.day.diffuse;
-    if(const auto* w=typed<GffIntField>(ar,"WindPower")) {
-        const auto value=static_cast<std::uint8_t>(w->value);require(value<=2,"unsupported WindPower");plan.settings.wind=value;
-    }
+    plan.settings.wind=static_cast<std::uint8_t>(integer32(ar,"WindPower"));
     if(environment.weather.areaFlags&1u)plan.settings.wind=0;
     // IFO is optional for an explicitly selected area; retain provenance when
     // present and diagnose a mismatch rather than switching to another area.

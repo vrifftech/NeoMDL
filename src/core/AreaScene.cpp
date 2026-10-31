@@ -1712,7 +1712,7 @@ void AreaScene::configureGrass(const GrassSettings& settings,bool applyWind,
                 require(b.document->loadRuntimeTexture(t.lightmap,resolver_,error),error);
     }
     grass_=std::move(pending);
-    if(applyWind&&settings.areaWind)require(wind().applyK2AreaWind(*settings.areaWind),"invalid area wind mode");
+    if(applyWind&&settings.areaWind)wind().applyK2AreaWind(*settings.areaWind);
 }
 void AreaScene::loadGrassArea(const std::filesystem::path& are,const neoshared::bif::JobControl& job) {
     ResourceLoadScope work(job);job.update(0,0,"Reading area grass settings");

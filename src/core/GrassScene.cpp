@@ -58,7 +58,6 @@ void validateGrassSettings(const GrassSettings& s) {
     require(std::isfinite(s.binSize)&&s.binSize>0,"invalid bin size");
     require(std::isfinite(s.nearSquared)&&std::isfinite(s.farSquared)&&s.nearSquared>=0&&s.farSquared>s.nearSquared,"invalid squared draw radii");
     require(std::isfinite(s.stiffness)&&s.stiffness>=0&&std::isfinite(s.alphaCutoff)&&s.alphaCutoff>=0&&s.alphaCutoff<=1,"invalid wind/alpha input");
-    require(!s.areaWind||*s.areaWind<=2,"unsupported ARE WindPower");
     for(const auto& m:s.surfaces)if(m) {
         require(!m->texture.empty()&&m->texture.size()<=32&&m->texture.find_first_of("/\\:")==std::string::npos,"invalid grass texture ResRef");
         require(std::isfinite(m->density)&&m->density>=0&&std::isfinite(m->quadSize)&&m->quadSize>0,"invalid density/quad size");
@@ -81,12 +80,8 @@ GrassSettings grassSettingsFromArea(const std::vector<std::uint8_t>& bytes,const
     if(m.texture.empty())m.texture="grass"; // CSWSArea::LoadAreaHeader 0x68d35e
     const char* probability[]={"Grass_Prob_LL","Grass_Prob_LR","Grass_Prob_UL","Grass_Prob_UR"};
     for(unsigned i=0;i<4;++i)m.probabilities[i]=fieldFloat(root,probability[i]);
-    s.areaWind=0;
-    if(const auto* wind=root.GetFieldByLabel("WindPower")) {
-        if(const auto* p=dynamic_cast<const neogff::GffIntField*>(wind))
-            s.areaWind=static_cast<std::uint8_t>(p->value); // ReadFieldINT, then store AL
-        else require(false,"WindPower must be INT");
-    }
+    const auto* wind=dynamic_cast<const neogff::GffIntField*>(root.GetFieldByLabel("WindPower"));
+    s.areaWind=static_cast<std::uint8_t>(wind?wind->value:0);
     job.update(0,0,"Decoding grass surface table");
     neo2da::TwoDAFile table;table.loadBytes(tableBytes);job.check();std::optional<std::size_t> column;
     for(std::size_t c=0;c<table.columnCount();++c)if(lower(table.columnLabel(c))=="grass"){column=c;break;}
