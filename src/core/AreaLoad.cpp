@@ -15,12 +15,10 @@ namespace {
 using namespace neogff;
 void require(bool b,const std::string& s) {if(!b) throw std::runtime_error("Area load: "+s);}
 const GffField* field(const GffStruct& s,const char* name) {
-    const auto* f=s.GetFieldByLabel(name);
-    require(!s.GetFieldByLabel(name,1),"duplicate GFF field "+std::string(name));return f;
+    return s.GetFieldByLabel(name);
 }
 template<class T> const T* typed(const GffStruct& s,const char* n) {
-    const auto* f=field(s,n);const auto* p=dynamic_cast<const T*>(f);
-    require(!f||p,"wrong GFF type for "+std::string(n));return p;
+    return dynamic_cast<const T*>(field(s,n));
 }
 float number(const GffStruct& s,const char* n,float fallback=0) {
     const auto* p=typed<GffFloatField>(s,n);const float v=p?p->value:fallback;
@@ -73,14 +71,8 @@ std::string string(const GffStruct& s,const char* n) {
 std::string localized(const GffStruct& s,const char* n) {
     const auto* p=typed<GffLocalizedStringField>(s,n);return p?p->GetString():std::string{};
 }
-std::string stringOrResref(const GffStruct& s,const char* n) {
-    const auto* f=field(s,n);if(!f)return {};
-    if(const auto* p=dynamic_cast<const GffExoStringField*>(f))return p->GetString();
-    if(const auto* p=dynamic_cast<const GffResRefField*>(f))return p->GetString();
-    throw std::runtime_error("Area load: wrong GFF type for "+std::string(n));
-}
-const GffStruct& selected(const GffStruct& placement,const GffStruct& templ,const char* n) {
-    return field(placement,n)?placement:templ;
+const GffStruct& localizedSource(const GffStruct& placement,const GffStruct& templ,const char* n) {
+    return typed<GffLocalizedStringField>(placement,n)?placement:templ;
 }
 std::optional<model::Vec3> color(const GffStruct& s,const char* n) {
     const auto* p=typed<GffUInt32Field>(s,n);if(!p)return {};
@@ -257,7 +249,7 @@ AreaLoadPlan readAreaLoad(const std::string& area,const std::string& scope,
                     const auto& t=readTemplate(p.templateResref,family.type,family.signature);
                     p.templateIdentity=t.identity;data=t.file->root();
                 }
-                const auto& tagSource=templates&&family.kind==AreaObjectKind::Door&&options.game==model::GameVersion::Kotor2&&field(placement,"Tag")?placement:*data;
+                const auto& tagSource=templates&&family.kind==AreaObjectKind::Door&&options.game==model::GameVersion::Kotor2&&typed<GffExoStringField>(placement,"Tag")?placement:*data;
                 const auto tag=string(tagSource,"Tag");if(!tag.empty())p.label+=" "+tag;
                 if(family.kind==AreaObjectKind::Creature) {
                     p.frame=gitCreatureFrame({number(placement,"XPosition"),number(placement,"YPosition"),number(placement,"ZPosition")},
@@ -292,7 +284,7 @@ AreaLoadPlan readAreaLoad(const std::string& area,const std::string& scope,
                             trap.openLockDifficultyModifier=static_cast<std::int8_t>(modifier->value);
                         trap.pcLevelAtSpawn=byte(*data,"PCLevelAtSpawn");
                     }
-                    if(family.kind==AreaObjectKind::Door)trap.linkedToFlags=byte(*data,"LinkedToFlags");
+                    if(family.kind==AreaObjectKind::Door)trap.linkedToFlags=byte(placement,"LinkedToFlags");
                     p.trap=std::move(trap);
                     if(family.kind==AreaObjectKind::Placeable) {
                         require(field(*data,"Appearance"),"placeable has no Appearance");
@@ -385,9 +377,9 @@ AreaLoadPlan readAreaLoad(const std::string& area,const std::string& scope,
                 if(record.type==1)record.cursor=1;
                 else if(record.type==2)record.cursor=0;
                 record.linkedToFlags=byte(placement,"LinkedToFlags");
-                record.linkedTo=stringOrResref(placement,"LinkedTo");
-                record.linkedToModule=stringOrResref(placement,"LinkedToModule");
-                record.transitionDestination=localized(selected(placement,*data,"TransitionDestin"),"TransitionDestin");
+                record.linkedTo=string(placement,"LinkedTo");
+                record.linkedToModule=resref(placement,"LinkedToModule");
+                record.transitionDestination=localized(localizedSource(placement,*data,"TransitionDestin"),"TransitionDestin");
                 record.faction=dword(*data,"Faction");
                 record.trapType=byte(*data,"TrapType",255);
                 record.trapFlag=byte(*data,"TrapFlag")!=0;
