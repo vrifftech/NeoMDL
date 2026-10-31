@@ -441,22 +441,21 @@ void AreaScene::replaceRoomVisibility(const std::vector<std::uint8_t>& bytes,con
         job.update(line,visLines.size(),"Reading area visibility");
         std::istringstream header(visLines[line]);
         std::string source;
-        long long count = -1;
-        require(static_cast<bool>(header >> source >> count) && count >= 0, "invalid visibility header");
+        int count = 0;
+        header >> source >> count;
+        const auto first = byName.find(key(source));
+        if (count < 1 || first == byName.end()) continue;
         require(static_cast<unsigned long long>(count)<=visLines.size()-line-1u,
                 "truncated visibility block");
-        const auto first = byName.find(key(source));
-        require(first != byName.end(), "visibility names unknown room: " + source);
         RoomVisibilityBlock block;block.room=source;
-        for (long long index = 0; index < count; ++index) {
+        for (int index = 0; index < count; ++index) {
             job.check();
-            require(++line < visLines.size(), "truncated visibility block");
-            std::istringstream record(visLines[line]);
+            std::istringstream record(visLines[++line]);
             std::string destination;
             record >> destination;
-            const auto second = byName.find(key(destination));
-            require(second != byName.end(), "visibility names unknown room: " + destination);
             block.visible.push_back(destination);
+            const auto second = byName.find(key(destination));
+            if (second == byName.end()) continue;
             auto& forward = rooms_[static_cast<std::size_t>(first->second-1u)].influencingRooms;
             if (std::find(forward.begin(),forward.end(),second->second) != forward.end()) continue;
             // Scene::SetVisibility adds both directions in insertion order.
