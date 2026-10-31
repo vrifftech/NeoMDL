@@ -57,7 +57,7 @@ std::string numbered(const std::string& base,unsigned variation,unsigned width) 
     std::ostringstream result;result<<base<<std::setfill('0')<<std::setw(int(width))<<variation;
     return result.str();
 }
-CreatureEquipmentItem readItem(const GffStruct& data,std::uint32_t slot,Tables& tables,model::GameVersion game) {
+CreatureEquipmentItem readItem(const GffStruct& data,std::uint32_t slot,Tables& tables) {
     CreatureEquipmentItem result;result.slot=slot;
 
     result.baseItem=integer(data,"BaseItem",30);
@@ -77,8 +77,7 @@ CreatureEquipmentItem readItem(const GffStruct& data,std::uint32_t slot,Tables& 
 
 
 
-        const char maximumBody=game==model::GameVersion::Kotor1?'J':'Z';
-        if(value.size()==1&&value[0]>='A'&&value[0]<=maximumBody)result.bodyVariation=std::uint8_t(value[0]-'@');
+        if(value.size()==1&&value[0]>='A'&&value[0]<='Z')result.bodyVariation=std::uint8_t(value[0]-'@');
         result.textureVariation=byte(data,"TextureVar",1);
     }
 
@@ -95,12 +94,12 @@ CreatureEquipmentItem readItem(const GffStruct& data,std::uint32_t slot,Tables& 
         }
     return result;
 }
-CreatureEquipmentItem loadItem(const std::string& name,std::uint32_t slot,Tables& tables,model::GameVersion game) {
+CreatureEquipmentItem loadItem(const std::string& name,std::uint32_t slot,Tables& tables) {
     const auto& job=resourceLoadJob();job.update(0,0,"Reading equipped item "+name);
     const auto resource=tables.resolver(resourceKey(name),0x7e9);
     require(bool(resource),"missing equipped item "+name+".uti");
     GffFile file;file.LoadBytes(resource->bytes);job.check();
-    auto result=readItem(*file.root(),slot,tables,game);result.resref=resourceKey(name);result.identity=resource->identity;
+    auto result=readItem(*file.root(),slot,tables);result.resref=resourceKey(name);result.identity=resource->identity;
     return result;
 }
 std::uint8_t animationType(const std::string& value) {
@@ -135,9 +134,9 @@ const CreatureAppearanceAttachment* head(const CreatureAppearance& appearance) {
 }
 
 CreatureEquipmentItem readCreatureEquipment(const std::string& name,std::uint32_t slot,const ResourceResolver& resolver,
-    const neoshared::bif::JobControl& job,model::GameVersion game) {
+    const neoshared::bif::JobControl& job) {
     ResourceLoadScope work(job);job.check();
-    Tables tables{resolver,{}};return loadItem(name,slot,tables,game);
+    Tables tables{resolver,{}};return loadItem(name,slot,tables);
 }
 void setCreatureEquipment(CreatureAppearanceState& state,std::vector<CreatureEquipmentItem> equipment) {
     // K1 EquipItem 0x1bc274 applies properties to every admitted slot;
@@ -194,10 +193,10 @@ CreatureAppearanceState readCreatureAppearance(const GffStruct& data,bool useEqu
         // ReadItemsFromGff selects LoadFromTemplate or LoadItem. LoadItem
         // resolves EquippedRes before InventoryRes, then reads embedded data.
         try {
-            if(useEquipmentTemplates)equipment.push_back(loadItem(resref(entry,"EquippedRes"),entry.typeid_,tables,game));
-            else if(const auto* reference=typed<GffResRefField>(entry,"EquippedRes"))equipment.push_back(loadItem(reference->GetString(),entry.typeid_,tables,game));
-            else if(const auto* reference=typed<GffResRefField>(entry,"InventoryRes"))equipment.push_back(loadItem(reference->GetString(),entry.typeid_,tables,game));
-            else equipment.push_back(readItem(entry,entry.typeid_,tables,game));
+            if(useEquipmentTemplates)equipment.push_back(loadItem(resref(entry,"EquippedRes"),entry.typeid_,tables));
+            else if(const auto* reference=typed<GffResRefField>(entry,"EquippedRes"))equipment.push_back(loadItem(reference->GetString(),entry.typeid_,tables));
+            else if(const auto* reference=typed<GffResRefField>(entry,"InventoryRes"))equipment.push_back(loadItem(reference->GetString(),entry.typeid_,tables));
+            else equipment.push_back(readItem(entry,entry.typeid_,tables));
         } catch(const neoshared::bif::JobCancelled&) {throw;
         } catch(const std::exception& error) {
             diagnostics.push_back("Equipped item["+std::to_string(i)+"] was not loaded: "+error.what());

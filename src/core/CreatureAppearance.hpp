@@ -66,8 +66,7 @@ CreatureAppearanceState readCreatureAppearance(const neogff::GffStruct& creature
     model::GameVersion game = model::GameVersion::Kotor2);
 CreatureEquipmentItem readCreatureEquipment(const std::string& resref,
     std::uint32_t slot, const ResourceResolver& resolver,
-    const neoshared::bif::JobControl& job = resourceLoadJob(),
-    model::GameVersion game = model::GameVersion::Kotor2);
+    const neoshared::bif::JobControl& job = resourceLoadJob());
 void setCreatureEquipment(CreatureAppearanceState&, std::vector<CreatureEquipmentItem>);
 CreatureAppearance resolveCreatureAppearance(const CreatureAppearanceState&,
     const ResourceResolver&, const CreatureAppearance* previousAlignmentState = nullptr,
