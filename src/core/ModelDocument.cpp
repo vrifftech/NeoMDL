@@ -246,8 +246,8 @@ bool ModelDocument::openFile(ModelFileSource source,
         return localResources(name, type);
     };
     auto resolver = overlayResolver(localResolver, fallbackResolver);
-    if(source.mod)resolver=[mod=source.mod,lower=std::move(resolver)](const std::string& name,std::uint16_t type)->std::optional<neoshared::ResourceDocument> {
-        if(mod->shadows(name,type))return mod->resolve(name,type,{},resourceLoadJob());
+    if(source.mod)resolver=[mod=source.mod,module=source.resource.module,lower=std::move(resolver)](const std::string& name,std::uint16_t type)->std::optional<neoshared::ResourceDocument> {
+        if(mod->shadows(name,type,module))return mod->resolve(name,type,module,resourceLoadJob());
         return lower(name,type);
     };
     // AurResGet's standalone authoring path can open .lmt sidecars. The
@@ -1070,11 +1070,6 @@ void ModelDocument::loadTexturesFromResolver(const ResourceResolver& resolver,
             messages_.push_back("No host resource resolver is available for texture: " + name);
         return;
     }
-    struct Candidate { std::uint16_t type; const char* extension; };
-    static constexpr Candidate candidates[] = {
-        {kTpcResourceType, ".tpc"}, {kTxbResourceType, ".txb"},
-        {kTgaResourceType, ".tga"}, {kDdsResourceType, ".dds"},
-    };
     const auto requestedNames = names.empty() ? referencedTextures() : names;
     std::size_t textureIndex = 0u;
     for (const auto& name : requestedNames) {
@@ -1083,14 +1078,13 @@ void ModelDocument::loadTexturesFromResolver(const ResourceResolver& resolver,
         bool resolved = false;
         bool loaded = false;
         bool failed = false;
-        for (const auto& candidate : candidates) {
-            try {
-                auto resource = resolver(name, candidate.type);
-                if (!resource) continue;
+        try {
+            if(auto resource=neoshared::resolveTexture(name,resolver)) {
+                const auto type=resource->type;
                 resolved = true;
                 std::string txi;
-                bool txiAvailable=candidate.type==kTpcResourceType || candidate.type==kTxbResourceType;
-                if (candidate.type == kTgaResourceType || candidate.type == kDdsResourceType) {
+                bool txiAvailable=type==kTpcResourceType || type==kTxbResourceType;
+                if (type == kTgaResourceType || type == kDdsResourceType) {
                     if (auto sidecar = resolver(name, kTxiResourceType)) {
                         txi = bytesToText(sidecar->bytes);
                         txiAvailable=true; // an empty existing sidecar is valid
@@ -1098,24 +1092,22 @@ void ModelDocument::loadTexturesFromResolver(const ResourceResolver& resolver,
                 }
                 resourceLoadJob().update(textureIndex - 1u, requestedNames.size(), "Decoding model texture: " + name);
                 auto decoded = neoshared::texture::decodeTextureBytes(
-                    resource->bytes, std::filesystem::u8path(name + candidate.extension), std::move(txi));
+                    resource->bytes, std::filesystem::u8path(name+"."+resourceExtension(type)), std::move(txi));
                 if (!decoded.hasPixels()) {
                     messages_.push_back("Resolved texture has no displayable pixels: " + name);
-                    break;
+                } else {
+                    textureTxiAvailable_[lower(resourceStem(name))]=txiAvailable || !decoded.txi.empty();
+                    const auto key=lower(resourceStem(name));
+                    textures_.emplace(key, std::move(decoded));
+                    textureLoadOrder_.push_back(key);
+                    loaded = true;
                 }
-                textureTxiAvailable_[lower(resourceStem(name))]=txiAvailable || !decoded.txi.empty();
-                const auto key=lower(resourceStem(name));
-                textures_.emplace(key, std::move(decoded));
-                textureLoadOrder_.push_back(key);
-                loaded = true;
-                break;
-            } catch (const neoshared::bif::JobCancelled&) {
-                throw;
-            } catch (const std::exception& error) {
-                messages_.push_back("Unable to decode texture " + name + ": " + error.what());
-                failed = true;
-                break;
             }
+        } catch (const neoshared::bif::JobCancelled&) {
+            throw;
+        } catch (const std::exception& error) {
+            messages_.push_back("Unable to decode texture " + name + ": " + error.what());
+            failed = true;
         }
         if (!loaded && !resolved && !failed) {
             try {

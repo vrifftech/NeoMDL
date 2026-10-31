@@ -1,4 +1,6 @@
 #include "core/GameResourceSession.hpp"
+#include "core/Engine2DA.hpp"
+#include <twoda/TwoDAFile.hpp>
 #include "core/DialogueRuntime.hpp"
 #include <fstream>
 #include <neoshared/bif/KeyBifArchive.hpp>
@@ -7,6 +9,7 @@
 #include <neoshared/game/OverrideAliases.hpp>
 #include <neoshared/PathUtf8.hpp>
 #include <algorithm>
+#include <array>
 #include <map>
 #include <mutex>
 #include <set>
@@ -16,27 +19,42 @@ namespace neomdl {
 namespace {
 using Path=std::filesystem::path;
 using Key=std::pair<std::string,std::uint16_t>;
-using Index=std::map<Key,std::vector<std::size_t>>;
+using Index=std::map<Key,std::size_t>;
 std::string lower(std::string s) {for(auto& c:s) if(c>='A'&&c<='Z') c=char(c+32);return s;}
 std::string pathIdentity(const Path& p) {return neoshared::genericPathToUtf8(std::filesystem::weakly_canonical(p));}
 std::string component(const std::string& s) {return std::to_string(s.size())+":"+s;}
 
-std::vector<Path> installationArchives(const Path& root,const neoshared::bif::JobControl& job) {
-    std::vector<Path> paths;
+using ArchiveFiles=std::map<std::string,std::vector<Path>>;
+ArchiveFiles installationArchives(const Path& root,const std::map<std::string,Path>& aliases,
+    const std::vector<Path>& contentRoots,const neoshared::bif::JobControl& job) {
+    ArchiveFiles files;std::map<std::string,Path> directories;
     for(const auto& directory:std::filesystem::directory_iterator(root)) {
         job.check();
         const auto folder=lower(neoshared::pathToUtf8(directory.path().filename()));
-        if(folder!="modules"&&folder!="rims"&&folder!="texturepacks") continue;
-        if(!std::filesystem::is_directory(directory.symlink_status())) continue;
-        job.update(0,0,"Discovering archives: "+neoshared::pathToUtf8(directory.path()));
-        for(const auto& file:std::filesystem::directory_iterator(
-                directory.path(),std::filesystem::directory_options::skip_permission_denied)) {
+        if(neoshared::bif::LooseArchiveCatalog::hasSupportedExtension(directory.path())&&directory.is_regular_file()) {
+            files[folder].push_back(directory.path());continue;
+        }
+        if(directory.is_directory())directories.emplace(folder,directory.path());
+    }
+    const auto scan=[&](const std::string& folder,const Path& directory) {
+        job.update(0,0,"Discovering archives: "+neoshared::pathToUtf8(directory));
+        std::error_code error;std::filesystem::directory_iterator entry(directory,error),end;
+        if(error&&error!=std::errc::no_such_file_or_directory&&error!=std::errc::not_a_directory)
+            throw std::filesystem::filesystem_error("Cannot enumerate game archives",directory,error);
+        for(;!error&&entry!=end;++entry) {
+            const auto& file=*entry;
             job.check();
             if(neoshared::bif::LooseArchiveCatalog::hasSupportedExtension(file.path())&&file.is_regular_file())
-                paths.push_back(file.path());
+                files[folder+"/"+lower(neoshared::pathToUtf8(file.path().filename()))].push_back(file.path());
         }
+    };
+    for(const auto& content:contentRoots)for(const auto* folder:{"modules","lips"})
+        if(const auto directory=uniqueResourceDirectory(content,folder))scan(folder,*directory);
+    for(const auto* folder:{"modules","rims","texturepacks","lips","override"}) {
+        if(const auto alias=aliases.find(folder);alias!=aliases.end())scan(folder,alias->second);
+        else if(const auto directory=directories.find(folder);directory!=directories.end())scan(folder,directory->second);
     }
-    return paths;
+    return files;
 }
 
 struct Mount {
@@ -48,7 +66,7 @@ struct Mount {
         for(const auto n:archive.resourceIndices) {
             job.check();
             const auto& r=catalog.resources().at(n);
-            entries[{lower(r.resref),r.type}].push_back(n);
+            entries.emplace(Key{lower(r.resref),r.type},n);
         }
         index.merge(entries);
     }
@@ -57,8 +75,7 @@ struct Mount {
         for(const auto& requestedPath:requested) {
             job.check();
             const auto p=std::filesystem::weakly_canonical(requestedPath.is_absolute()?requestedPath:root/requestedPath);
-            if(!unique.insert(neoshared::genericPathToUtf8(p)).second) throw std::runtime_error("Archive mounted twice: "+neoshared::pathToUtf8(p));
-            paths.push_back(p);
+            if(unique.insert(neoshared::genericPathToUtf8(p)).second)paths.push_back(p);
         }
         if(!catalog.openFiles(root,paths,job,neoshared::bif::GameProfile::KotOR))
             throw std::runtime_error(catalog.lastError());
@@ -87,13 +104,8 @@ struct Mount {
     std::optional<std::size_t> find(const Key& key) const {
         resourceLoadJob().check();
         if(const auto i=index.find(key);i!=index.end()) {
-            if(i->second.size()!=1) {
-                const auto& entry=catalog.resources().at(i->second.front());
-                const auto& archive=catalog.archives().at(entry.archiveIndex);
-                throw std::runtime_error("Ambiguous resource in "+neoshared::pathToUtf8(archive.resolvedPath)+": "+key.first);
-            }
             // Unreadable high-priority resources are errors, not fallthrough.
-            return i->second.front();
+            return i->second;
         }
         return {};
     }
@@ -109,9 +121,11 @@ struct InstallationState {
     neoshared::bif::KeyBifArchive key;
     Index keyIndex;
     std::shared_ptr<const neoshared::bif::ModFolder> mod;
+    Mount priority;
+    Mount images;
     Mount globals;
     Mount overrides;
-    std::vector<neoshared::override_aliases::OverrideRoot> overrideRoots;
+    std::vector<Path> contentRoots;
     std::once_flag voiceOnce;
     std::unique_ptr<VoiceIndex> voices;
     std::string identity;
@@ -132,9 +146,8 @@ struct InstallationState {
             roots.push_back({alias,directory(root),{},0,false});
             // K1 Play resolves HD0:STREAMWAVES once; its InitializeSource has
             // no K2 streamvoice override-directory loop (Desktop 0x3bfdae).
-            if(game==model::GameVersion::Kotor2)for(const auto& overrideRoot:overrideRoots) {
-                auto voice=overrideRoot;voice.path=directory(overrideRoot.path);
-                voice.alias=alias+" / "+overrideRoot.alias;voice.precedence=roots.size();
+            if(game==model::GameVersion::Kotor2)for(const auto& root:contentRoots) {
+                neoshared::override_aliases::OverrideRoot voice{alias+" / "+neoshared::pathToUtf8(root),directory(root),{},roots.size(),false};
                 roots.push_back(std::move(voice));
             }
             next->mount.openOverrides(root,roots,job);
@@ -158,7 +171,8 @@ struct InstallationState {
 struct GameResourceSession::State final {
     std::shared_ptr<InstallationState> base;
     std::optional<ModuleScope> module;
-    Mount mount;
+    Mount images;
+    Mount archives;
     std::string identity;
     std::vector<std::string> diagnostics;
 };
@@ -188,61 +202,23 @@ bool GameResourceSession::open(const neoshared::game::GameInstall& supplied,std:
             throw std::runtime_error("Cannot index KotOR KEY: "+b.key.lastError());
         for(const auto& r:b.key.resources()) {
             job.check();
-            b.keyIndex[{lower(r.resref),r.type}].push_back(r.index);
-        }
-        job.update(0,0,"Discovering module and texture archives");
-        const auto paths=installationArchives(b.root,job);
-        std::map<std::string,Path> globalFiles;
-        std::map<std::string,std::map<std::string,Path>> grouped;
-        for(const auto& p:paths) {
-            job.check();
-            const auto folder=lower(neoshared::pathToUtf8(p.parent_path().filename()));
-            const auto file=lower(neoshared::pathToUtf8(p.filename()));
-            const auto stem=lower(neoshared::pathToUtf8(p.stem()));
-            const auto ext=lower(neoshared::pathToUtf8(p.extension()));
-            // Explicit preview quality A + GUI. Do not combine quality packs
-            // by reverse alphabetical accident or mount save/module archives.
-            if(folder=="texturepacks"&&(file=="swpc_tex_tpa.erf"||file=="swpc_tex_gui.erf")) {
-                if(!globalFiles.emplace(file,p).second) throw std::runtime_error("Ambiguous global texture archive: "+file);
-            }
-            if(folder!="modules"&&folder!="rims") continue;
-            if(ext!=".mod"&&ext!=".rim"&&ext!=".erf") continue;
-            auto module=stem;
-            if(ext==".rim"&&module.size()>2&&module.substr(module.size()-2)=="_s") module.resize(module.size()-2);
-            if(ext==".erf"&&module.size()>4&&module.substr(module.size()-4)=="_dlg") module.resize(module.size()-4);
-            else if(ext==".erf") continue;
-            if(!grouped[module].emplace(file,p).second) throw std::runtime_error("Ambiguous module archive: "+file);
-        }
-        std::vector<Path> globalPaths;
-        for(const auto& file:{"swpc_tex_gui.erf","swpc_tex_tpa.erf"})
-            if(const auto i=globalFiles.find(file);i!=globalFiles.end())if(!b.mod||!b.mod->archive(i->second))globalPaths.push_back(i->second);
-        b.globals.open(b.root,globalPaths,job);
-        for(const auto& group:grouped) {
-            job.check();
-            ModuleScope scope;scope.name=group.first;
-            // Viewer mounting policy: MOD override, split RIMs, dialogue ERF.
-            // Callers may provide an explicit different archive sequence.
-            for(const auto& suffix:{".mod","_s.rim",".rim","_dlg.erf"})
-                if(const auto i=group.second.find(scope.name+suffix);i!=group.second.end()) scope.archives.push_back(i->second);
-            if(group.second.count(scope.name+".mod")||group.second.count(scope.name+".rim")||group.second.count(scope.name+"_s.rim"))
-                b.modules.push_back(std::move(scope));
-        }
-        if(b.mod) {
-            std::map<std::string,ModuleScope> scopes;
-            for(auto& scope:b.modules) {
-                scope.archives.erase(std::remove_if(scope.archives.begin(),scope.archives.end(),[&](const auto& path){return b.mod->archive(path).has_value();}),scope.archives.end());
-                scopes.emplace(scope.name,std::move(scope));
-            }
-            for(const auto& [name,archives]:b.mod->modules()) {
-                auto& scope=scopes[name];scope.name=name;scope.archives.insert(scope.archives.begin(),archives.begin(),archives.end());
-            }
-            b.modules.clear();for(auto& [name,scope]:scopes)b.modules.push_back(std::move(scope));
-            b.diagnostics.push_back("Mod folder has priority: "+neoshared::pathToUtf8(b.mod->root()));
+            b.keyIndex.emplace(Key{lower(r.resref),r.type},r.index);
         }
         job.update(0,0,"Discovering override aliases");
         auto aliases=neoshared::override_aliases::discover(b.root,
             *id==neoshared::game::GameId::Kotor1 ? neoshared::override_aliases::Game::Kotor :
                                                 neoshared::override_aliases::Game::Kotor2);
+        if(b.game==model::GameVersion::Kotor2) {
+            std::ifstream table;table.exceptions(std::ios::failbit|std::ios::badbit);table.open(b.installation.tlkPath,std::ios::binary);
+            std::array<unsigned char,12> header{};table.read(reinterpret_cast<char*>(header.data()),header.size());
+            const auto language=std::uint32_t(header[8])|(std::uint32_t(header[9])<<8)|(std::uint32_t(header[10])<<16)|(std::uint32_t(header[11])<<24);
+            const char* languages[]={"English","French","German","Italian","Spanish","English"};
+            b.contentRoots=neoshared::override_aliases::contentRoots(b.root,neoshared::override_aliases::Game::Kotor2,language<6?languages[language]:"English");
+            std::vector<neoshared::override_aliases::OverrideRoot> layered;
+            for(const auto& root:b.contentRoots)if(const auto folder=uniqueResourceDirectory(root,"override"))
+                layered.push_back({neoshared::pathToUtf8(root),*folder,{},layered.size(),false});
+            layered.insert(layered.end(),aliases.begin(),aliases.end());aliases=std::move(layered);
+        }
         // A separately configured viewer directory keeps its pre-existing
         // precedence. The normal installation Override is already discovered
         // and does not move ahead of the shared INI/numbered-alias sequence.
@@ -253,8 +229,82 @@ bool GameResourceSession::open(const neoshared::game::GameInstall& supplied,std:
                 for(std::size_t n=0;n<aliases.size();++n)aliases[n].precedence=n;
             }
         }
-        b.overrides.openOverrides(b.root,aliases,job);
-        b.overrideRoots=std::move(aliases);
+        for(auto& alias:aliases)alias.maximumDepth=b.game==model::GameVersion::Kotor1?0:1;
+        const auto directoryAliases=neoshared::override_aliases::directoryAliases(b.root,
+            b.game==model::GameVersion::Kotor1?neoshared::override_aliases::Game::Kotor:neoshared::override_aliases::Game::Kotor2);
+        const auto directory=[&](const std::string& name) {
+            const auto found=directoryAliases.find(name);
+            return neoshared::override_aliases::OverrideRoot{name,found==directoryAliases.end()?
+                neoshared::game::findExistingPathCaseInsensitive(b.root/name):found->second,{},0,false,0};
+        };
+        std::vector<neoshared::override_aliases::OverrideRoot> roots;
+        if(b.game==model::GameVersion::Kotor1)for(const auto* name:{"streammusic","streamwaves","movies","portraits","servervault","rims","errortex"})roots.push_back(directory(name));
+        else for(const auto* name:{"movies","rims"})roots.push_back(directory(name));
+        roots.insert(roots.end(),aliases.begin(),aliases.end());roots.push_back(directory("tempclient"));
+        for(std::size_t n=0;n<roots.size();++n)roots[n].precedence=n;
+        b.overrides.openOverrides(b.root,roots,job);
+
+        job.update(0,0,"Discovering game archives");
+        const auto files=installationArchives(b.root,directoryAliases,b.contentRoots,job);std::set<std::string> names;
+        for(const auto& [file,paths]:files) {
+            job.check();
+            if(file.rfind("modules/",0)==0||file.rfind("rims/",0)==0) {
+                const auto name=neoshared::bif::ModFolder::moduleName(neoshared::pathFromUtf8(file));
+                if(!name.empty()&&name!="global")names.insert(name);
+            }
+        }
+        if(b.mod)for(const auto& [name,archives]:b.mod->modules())names.insert(name);
+        const auto append=[&](std::vector<Path>& target,const std::string& file) {
+            if(const auto found=files.find(file);found!=files.end())
+                for(const auto& path:found->second)if(!b.mod||!b.mod->archive(path))target.push_back(path);
+        };
+        std::vector<Path> priority,images;
+        append(priority,"patch.erf");
+        if(b.game==model::GameVersion::Kotor1)append(priority,"override/textures.erf");
+        append(images,"rims/global.rim");
+        b.priority.open(b.root,priority,job);b.images.open(b.root,images,job);
+        for(const auto& name:names) {
+            ModuleScope scope;scope.name=name;
+            const auto add=[&](const std::string& folder,const std::string& file) {
+                if(b.mod)if(auto path=b.mod->archive(file)) {scope.archives.push_back(*path);return;}
+                append(scope.archives,folder.empty()?file:folder+"/"+file);
+            };
+            const bool mod=(b.mod&&b.mod->archive(name+".mod"))||files.count("modules/"+name+".mod");
+            if(!mod) {
+                add("modules",name+".rim");
+                const auto split="modules/"+name+"_s.rim";
+                if(b.mod&&b.mod->archive(name+"_s.rim"))add("modules",name+"_s.rim");
+                else if(const auto found=files.find(split);found!=files.end()) {
+                    const auto& variants=found->second;auto selected=variants.back();
+                    for(auto path=variants.rbegin();path!=variants.rend();++path)
+                        if(std::find(b.contentRoots.begin(),b.contentRoots.end(),path->parent_path().parent_path())!=b.contentRoots.end()) {selected=*path;break;}
+                    scope.archives.push_back(selected);
+                }
+            }
+            add("rims",name+"_adx.rim");add("rims",name+"_a.rim");
+            if(mod)add("modules",name+".mod");
+            else if(b.game==model::GameVersion::Kotor2)add("modules",name+"_dlg.erf");
+            if(scope.archives.empty())continue;
+            auto lips=b.contentRoots;const auto lipAlias=directoryAliases.find("lips");lips.push_back(lipAlias==directoryAliases.end()?b.root:lipAlias->second.parent_path());
+            for(const auto& root:lips)for(const auto& file:{std::string("localization.mod"),name+"_loc.mod"})
+                if(const auto found=files.find("lips/"+file);found!=files.end())for(const auto& path:found->second)
+                    if(path.parent_path().parent_path()==root&&(!b.mod||!b.mod->archive(path)))scope.archives.push_back(path);
+            if(b.game==model::GameVersion::Kotor1)add("","players.erf");
+            if(!scope.archives.empty())b.modules.push_back(std::move(scope));
+        }
+        // Texture pack names are row 2 of the resolved table, including edits
+        // supplied by the Mod folder. The GUI pack is mounted after world art.
+        GameResourceSession bootstrap;bootstrap.state_=next;
+        std::vector<Path> packs;
+        if(auto resource=bootstrap.resolve("texpacks",0x7e1)) {
+            neo2da::TwoDAFile table;table.loadBytes(resource->bytes);
+            for(const auto* column:{"Gui","Texture"}) {
+                std::string name;engine2da::getString(table,2,column,name);
+                if(!name.empty())append(packs,"texturepacks/"+lower(name)+".erf");
+            }
+        }
+        b.globals.open(b.root,packs,job);
+        if(b.mod)b.diagnostics.push_back("Mod folder has priority: "+neoshared::pathToUtf8(b.mod->root()));
 
         for(const auto& root:b.overrides.catalog.archives()) {
             job.check();
@@ -269,12 +319,13 @@ bool GameResourceSession::open(const neoshared::game::GameInstall& supplied,std:
             job.check();
             b.diagnostics.push_back("KEY/BIF: "+issue.message);
         }
-        b.diagnostics.push_back("Preview mounts: distinct configured override > shared override aliases in discovery order > selected module archives > GUI/quality-A textures > KEY/BIF. Alias discovery is shared with NeoBIF; configured-directory and archive layer precedence are explicit viewer policy. Save state, other modules and other texture qualities are excluded.");
+        b.diagnostics.push_back("Resource mounts: Mod folder > resource directories > priority archives > module/global RIM images > module/lip archives > tex packs > KEY/BIF. Textures choose source before format. Save state and unrelated modules are excluded.");
         next->diagnostics=b.diagnostics;next->identity="neomdl:installation:"+component(pathIdentity(keyPath));
         if(b.mod)next->identity+=component(b.mod->identity());
         for(const auto& root:b.overrides.catalog.archives())
             next->identity+=component(root.overrideAlias)+component(pathIdentity(root.resolvedPath))+
                 component(root.overrideIniPath.empty()?std::string{}:pathIdentity(root.overrideIniPath));
+        for(const auto* mount:{&b.priority,&b.images,&b.globals})for(const auto& path:mount->paths)next->identity+=component(pathIdentity(path));
         b.identity=next->identity;
         job.update(1,1,"Game installation ready");
         job.check();
@@ -292,11 +343,14 @@ bool GameResourceSession::openModule(const GameResourceSession& source,const Mod
         resourceKey(scope.name);
         if(scope.archives.empty()) throw std::runtime_error("A module scope requires an archive");
         auto next=std::make_shared<State>();next->base=source.state_->base;next->module=scope;
-        auto archives=scope.archives;
-        if(next->base->mod)archives.erase(std::remove_if(archives.begin(),archives.end(),[&](const auto& path){return next->base->mod->ownsArchive(path);}),archives.end());
-        next->mount.open(next->base->root,archives,job);
+        std::vector<Path> images,archives;
+        for(const auto& path:scope.archives) {
+            if(next->base->mod&&next->base->mod->ownsArchive(path))continue;
+            (lower(neoshared::pathToUtf8(path.extension()))==".rim"?images:archives).push_back(path);
+        }
+        next->images.open(next->base->root,images,job);next->archives.open(next->base->root,archives,job);
         next->identity="neomdl:module:"+component(next->base->identity)+component(lower(scope.name));
-        for(const auto& p:next->mount.paths) next->identity+=component(neoshared::genericPathToUtf8(p));
+        for(const auto& p:scope.archives)next->identity+=component(neoshared::genericPathToUtf8(p));
         next->diagnostics=next->base->diagnostics;
         next->diagnostics.push_back("Active module: "+scope.name+" (immutable resolver snapshot)");
         job.update(1,1,"Module ready: "+scope.name);
@@ -316,7 +370,7 @@ const std::string& GameResourceSession::scopeIdentity() const noexcept {static c
 std::vector<std::string> GameResourceSession::areaResrefs() const {
     std::set<std::string> names;
     if(state_&&state_->module) {
-        for(const auto& r:state_->mount.catalog.resources())if(r.type==0x7dc)names.insert(lower(r.resref));
+        for(const auto* mount:{&state_->images,&state_->archives})for(const auto& r:mount->catalog.resources())if(r.type==0x7dc)names.insert(lower(r.resref));
         if(state_->base->mod)for(const auto* r:state_->base->mod->resources(state_->module->name))if(r->type==0x7dc)names.insert(lower(r->resref));
     }
     return {names.begin(),names.end()};
@@ -330,15 +384,15 @@ std::vector<GameResourceEntry> GameResourceSession::resources(const std::vector<
             entries.emplace(Key{lower(name),type},GameResourceEntry{lower(name),type,source});
     };
     const auto mount=[&](const Mount& mounted) {
-        for(const auto& [key,indices]:mounted.index) {
-            const auto& resource=mounted.catalog.resources().at(indices.front());
+        for(const auto& [key,index]:mounted.index) {
+            const auto& resource=mounted.catalog.resources().at(index);
             add(key.first,key.second,neoshared::pathToUtf8(mounted.catalog.archives().at(resource.archiveIndex).resolvedPath));
         }
     };
     if(base.mod)for(const auto* r:base.mod->resources(scope))if(std::find(types.begin(),types.end(),r->type)!=types.end())
         entries.emplace(Key{lower(r->resref),r->type},GameResourceEntry{lower(r->resref),r->type,"Mod folder: "+neoshared::pathToUtf8(base.mod->root())});
     mount(base.overrides);
-    if(state_->module)mount(state_->mount);
+    mount(base.priority);mount(state_->images);mount(base.images);mount(state_->archives);
     mount(base.globals);
     for(const auto& resource:base.key.resources())if(std::find(types.begin(),types.end(),resource.type)!=types.end())
         add(resource.resref,resource.type,neoshared::pathToUtf8(base.key.bifs().at(resource.bifIndex).resolvedPath));
@@ -359,6 +413,7 @@ ResourceResolver GameResourceSession::resolver() const {
         job.check();
         const Key key{resourceKey(name),type};auto& b=*state->base;
         const auto stamp=[&](neoshared::ResourceDocument r,const std::string& layer) {
+            r.module=state->module?state->module->name:std::string{};
             r.identity=state->identity+component(layer)+component(r.identity);
             r.sourceDescription="["+(state->module?state->module->name:std::string("installation"))+" / "+layer+"] "+r.sourceDescription;
             return r;
@@ -369,6 +424,8 @@ ResourceResolver GameResourceSession::resolver() const {
             neoshared::ResourceDocument r;
             const auto& source=item.overrideFile?item.directPath:owner.resolvedPath;
             r.fileName=item.fileName();r.type=item.type;r.sourcePath=source;
+            r.priority=item.overrideFile?neoshared::ResourcePriority::Directory:
+                lower(neoshared::pathToUtf8(source.extension()))==".rim"?neoshared::ResourcePriority::Image:neoshared::ResourcePriority::Archive;
             r.identity=component(neoshared::genericPathToUtf8(source))+
                 component(std::to_string(item.archiveResourceIndex))+component(std::to_string(item.resourceId))+
                 component(std::to_string(item.type))+component(r.fileName);
@@ -389,19 +446,27 @@ ResourceResolver GameResourceSession::resolver() const {
         };
         if(b.mod&&b.mod->shadows(key.first,key.second,state->module?state->module->name:std::string{}))
             return b.mod->resolve(key.first,key.second,state->module?state->module->name:std::string{},job);
-        if(auto i=b.overrides.find(key)) {
-            const auto& item=b.overrides.catalog.resources().at(*i);
-            const auto& owner=b.overrides.catalog.archives().at(item.archiveIndex);
-            return read(b.overrides,*i,"Override #"+std::to_string(owner.overridePrecedence)+" "+owner.overrideAlias);
+        struct Location {const Mount* mount;std::size_t index;neoshared::ResourcePriority priority;};
+        const auto locate=[&](const Key& wanted)->std::optional<Location> {
+            for(const auto* mount:{&b.overrides,&b.priority,&state->images,&b.images,&state->archives,&b.globals})
+                if(const auto index=mount->find(wanted))return Location{mount,*index,mount==&b.overrides?neoshared::ResourcePriority::Directory:
+                    mount==&state->images||mount==&b.images?neoshared::ResourcePriority::Image:neoshared::ResourcePriority::Archive};
+            const auto found=b.keyIndex.find(wanted);if(found==b.keyIndex.end())return {};
+            return Location{nullptr,found->second,neoshared::ResourcePriority::Key};
+        };
+        const auto selected=locate(key);if(!selected)return {};
+        if(neoshared::isTextureType(type)) {
+            const auto requested=std::size_t(std::find(std::begin(neoshared::textureTypes),std::end(neoshared::textureTypes),type)-std::begin(neoshared::textureTypes));
+            for(std::size_t n=0;n<std::size(neoshared::textureTypes);++n)
+                if(const auto other=locate({key.first,neoshared::textureTypes[n]});other&&
+                    std::pair{other->priority,n}<std::pair{selected->priority,requested})return {};
         }
-        if(state->module) if(auto i=state->mount.find(key)) return read(state->mount,*i,"module");
-        if(auto i=b.globals.find(key)) return read(b.globals,*i,"global textures");
-        const auto i=b.keyIndex.find(key);if(i==b.keyIndex.end()) return {};
-        if(i->second.size()!=1) throw std::runtime_error("Ambiguous KEY resource: "+key.first);
-        const auto index=i->second.front();const auto& item=b.key.resources().at(index);
+        if(selected->mount)return read(*selected->mount,selected->index,selected->mount==&b.overrides?"directory":
+            selected->mount==&b.priority?"priority archive":selected->priority==neoshared::ResourcePriority::Image?"image":"archive");
+        const auto index=selected->index;const auto& item=b.key.resources().at(index);
         const auto& owner=b.key.bifs().at(item.bifIndex);
         neoshared::ResourceDocument r;
-        r.fileName=item.fileName();r.type=item.type;
+        r.fileName=item.fileName();r.type=item.type;r.priority=neoshared::ResourcePriority::Key;
         r.identity=component(neoshared::genericPathToUtf8(owner.resolvedPath))+
             component(std::to_string(item.tableIndex))+component(std::to_string(item.resourceId))+
             component(std::to_string(item.type))+component(r.fileName);
@@ -437,7 +502,7 @@ ResourceResolver GameResourceSession::voiceResolver() const {
         const auto& voices=b.voiceIndex(job);
         const auto nested=dialogueVoiceUsesOverridePaths(stem,b.game);
         const auto overrideCount=nested?std::min<std::size_t>(
-            32u,
+            16u,
             voices.paths.empty()?0u:voices.paths.size()-1u):0u;
         const auto read=[&](std::size_t root,const char* extension)
             ->std::optional<neoshared::ResourceDocument> {

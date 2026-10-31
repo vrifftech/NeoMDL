@@ -1,4 +1,5 @@
 #include "core/ResourceContext.hpp"
+#include <neoshared/ResourceResolver.hpp>
 #include <neoshared/PathUtf8.hpp>
 #include <neoshared/bif/KeyBifArchive.hpp>
 #include <neoshared/bif/LooseArchiveCatalog.hpp>
@@ -200,6 +201,8 @@ ResourceResolver directoryResources(const std::filesystem::path& directory,Resou
                 resourceLoadJob().check();return r;
             }
         }
+        if(neoshared::isTextureType(type))for(const auto format:neoshared::textureTypes)
+            if(uniqueResourceFile(root,stem+"."+resourceExtension(format)))return {};
         return fallback?fallback(stem,type):std::nullopt;
     };
 }

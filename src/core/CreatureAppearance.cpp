@@ -1,4 +1,5 @@
 #include "core/CreatureAppearance.hpp"
+#include <neoshared/ResourceResolver.hpp>
 #include "core/AreaLoadTables.hpp"
 #include <gff/GFFFile.hpp>
 #include <twoda/TwoDAFile.hpp>
@@ -51,7 +52,7 @@ int number(Tables& tables,const std::string& file,std::uint32_t row,const std::s
     int value=0;engine2da::getInt(tables.table(file),static_cast<int>(row),column,value);return value;
 }
 bool textureExists(const ResourceResolver& resolver,const std::string& name) {
-    return resolver(name,kTgaResourceType).has_value()||resolver(name,kTpcResourceType).has_value();
+    return neoshared::resolveTexture(name,resolver).has_value();
 }
 std::string numbered(const std::string& base,unsigned variation,unsigned width) {
     std::ostringstream result;result<<base<<std::setfill('0')<<std::setw(int(width))<<variation;

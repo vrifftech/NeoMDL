@@ -12,12 +12,12 @@
 
 namespace neomdl {
 
-// Read-only installation-backed resource session for the standalone viewer.
+// Read-only installation and module resource session.
 // neoshared owns the archive-format implementation; NeoMDL only exposes its
 // narrow (ResRef, resource type) lookup boundary to ModelDocument.
 struct ModuleScope {
     std::string name;
-    // Highest priority first. Explicit host policy; save/CURRENTGAME state is
+    // Highest priority first within each archive category. Save/CURRENTGAME state is
     // not silently mounted, and unrelated modules never participate. Relative
     // paths are installation-root-relative, never working-directory-relative.
     std::vector<std::filesystem::path> archives;

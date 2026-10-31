@@ -2028,7 +2028,7 @@ public:
         if (!resource.identity.empty() && activateResource(resource.identity)) return true;
         try {
             auto document = std::make_unique<ModelDocument>();
-            const auto resolver = captureHostResolver();
+            const auto resolver = captureHostResolver(resource.module.empty()?neoshared::bif::ModFolder::moduleName(resource.sourcePath):resource.module);
             std::optional<model::GameVersion> asciiGame;
             if (!loadModelWithGame("Loading model resource",asciiGame,
                 [&](const neoshared::bif::JobControl& job,std::optional<model::GameVersion> game) {
@@ -2258,9 +2258,10 @@ private:
         return true;
     }
 
-    ResourceResolver captureHostResolver() const {
+    ResourceResolver captureHostResolver(const std::string& module={}) const {
         if (context_.captureResourceResolver) {
-            auto resolver = context_.captureResourceResolver();
+            auto resolver = !module.empty()&&context_.captureScopedResourceResolver?
+                context_.captureScopedResourceResolver(module):context_.captureResourceResolver();
             if (!resolver) return {};
             return [resolver = std::move(resolver)](const std::string& resref, std::uint16_t type) {
                 return resolver(resref, type, resourceLoadJob());
