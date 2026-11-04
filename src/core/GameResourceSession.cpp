@@ -198,7 +198,7 @@ bool GameResourceSession::open(const neoshared::game::GameInstall& supplied,std:
         neoshared::game::refreshDerivedPaths(*definition,b.installation);
         b.root=neoshared::game::normalizeConfiguredPath(b.installation.installPath);
         const auto keyPath=neoshared::game::findExistingPathCaseInsensitive(b.root/"chitin.key");
-        if(!b.key.open(keyPath,{},{},job)||b.key.gameProfile()!=neoshared::bif::GameProfile::KotOR)
+        if(!b.key.open(keyPath,{},{},job,b.game==model::GameVersion::Kotor1)||b.key.gameProfile()!=neoshared::bif::GameProfile::KotOR)
             throw std::runtime_error("Cannot index KotOR KEY: "+b.key.lastError());
         for(const auto& r:b.key.resources()) {
             job.check();
@@ -245,7 +245,16 @@ bool GameResourceSession::open(const neoshared::game::GameInstall& supplied,std:
         b.overrides.openOverrides(b.root,roots,job);
 
         job.update(0,0,"Discovering game archives");
-        const auto files=installationArchives(b.root,directoryAliases,b.contentRoots,job);std::set<std::string> names;
+        auto files=installationArchives(b.root,directoryAliases,b.contentRoots,job);std::set<std::string> names;
+        for(auto it=files.begin();it!=files.end();) {
+            if(neoshared::pathFromUtf8(it->first).extension()==".mzd") {
+                if(b.game==model::GameVersion::Kotor1) {
+                    auto name=neoshared::pathFromUtf8(it->first);name.replace_extension(".mod");
+                    files[neoshared::genericPathToUtf8(name)]=std::move(it->second);
+                }
+                it=files.erase(it);
+            } else ++it;
+        }
         for(const auto& [file,paths]:files) {
             job.check();
             if(file.rfind("modules/",0)==0||file.rfind("rims/",0)==0) {
