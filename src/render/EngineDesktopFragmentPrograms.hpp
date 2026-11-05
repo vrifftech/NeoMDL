@@ -1,5 +1,6 @@
 #pragma once
 #include "render/SkinMaterialPrograms.hpp"
+#include "render/DesktopMaterialPrograms.hpp"
 
 // K2 Desktop GLRender::EnableFragmentShadersARB program objects.
 // Packed text and declaration order are retained; engine shared env registers
@@ -388,10 +389,10 @@ END
 )ARB";
 
 // Selection only: callers retain the current program on nullptr and apply
-// the separate engine disable/unbind commands. The cube selector is the
-// environment IsCubeMap for19/20, but the LIGHTMAP IsCubeMap for22.
+// the separate engine disable/unbind commands. The cube selector follows
+// the environment texture for both ordinary and lightmapped reflections.
 // Engine null-texture admission (e.g.38) belongs to the calling dispatcher.
-inline const char* k2FragmentProgram(unsigned command,bool cube=false) noexcept {
+inline const char* k2FragmentProgram(unsigned command,bool cube=false) {
     switch(command) {
     case 2:return skin_programs::FogFragment;
     case 3:return skin_programs::StandardFogFragment;
@@ -405,12 +406,12 @@ inline const char* k2FragmentProgram(unsigned command,bool cube=false) noexcept 
     case 47:return DirtyEnvironmentLightmapMultiply;
     case 48:return DirtyEnvironmentLightmapAdd;
     case 50:return skin_programs::ForceGlow;
-    case 52:return skin_programs::ForceEnvironmentGlow;
+    case 52:return cube?cubeEnvironmentFragment(skin_programs::ForceEnvironmentGlow,1):skin_programs::ForceEnvironmentGlow;
     case 55:return BumpGlow;
     case 56:return skin_programs::ForceDesaturate;
     case 57:return LightmapDesaturate;
-    case 58:return skin_programs::ForceEnvironmentDesaturate;
-    case 59:return EnvironmentLightmapDesaturate;
+    case 58:return cube?cubeEnvironmentFragment(skin_programs::ForceEnvironmentDesaturate,1):skin_programs::ForceEnvironmentDesaturate;
+    case 59:return cube?cubeEnvironmentFragment(EnvironmentLightmapDesaturate,2):EnvironmentLightmapDesaturate;
     case 68:return DirtyLightmapDesaturate;
     case 71:return DirtyEnvironmentLightmapDesaturate;
     case 75:return Hologram;

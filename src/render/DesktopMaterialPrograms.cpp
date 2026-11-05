@@ -5,6 +5,16 @@
 #include <cstring>
 #include <stdexcept>
 namespace neomdl::render::desktop_programs {
+const char* cubeEnvironmentFragment(const char* source,unsigned unit) {
+    static std::map<std::string,std::string,std::less<>> sources;
+    const auto found=sources.find(std::string_view(source));
+    if(found!=sources.end())return found->second.c_str();
+    std::string text(source);
+    const auto sampler="texture["+std::to_string(unit)+"], ";
+    const auto from=sampler+"2D",to=sampler+"CUBE";
+    const auto at=text.find(from);text.replace(at,from.size(),to);
+    return sources.emplace(source,std::move(text)).first->second.c_str();
+}
 const std::string& fogFragment(std::string_view source,model::FogMode mode) {
     static std::map<std::string,std::array<std::string,4>,std::less<>> sources;
     auto found=sources.find(source);

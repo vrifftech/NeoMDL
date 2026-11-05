@@ -653,7 +653,7 @@ bool ShaderMeshRenderer::drawPrepared(const neomdl::model::Mesh& mesh,
         case 76:nextMaterialState.forceSightFragmentCommand=76;break;
         default:break; // Desktop dispatcher has empty cases; preserve prior FP
         }
-        if(!desktopFixedForce)if(const auto* fragment=desktop_programs::k2FragmentProgram(forcePlan.command)) {
+        if(!desktopFixedForce)if(const auto* fragment=desktop_programs::k2FragmentProgram(forcePlan.command,p.environmentCube)) {
             nextMaterialState.bindFragmentProgram(fragment);
             nextMaterialState.fragmentConstants[7]={{.3f,.59f,.11f,forcePlan.command==76?.75f:
                 forcePlan.command==50||forcePlan.command==52?.8f:p.forceSight.desaturation}};
@@ -677,7 +677,7 @@ bool ShaderMeshRenderer::drawPrepared(const neomdl::model::Mesh& mesh,
         } else if(p.ownerFragment==OwnerFragmentEffect::IlluminationEnvironment) {command=79;ordinaryFragmentCleanup=32;}
         else if(engineProgram==MaterialProgram::Lightmap) {command=26;ordinaryFragmentCleanup=32;}
         else if(engineProgram==MaterialProgram::Environment) {command=19;cube=p.environmentCube;ordinaryFragmentCleanup=32;}
-        else if(engineProgram==MaterialProgram::EnvironmentLightmap) {command=22;cube=p.lightmapCube;ordinaryFragmentCleanup=37;}
+        else if(engineProgram==MaterialProgram::EnvironmentLightmap) {command=22;cube=p.environmentCube;ordinaryFragmentCleanup=37;}
         if(command)if(const auto* fragment=desktop_programs::k2FragmentProgram(command,cube)) {
             nextMaterialState.bindFragmentProgram(command==19 || command==22 || command==26
                 ? desktop_programs::fogFragment(fragment,p.fog.mode) : std::string_view(fragment));
@@ -766,7 +766,7 @@ bool ShaderMeshRenderer::drawPrepared(const neomdl::model::Mesh& mesh,
         if(!i.skinMaterials.prepare(a,p,engineProgram,error))return false;
     }
     const bool posed=deformed!=nullptr;
-    const bool genericVboNeeded=!k1Rigid || p.outlineOnly || p.selected;
+    const bool genericVboNeeded=(!k1Rigid && !engineSkin) || p.outlineOnly || p.selected;
     try {
         auto& cache=i.meshes[&mesh];
         const bool newGeometry=!cache.vbo || cache.vertices!=mesh.vertices.data() ||
@@ -963,10 +963,6 @@ bool ShaderMeshRenderer::drawPrepared(const neomdl::model::Mesh& mesh,
                     bindForce(1,p.lightmapCube,p.lightmapTexture);
                 }
                 if(command==52||command==58||command==59)nextMaterialState.fixedEnvironmentMap=nextMaterialState.fixedSecondTexture=true;
-            }
-            if(command==52||command==58||command==59) {
-                p.environmentTexture=nextMaterialState.binding(command==59?2:1,false);
-                p.environmentCube=false; // original fragments sample the retained 2D target
             }
         }
         if(desktopFixedForce) {

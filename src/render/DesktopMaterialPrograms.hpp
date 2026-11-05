@@ -48,6 +48,7 @@ struct LegacyGuard {
 };
 const char* standardFogFragment(bool kotor1);
 const std::string& fogFragment(std::string_view source,model::FogMode);
+const char* cubeEnvironmentFragment(const char* source,unsigned unit);
 struct ProgramCache {
     g::Loader loader; LegacyApi x; bool ready{};
     std::map<std::string,g::UInt,std::less<>> programs;

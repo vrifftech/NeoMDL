@@ -27,12 +27,12 @@ material::ForceSightPlan skinForcePlan(const MeshDrawParameters& p,MaterialProgr
     return material::setupForceSight(p.forceSight,p.partHasOwner?&p.forceSightOwner:nullptr,
         environment?52u:50u,environment?58u:56u,false,p.forceSightIllumination);
 }
-const char* skinForceFragment(unsigned command) {
+const char* skinForceFragment(unsigned command,bool cube) {
     switch(command) {
     case 50:return skin_programs::ForceGlow;
-    case 52:return skin_programs::ForceEnvironmentGlow;
+    case 52:return cube?cubeEnvironmentFragment(skin_programs::ForceEnvironmentGlow,1):skin_programs::ForceEnvironmentGlow;
     case 56:return skin_programs::ForceDesaturate;
-    case 58:return skin_programs::ForceEnvironmentDesaturate;
+    case 58:return cube?cubeEnvironmentFragment(skin_programs::ForceEnvironmentDesaturate,1):skin_programs::ForceEnvironmentDesaturate;
     case 92:return skin_programs::ForceIlluminationDesaturate;
     default:return nullptr; // Desktop dispatcher 94 is a verified no-op.
     }
@@ -108,7 +108,7 @@ bool SkinMaterialPass::prepare(g::Api& a,const MeshDrawParameters& p,MaterialPro
         // dispatcher retains and changes the actual fixed texture pipeline.
         if(p.material.engineHardware.arbFragmentPrograms)
             for(const unsigned command:{50u,52u,56u,58u,92u})
-                if(!i.program(a,FP,skinForceFragment(command),error))return false;
+                if(!i.program(a,FP,skinForceFragment(command,p.environmentCube),error))return false;
         if((type==MaterialProgram::SkinBump || type==MaterialProgram::SkinNormal) && p.fog.mode!=model::FogMode::Disabled &&
            (!i.program(a,VP,skin_programs::Fog,error)||!i.program(a,FP,skin_programs::FogFragment,error)))return false;
     } else if(type==MaterialProgram::SkinFlat || type==MaterialProgram::SkinEnvironment) {
@@ -150,7 +150,8 @@ bool SkinMaterialPass::draw(g::Api& a,const model::Mesh& mesh,const model::Defor
     for(unsigned unit=0;unit<6;++unit){a.ActiveTexture(g::Texture0+unit);a.Disable(g::Texture2D);a.Disable(g::TextureCube);}
     a.ActiveTexture(g::Texture0);
     a.Enable(g::DepthTest);a.DepthFunc(g::Lequal);a.DepthMask(p.material.depthWrite);
-    enabled(a,g::CullFace,p.cullBackfaces);a.CullFace(g::Back);a.FrontFace(g::CCW);
+    enabled(a,g::CullFace,p.cullBackfaces);a.CullFace(g::Back);
+    a.FrontFace(model::transformHandedness(modelView)<0?g::CW:g::CCW);
     a.PolygonMode(g::FrontAndBack,p.wireframe?g::Line:g::Fill);
     a.BlendEquationSeparate(g::FuncAdd,g::FuncAdd);
     x.AlphaFunc(0x0204,p.material.alphaCutoff);
@@ -228,7 +229,7 @@ bool SkinMaterialPass::draw(g::Api& a,const model::Mesh& mesh,const model::Defor
             applyDesktopFixedTextureState(a,x,state);
             return true;
         }
-        const auto* fragment=skinForceFragment(plan.command);
+        const auto* fragment=skinForceFragment(plan.command,p.environmentCube);
         if(fragment) {
             state.forceSightFragmentCommand=plan.command;
             state.fragmentConstants[1]=plan.illumination
@@ -236,16 +237,12 @@ bool SkinMaterialPass::draw(g::Api& a,const model::Mesh& mesh,const model::Defor
                 :plan.color;
             if(type==MaterialProgram::SkinEnvironment) {
                 state.fixedEnvironmentMap=state.fixedSecondTexture=true;
-                // Dispatcher52/58 bind both supplied texture objects. Its ARB
-                // fragment still samples unit1's retained 2D target for cubes.
+                // Bind the diffuse image and the environment's actual target.
                 if(!bind(0,false,p.diffuseTexture,true) ||
                    !bind(1,p.environmentCube,p.environmentTexture,true))return false;
-                a.ActiveTexture(g::Texture0+1);
-                a.BindTexture(g::Texture2D,state.binding(1,false));
-                a.ActiveTexture(g::Texture0);
             }
         }
-        fragment=skinForceFragment(state.forceSightFragmentCommand);
+        fragment=skinForceFragment(state.forceSightFragmentCommand,p.environmentCube);
         if(fragment) {
             if(!fp(fragment))return false;
             const bool glow=state.forceSightFragmentCommand==50 ||

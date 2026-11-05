@@ -460,12 +460,6 @@ void EngineMaterialState::prepare(MeshDrawParameters& p,MaterialProgram program)
             fixedTextureUnits[unit].texgenEnabled[axis]=true;
             fixedTextureUnits[unit].texgenMode[axis]=p.environmentCube?0x8512u:0x2402u;
         }
-        // The EMLM dispatcher tests LIGHTMAP IsCubeMap for the environment
-        // sampler. Preserve the other target's retained binding, even zero.
-        const bool sampledCube=program==MaterialProgram::EnvironmentLightmap
-            ? p.lightmapCube : p.environmentCube;
-        p.environmentTexture=binding(unit,sampledCube);
-        p.environmentCube=sampledCube;
     }
     if(engineFragmentDispatch && (program==MaterialProgram::Environment || program==MaterialProgram::SkinEnvironment || program==MaterialProgram::EnvironmentLightmap))
         fragmentConstants[0]={{1,1,1,p.material.environmentOpacity}};

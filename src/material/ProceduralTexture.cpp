@@ -583,13 +583,12 @@ std::vector<ProcedureImage> procedureNormalLevels(const ProcedureImage& image,fl
         throw std::invalid_argument("Engine normal-map dimensions are neither power-of-two nor power-of-two plus one");
     };
     const auto w=extent(image.width),h=extent(image.height);
-    // downSampleNormalMap exchanges width/height in its wrap divisors. Its
-    // nonsquare branch can address beyond its input; do not repair its math.
-    if(w!=h)throw std::invalid_argument("Nonsquare engine normal mip chains have an unsafe wrap domain");
     ProcedureImage first;first.width=w;first.height=h;first.bytes.resize(checkedProduct(checkedPixels(w,h),4));
     if(authoredNormal) {
         if(image.bytes.size()<first.bytes.size())throw std::invalid_argument("Authored normal upload has fewer than four bytes per output pixel");
-        std::copy_n(image.bytes.begin(),first.bytes.size(),first.bytes.begin());
+        for(unsigned y=0;y<h;++y)
+            std::copy_n(image.bytes.begin()+std::size_t(y)*image.width*4,w*4,
+                first.bytes.begin()+std::size_t(y)*w*4);
         for(std::size_t texel=0;texel<first.bytes.size();texel+=4)
             std::swap(first.bytes[texel],first.bytes[texel+2]);
     } else {
@@ -613,9 +612,9 @@ std::vector<ProcedureImage> procedureNormalLevels(const ProcedureImage& image,fl
         dst.bytes.resize(std::size_t(dst.width)*dst.height*4);
         for(unsigned y=0;y<src.height;y+=2)for(unsigned x=0;x<src.width;x+=2) {
             const auto p00=(std::size_t(y)*src.width+x)*4;
-            const auto p10=(std::size_t(y)*src.width+(x+1u)%src.height)*4;
-            const auto p01=(std::size_t((y+1u)%src.width)*src.width+x)*4;
-            const auto p11=(std::size_t((y+1u)%src.width)*src.width+(x+1u)%src.height)*4;
+            const auto p10=(std::size_t(y)*src.width+(x+1u)%src.width)*4;
+            const auto p01=(std::size_t((y+1u)%src.height)*src.width+x)*4;
+            const auto p11=(std::size_t((y+1u)%src.height)*src.width+(x+1u)%src.width)*4;
             std::array<float,3> v{};
             for(unsigned c=0;c<3;++c) {
                 const auto term=[&](std::size_t p) {
@@ -624,8 +623,10 @@ std::vector<ProcedureImage> procedureNormalLevels(const ProcedureImage& image,fl
                 };
                 v[c]=((term(p00)+term(p10))+term(p01))+term(p11);
             }
-            if(dst.width==1||dst.height==1||(dst.width==2&&dst.height==2))v={{1,0,0}};
-            else if(dst.width==4&&dst.height==4){v[1]*=0.5f;v[2]*=0.5f;}
+            if(!authoredNormal) {
+                if(dst.width==1||dst.height==1||(dst.width==2&&dst.height==2))v={{1,0,0}};
+                else if(dst.width==4&&dst.height==4){v[1]*=0.5f;v[2]*=0.5f;}
+            }
             const float length=std::sqrt((v[1]*v[1]+v[2]*v[2])+v[0]*v[0]);
             const auto p=(std::size_t(y/2)*dst.width+x/2)*4;
             if(length==0){dst.bytes[p]=255;dst.bytes[p+1]=dst.bytes[p+2]=128;}

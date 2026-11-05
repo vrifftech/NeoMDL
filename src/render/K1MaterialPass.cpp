@@ -326,12 +326,24 @@ bool K1MaterialPass::draw(g::Api& a,const model::Mesh& mesh,const MeshDrawParame
         constants[15]={{1,1,1,0}};constants[16]={{0,2,3,1}};constants[89]={{0,0,0,1}};
         for(unsigned row=0;row<3;++row)constants[92-row]={{p.worldFromEye.values[row],p.worldFromEye.values[4+row],p.worldFromEye.values[8+row],p.worldFromEye.values[12+row]}};
         for(unsigned row=0;row<3;++row)constants[93+row]=p.enginePartMaterial->vertex[row];
-        for(unsigned n=0;n<std::min(p.lightCount,p.lights.size());++n){const auto& light=p.lights[n];auto& pos=constants[70+4*n];for(unsigned row=0;row<3;++row)pos[row]=p.worldFromEye.values[row]*light.position[0]+p.worldFromEye.values[4+row]*light.position[1]+p.worldFromEye.values[8+row]*light.position[2]+p.worldFromEye.values[12+row]*light.position[3];pos[3]=light.position[3];constants[71+4*n]={{light.attenuation[0],light.attenuation[1],light.attenuation[2],0}};constants[72+4*n]={{light.ambient[0],light.ambient[1],light.ambient[2],1}};constants[73+4*n]={{light.diffuse[0],light.diffuse[1],light.diffuse[2],1}};}
+        const auto setLights=[&](const PreviewLight* lights,std::size_t lightCount) {
+            for(unsigned n=0;n<lightCount;++n) {
+                const auto& light=lights[n];auto& pos=constants[70+4*n];
+                for(unsigned row=0;row<3;++row)pos[row]=p.worldFromEye.values[row]*light.position[0]+
+                    p.worldFromEye.values[4+row]*light.position[1]+p.worldFromEye.values[8+row]*light.position[2]+
+                    p.worldFromEye.values[12+row]*light.position[3];
+                pos[3]=light.position[3];
+                constants[71+4*n]={{light.attenuation[0],light.attenuation[1],light.attenuation[2],0}};
+                constants[72+4*n]={{light.ambient[0],light.ambient[1],light.ambient[2],1}};
+                constants[73+4*n]={{light.diffuse[0],light.diffuse[1],light.diffuse[2],1}};
+            }
+        };
         const auto vp=[&](std::string_view program){const auto id=i.program(a,VP,program,error);if(!id)return false;x.BindProgramARB(VP,id);i.setLocalParameters(VP,id,0,constants.data(),constants.size());a.Enable(VP);return true;};
         const g::UInt slots[]={0,2,8,9,12,13,14};const g::Int sizes[]={3,3,2,2,3,3,3};const std::size_t offsets[]={offsetof(EngineRigidVertex,position),offsetof(EngineRigidVertex,normal),offsetof(EngineRigidVertex,uv0),offsetof(EngineRigidVertex,uv1),offsetof(EngineRigidVertex,basis4),offsetof(EngineRigidVertex,basis5),offsetof(EngineRigidVertex,basis6)};
         const auto attributes=[&](){for(unsigned n=0;n<7;++n){a.EnableVertexAttribArray(slots[n]);a.VertexAttribPointer(slots[n],sizes[n],g::Float,0,sizeof(EngineRigidVertex),reinterpret_cast<const void*>(offsets[n]));}const float current[]={0,0,0,1};a.VertexAttrib4fv(10,current);a.VertexAttrib4fv(11,current);};
         const auto cleanup=[&](){state.finishFragmentCommand(0,true);a.Disable(FP);x.BindProgramARB(FP,0);for(unsigned unit=0;unit<4;++unit){state.bind(unit,false,0);a.ActiveTexture(g::Texture0+unit);a.BindTexture(g::Texture2D,0);}a.ActiveTexture(g::Texture0);};
         if(path==Path::EMBM){
+            setLights(p.lights.data(),std::min(p.lightCount,p.lights.size()));
             attributes();a.Enable(g::Blend);a.Disable(g::AlphaTest);a.Disable(Fog);blend(g::One,g::Zero);
             if(p.material.engineWaterAlpha==1.0f){
                 if(!vp(litStandard(i,p)))return false;
@@ -356,6 +368,7 @@ bool K1MaterialPass::draw(g::Api& a,const model::Mesh& mesh,const MeshDrawParame
                  path==Path::BumpMapped || path==Path::NormalMapped) {
             attributes();
             const auto baseLights=bumpBaseLights(p);
+            setLights(baseLights.data(),baseLights.size());
             if(!vp(i.lightProgram(k1_programs::Standard,baseLights.data(),baseLights.size())))return false;
             if(p.material.useLightmap) {
                 if(!bind(1,false,p.lightmapTexture,true) || !fp(fixedFogFragment(FixedFragment::Lightmap,p.fog.mode)))return false;

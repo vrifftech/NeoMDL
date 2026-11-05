@@ -336,6 +336,10 @@ vec3 perturbedNormal(vec3 n,vec3 t) {
     return normalize(t*sampleNormal.x+b*sampleNormal.y+n*sampleNormal.z);
 }
 
+vec3 sampleEnvironment(vec3 direction) {
+    return uEnvironmentMode==2 ? textureCube(uEnvironmentCube,direction).rgb
+        : texture2D(uEnvironmentTexture,direction.xy).rgb;
+}
 float fogAmount() {
     float d=uExactK2Skin ? vFogCoordinate : max(0.0,vFogCoordinate);
     if(uFogMode==1) return clamp((uFogData.y-d)/(uFogData.y-uFogData.x),0.0,1.0);
@@ -375,7 +379,7 @@ void main() {
         if(uForceSightCommand==50 || uForceSightCommand==52) {
             vec3 value=base.rgb;
             if(uForceSightCommand==52)
-                value+=texture2D(uEnvironmentTexture,vBitangent.xy).rgb*(1.0-base.a);
+                value+=sampleEnvironment(vBitangent)*(1.0-base.a);
             rgb=dot(value,vec3(0.3,0.59,0.11))*uForceSightColor.rgb+
                 uForceSightColor.rgb*uForceSightColor.a;
             alpha=uForceSightCommand==52?0.8:base.a*0.8;
@@ -390,7 +394,7 @@ void main() {
             if(uForceSightCommand==57 || uForceSightCommand==59)
                 rgb+=base.rgb*texture2D(uLightmapTexture,vUv1).rgb;
             if(uForceSightCommand==58 || uForceSightCommand==59)
-                rgb+=texture2D(uEnvironmentTexture,vBitangent.xy).rgb*(1.0-base.a);
+                rgb+=sampleEnvironment(vBitangent)*(1.0-base.a);
             rgb=vec3(dot(rgb,vec3(0.3,0.59,0.11))*uForceSightDesaturation);
             if(uForceSightCommand==57)alpha=base.a; // original FP's r2.a is unused
             else if(uForceSightCommand==58 || uForceSightCommand==59)alpha=uForceSightColor.a;
@@ -436,7 +440,7 @@ void main() {
         vec3 dirt=uDirtyCommand==68 ? texture2D(uBumpTexture,vDirty.xy).rgb : texture3D(uDirtyTexture,vDirty).rgb;
         vec3 value=base.rgb;
         bool env=uDirtyCommand==47||uDirtyCommand==48||uDirtyCommand==71;
-        if(env)value+=texture2D(uEnvironmentTexture,vBitangent.xy).rgb*(1.0-base.a);
+        if(env)value+=sampleEnvironment(vBitangent)*(1.0-base.a);
         if(uDirtyCommand==45||uDirtyCommand==48)value+=dirt;else value-=dirt;
         vec3 rgb=value*vColor.rgb;
         if(uDirtyCommand!=38)rgb+=value*texture2D(uLightmapTexture,vUv1).rgb;
@@ -467,9 +471,7 @@ void main() {
             // Environment/EMLM VP normalize reflection per VERTEX and rotate
             // to world. Do not normalize the interpolated coordinates again.
             // 2D targets consume reflection.xy, not a sphere-map reassembly.
-            vec3 env=uEnvironmentMode==2
-                ? textureCube(uEnvironmentCube,vBitangent).rgb
-                : texture2D(uEnvironmentTexture,vBitangent.xy).rgb;
+            vec3 env=sampleEnvironment(vBitangent);
             rgb+=(1.0-base.a)*env;
             alpha=uEnvironmentAlpha; // fragment env[0].a; neither texel nor primary alpha
         }
