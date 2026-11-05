@@ -185,6 +185,7 @@ struct RuntimeMaterial {
     TriMeshRenderPath renderPath{TriMeshRenderPath::FlatVP};
     // Material facts retained for the independent RenderSkinnedVP dispatcher.
     bool skinBumpAvailable{};
+    bool skinNormalAvailable{};
     bool skinShinyAvailable{};
     bool skinEnvironmentAvailable{};
     bool engineMaterialEnvironmentAvailable{}; // material slot, excluding owner override

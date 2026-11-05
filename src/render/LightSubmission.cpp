@@ -11,7 +11,8 @@ bool k1RigidMaterial(const MeshDrawParameters& p) noexcept {
 }
 void setEngineBumpLight(const RuntimeLight* light,MeshDrawParameters& p) {
     using Path=material::TriMeshRenderPath;
-    const bool consumes=(p.exactK2SkinVertexProgram && p.material.skinBumpAvailable) ||
+    const bool consumes=(p.exactK2SkinVertexProgram && (p.material.skinBumpAvailable || p.material.skinNormalAvailable)) ||
+        p.material.renderPath==Path::NormalMapped ||
         (k1RigidMaterial(p) && (p.material.renderPath==Path::BumpMapped ||
          p.material.renderPath==Path::LightMappedBumpDiffuse ||
          p.material.renderPath==Path::LightMappedBumpSpecular));
@@ -70,6 +71,9 @@ LightColorSource k2LightColorSource(const MeshDrawParameters& parameters) noexce
         case Path::EMLMVP:
         case Path::EnvironmentMappedVP:
         case Path::LightmappedVP:
+        case Path::NormalMapped:
+        case Path::LightMappedBumpDiffuse:
+        case Path::LightMappedBumpSpecular:
             vertexProgram = true;
             break;
         default: break; // BumpmapFallback calls RenderFlat, not a bump renderer.

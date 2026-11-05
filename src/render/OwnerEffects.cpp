@@ -127,7 +127,7 @@ bool configureOwnerVisualEffects(const OwnerVisualEffects& e,const OwnerEffectTe
     // hologram interception. Reuse that evaluated caller state so the ATI
     // branch does not acquire the rejected ordinary-bump alpha policy.
     const bool specializedSkinBump=mesh.skinned && p.engineSkinVertexPrograms &&
-        (p.material.skinShinyAvailable || p.material.skinBumpAvailable);
+        (p.material.skinShinyAvailable || p.material.skinBumpAvailable || p.material.skinNormalAvailable);
     // PartTriMesh::Mat 0xdb39d..0xdb4dd. Do not fold EnableIllumination into
     // this state: its fragment program has a separate owner color and alpha.
     // K1 DynamicPartCalculateMaterial 0x3f83a0 shares color shift and additive

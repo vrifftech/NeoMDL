@@ -123,9 +123,7 @@ void main() {
 #endif
     }
     float skinFog = length(eye.xyz);
-    // Flat/Environment/EMLM ARB programs write radial distance. The fixed
-    // fallback retains fixed-function eye-z fog; fragment programs without
-    // an ARB_fog option bypass fog entirely.
+    // Vertex-program materials use radial distance; fixed transforms use eye-z.
     bool engineVertex = uMaterialProgram>0 && uMaterialProgram<5;
     vFogCoordinate = (engineVertex || uExactK2Skin || uSkinEffect == 2)
         ? (uSkinEffect == 1 ? -skinFog : skinFog)
@@ -476,10 +474,7 @@ void main() {
             alpha=uEnvironmentAlpha; // fragment env[0].a; neither texel nor primary alpha
         }
         if(uAlphaTest && !(alpha>uAlphaCutoff)) discard;
-        if(uMaterialProgram==1 || uMaterialProgram==5)
-            rgb=mix(uFogColor,rgb,fogAmount());
-        // LM/Env/EMLM fragment programs replace fixed texturing AND fog. None
-        // of the selected ARB strings contains a fog option.
+        rgb=mix(uAdditive ? vec3(0.0) : uFogColor,rgb,fogAmount());
         gl_FragColor=vec4(rgb,alpha);
         return;
     }

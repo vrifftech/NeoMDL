@@ -42,7 +42,7 @@ struct EngineFixedTextureUnit {
 };
 // Numeric values are local GLSL selectors, not engine dispatch indices.
 enum class MaterialProgram : std::uint8_t {
-    Preview, FlatVertex, Lightmap, Environment, EnvironmentLightmap, FlatFixed, SkinBump, SkinBumpyShiny, SkinFlat, SkinEnvironment, Dirty, K1Rigid
+    Preview, FlatVertex, Lightmap, Environment, EnvironmentLightmap, FlatFixed, SkinBump, SkinBumpyShiny, SkinFlat, SkinEnvironment, Dirty, K1Rigid, NormalMapped, SkinNormal
 };
 // Engine texture objects have one retained binding for EACH target at EACH
 // engine texture unit. The host GL bindings are deliberately not this state:

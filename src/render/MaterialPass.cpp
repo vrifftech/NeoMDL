@@ -80,6 +80,9 @@ bool resolveMaterialProgram(const MeshDrawParameters& p, MaterialProgram& progra
         program=p.material.skinEnvironmentAvailable
             ? MaterialProgram::Environment : MaterialProgram::FlatFixed;
     } else if(p.exactK2SkinVertexProgram) {
+        if(p.material.skinNormalAvailable) {
+            program=MaterialProgram::SkinNormal;return true;
+        }
         // RenderSkinnedVP 0x1097e0 tests bumpy-shiny before the separate
         // BumpMapCardValidate / NV2x gates used by ordinary skin bump.
         if(p.material.skinShinyAvailable || p.material.skinBumpAvailable) {
@@ -92,6 +95,9 @@ bool resolveMaterialProgram(const MeshDrawParameters& p, MaterialProgram& progra
             program=MaterialProgram::SkinEnvironment;
         } else program=MaterialProgram::SkinFlat;
         return true;
+    }
+    if(!p.engineCpuSkin && p.material.renderPath==material::TriMeshRenderPath::NormalMapped) {
+        program=MaterialProgram::NormalMapped;return true;
     }
     if(!p.engineCpuSkin && p.material.engineGame==material::EngineMaterialGame::Kotor1) {
         // K1 Desktop Draw dispatches the non-VP paths selected by GetRenderPath.

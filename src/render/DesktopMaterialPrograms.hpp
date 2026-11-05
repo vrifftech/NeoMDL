@@ -1,5 +1,6 @@
 #pragma once
 #include "render/GlApi.hpp"
+#include <model/Lighting.hpp>
 #include <array>
 #include <cstddef>
 #include <map>
@@ -46,6 +47,7 @@ struct LegacyGuard {
     ~LegacyGuard();
 };
 const char* standardFogFragment(bool kotor1);
+const std::string& fogFragment(std::string_view source,model::FogMode);
 struct ProgramCache {
     g::Loader loader; LegacyApi x; bool ready{};
     std::map<std::string,g::UInt,std::less<>> programs;

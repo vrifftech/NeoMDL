@@ -679,7 +679,8 @@ bool ShaderMeshRenderer::drawPrepared(const neomdl::model::Mesh& mesh,
         else if(engineProgram==MaterialProgram::Environment) {command=19;cube=p.environmentCube;ordinaryFragmentCleanup=32;}
         else if(engineProgram==MaterialProgram::EnvironmentLightmap) {command=22;cube=p.lightmapCube;ordinaryFragmentCleanup=37;}
         if(command)if(const auto* fragment=desktop_programs::k2FragmentProgram(command,cube)) {
-            nextMaterialState.bindFragmentProgram(fragment);
+            nextMaterialState.bindFragmentProgram(command==19 || command==22 || command==26
+                ? desktop_programs::fogFragment(fragment,p.fog.mode) : std::string_view(fragment));
             if(command==75)nextMaterialState.fragmentConstants[7]={{.3f,.59f,.11f,.75f}};
             if(command==78||command==79)nextMaterialState.fragmentConstants[1]={{
                 p.ownerIllumination[0],p.ownerIllumination[1],p.ownerIllumination[2],1}};
@@ -697,9 +698,9 @@ bool ShaderMeshRenderer::drawPrepared(const neomdl::model::Mesh& mesh,
         return true;
     }
     if(desktopFixedFragment && !i.prepareFixed(error))return false;
-    const bool engineSkin=engineProgram==MaterialProgram::SkinBump || engineProgram==MaterialProgram::SkinBumpyShiny ||
+    const bool engineSkin=engineProgram==MaterialProgram::SkinBump || engineProgram==MaterialProgram::SkinNormal || engineProgram==MaterialProgram::SkinBumpyShiny ||
             engineProgram==MaterialProgram::SkinFlat || engineProgram==MaterialProgram::SkinEnvironment;
-    const bool k1Rigid=engineProgram==MaterialProgram::K1Rigid;
+    const bool k1Rigid=engineProgram==MaterialProgram::K1Rigid || engineProgram==MaterialProgram::NormalMapped;
     StateGuard restore(a,i.sceneActive ? 0 : (engineSkin || k1Rigid ? 15 : 9),!i.sceneActive,
         !i.sceneActive || p.outlineOnly || p.engineShadowPass!=EngineShadowPass::None ||
         (k1DesktopScene && p.lightsaberPass && p.oneOneBlend));

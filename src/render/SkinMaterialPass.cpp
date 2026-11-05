@@ -42,7 +42,7 @@ std::vector<PreviewLight> baseLights(const MeshDrawParameters& p,MaterialProgram
     std::vector<PreviewLight> lights;
     for(std::size_t n=0;n<std::min(p.lightCount,p.lights.size());++n) {
         const auto& light=p.lights[n];
-        if(program==MaterialProgram::SkinBump && std::any_of(p.skinBumpLights.begin(),p.skinBumpLights.end(),
+        if((program==MaterialProgram::SkinBump || program==MaterialProgram::SkinNormal) && std::any_of(p.skinBumpLights.begin(),p.skinBumpLights.end(),
             [&](const EngineBumpLight& bump){return bump.id==light.id;}))continue;
         lights.push_back(light);
     }
@@ -72,6 +72,9 @@ std::vector<EngineSkinVertex> engineSkinVertices(const model::Mesh& mesh,const m
         const auto& v=mesh.vertices[n];const auto& influence=channels[n];
         EngineSkinVertex out{v.position,mesh.normalAt(n),influence.weights,influence.indices,v.texcoord0,
             v.tangentBasis.bitangent,v.tangentBasis.tangent,v.tangentBasis.normal};
+        if(mesh.mdxTangentOffset==0xffffffffu) {
+            out.basis4={1,0,0};out.basis5={0,1,0};out.basis6={0,0,1};
+        }
         vertices.push_back(out);
     }
     return vertices;
@@ -106,7 +109,7 @@ bool SkinMaterialPass::prepare(g::Api& a,const MeshDrawParameters& p,MaterialPro
         if(p.material.engineHardware.arbFragmentPrograms)
             for(const unsigned command:{50u,52u,56u,58u,92u})
                 if(!i.program(a,FP,skinForceFragment(command),error))return false;
-        if(type==MaterialProgram::SkinBump && p.fog.mode!=model::FogMode::Disabled &&
+        if((type==MaterialProgram::SkinBump || type==MaterialProgram::SkinNormal) && p.fog.mode!=model::FogMode::Disabled &&
            (!i.program(a,VP,skin_programs::Fog,error)||!i.program(a,FP,skin_programs::FogFragment,error)))return false;
     } else if(type==MaterialProgram::SkinFlat || type==MaterialProgram::SkinEnvironment) {
         if(!i.program(a,VP,litSkin(i,lights,type==MaterialProgram::SkinEnvironment),error))return false;
@@ -119,11 +122,11 @@ bool SkinMaterialPass::prepare(g::Api& a,const MeshDrawParameters& p,MaterialPro
                   !i.program(a,FP,desktop_programs::standardFogFragment(p.material.engineGame==material::EngineMaterialGame::Kotor1),error))return false;
     } else {
         const char* first=type==MaterialProgram::SkinBumpyShiny?skin_programs::Shiny:
-            p.material.engineNewSkinBump?skin_programs::Bump:skin_programs::OldBump;
+            (type==MaterialProgram::SkinNormal || p.material.engineNewSkinBump)?skin_programs::Bump:skin_programs::OldBump;
         if(!i.program(a,VP,first,error) || !i.program(a,FP,type==MaterialProgram::SkinBumpyShiny?
             skin_programs::ShinyFragment:skin_programs::BumpFragment,error) ||
            !i.program(a,VP,litSkin(i,lights),error))return false;
-        if(type==MaterialProgram::SkinBump && p.fog.mode!=model::FogMode::Disabled &&
+        if((type==MaterialProgram::SkinBump || type==MaterialProgram::SkinNormal) && p.fog.mode!=model::FogMode::Disabled &&
            (!i.program(a,VP,skin_programs::Fog,error)||!i.program(a,FP,skin_programs::FogFragment,error)))return false;
     }
     return true;
@@ -343,27 +346,26 @@ bool SkinMaterialPass::draw(g::Api& a,const model::Mesh& mesh,const model::Defor
         a.Disable(Fog);
         if(!force) {
             if(!bind(0,false,p.bumpTexture,true)||!bind(1,true,normalization,false)||!bind(2,true,normalization,false)||!bind(3,false,p.diffuseTexture,true))return false;
-            blend(p.material.engineNewSkinBump?g::One:g::SrcAlpha,p.material.engineNewSkinBump?g::Zero:g::OneMinusSrcAlpha);
+            const bool newBump=type==MaterialProgram::SkinNormal || p.material.engineNewSkinBump;
+            a.Enable(g::Blend);blend(newBump?g::One:g::SrcAlpha,newBump?g::Zero:g::OneMinusSrcAlpha);
             const auto camera=localPoint(partWorld,{p.worldFromEye.values[12],p.worldFromEye.values[13],p.worldFromEye.values[14]});
-            const std::size_t iterations=std::max<std::size_t>(1,p.skinBumpLights.size());
-            for(std::size_t n=0;n<iterations;++n){
-                if(!p.skinBumpLights.empty()){
-                    const auto& light=p.skinBumpLights[n];const auto position=localPoint(partWorld,light.position);
-                    state.bumpVertexConstants[0]={{position.x,position.y,position.z,1}};
-                    state.bumpVertexConstants[1]={{camera.x,camera.y,camera.z,1}};
-                    state.bumpVertexConstants[2]={{1,0,9.0f/(2.0f*light.radius*light.radius),1}};
-                    if(engineFragmentDispatch) {
+            for(const auto& light:p.skinBumpLights){
+                const auto position=localPoint(partWorld,light.position);
+                state.bumpVertexConstants[0]={{position.x,position.y,position.z,1}};
+                state.bumpVertexConstants[1]={{camera.x,camera.y,camera.z,1}};
+                state.bumpVertexConstants[2]={{1,0,9.0f/(2.0f*light.radius*light.radius),1}};
+                if(engineFragmentDispatch) {
                     state.fragmentConstants[0]={{p.material.engineSpecularColor[0]*p.material.engineBumpIntensity*light.color[0],p.material.engineSpecularColor[1]*p.material.engineBumpIntensity*light.color[1],p.material.engineSpecularColor[2]*p.material.engineBumpIntensity*light.color[2],1}};
                     state.fragmentConstants[1]={{mesh.ambient.x*light.color[0],mesh.ambient.y*light.color[1],mesh.ambient.z*light.color[2],1}};
-                    }
-                }else if(engineFragmentDispatch){state.fragmentConstants[0]={{0,0,0,1}};state.fragmentConstants[1]={{0,0,0,1}};}
+                }
                 for(unsigned k=0;k<3;++k)constants[12+k]=state.bumpVertexConstants[k];
-                if(!vp(p.material.engineNewSkinBump?skin_programs::Bump:skin_programs::OldBump)||!fp(skin_programs::BumpFragment))return false;
+                if(!vp(newBump?skin_programs::Bump:skin_programs::OldBump)||!fp(skin_programs::BumpFragment))return false;
                 draw();
+                if(newBump)blend(g::One,g::One);
             }
         }
         if(engineFragmentDispatch)state.finishFragmentCommand(13,p.material.engineGame==material::EngineMaterialGame::Kotor1);
-        cleanup();blend(g::One,g::One);constants[15]={{1,1,1,1}};
+        cleanup();blend(g::One,force||p.skinBumpLights.empty()?g::Zero:g::One);constants[15]={{1,1,1,1}};
         if(!vp(litSkin(i,base))||!bind(0,false,p.diffuseTexture,true))return false;
         x.TexEnvi(0x2300,0x2200,0x2100);a.Disable(Fog);a.Disable(g::AlphaTest);
         if(force&&!forceSetup())return false;

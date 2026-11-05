@@ -5,6 +5,34 @@
 #include <cstring>
 #include <stdexcept>
 namespace neomdl::render::desktop_programs {
+const std::string& fogFragment(std::string_view source,model::FogMode mode) {
+    static std::map<std::string,std::array<std::string,4>,std::less<>> sources;
+    auto found=sources.find(source);
+    if(found==sources.end())found=sources.emplace(std::string(source),std::array<std::string,4>{}).first;
+    auto& text=found->second[static_cast<unsigned>(mode)];
+    if(!text.empty())return text;
+    text=source;
+    if(mode!=model::FogMode::Disabled) {
+        for(std::size_t at=0;(at=text.find("result.color",at))!=std::string::npos;at+=9)
+            text.replace(at,12,"fogOutput");
+        text.insert(text.find('\n')+1,"TEMP fogOutput, fogValue;\n"
+            "PARAM fogSettings = state.fog.params;\nPARAM fogTint = state.fog.color;\n");
+        text.erase(text.rfind("END"));
+        text+="ABS fogValue.x, fragment.fogcoord.x;\n";
+        if(mode==model::FogMode::Linear)
+            text+="SUB fogValue.x, fogSettings.z, fogValue.x;\n"
+                  "MUL_SAT fogValue.x, fogValue.x, fogSettings.w;\n";
+        else {
+            text+="MUL fogValue.x, fogSettings.x, fogValue.x;\n";
+            if(mode==model::FogMode::ExponentialSquared)
+                text+="MUL fogValue.x, fogValue.x, fogValue.x;\n";
+            text+="MUL fogValue.x, fogValue.x, -1.442695041;\nEX2_SAT fogValue.x, fogValue.x;\n";
+        }
+        text+="LRP result.color.rgb, fogValue.x, fogOutput, fogTint;\n"
+              "MOV result.color.a, fogOutput.a;\nEND\n";
+    }
+    return text;
+}
 const char* standardFogFragment(bool kotor1) {
     // K1 ATI initialization0x2e3abd invokes MOV through the two-argument
     // wrapper; shim0xc77e delegates it to Op1 and ignores argument2.

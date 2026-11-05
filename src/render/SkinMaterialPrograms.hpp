@@ -241,6 +241,7 @@ DP3   vReg1.z, vertex.attrib[14], boneArray[A0.x + 2];
 MAD   vReg10,vWght.w, vReg1, vReg6
 ;MOV   vReg9.w, program.local[16].w;
 MOV   vReg10.w, program.local[16].w;
+MOV   vReg6, vReg10;
 DP4   result.position.x, mvpMatrix[0], vReg9;
 DP4   result.position.y, mvpMatrix[1], vReg9;
 DP4   result.position.z, mvpMatrix[2], vReg9;
@@ -284,7 +285,10 @@ DP3   vReg1.y, vReg5, vReg2;
 DP3   vReg1.z, vReg6, vReg2;
 MOV   vReg1.w, program.local[16].w;
 MOV   result.texcoord[2], vReg1;
-
+MOV   result.color, {0.0, 0.0, 0.0, 1.0};
+DP3   vReg10.w, vReg10, vReg10;
+RSQ   vReg10.w, vReg10.w;
+RCP   result.fogcoord.x, vReg10.w;
 END
 )ARB";
 inline constexpr char OldBump[] = R"ARB(!!ARBvp1.0
@@ -562,12 +566,13 @@ TEX r2, T2, texture[2], CUBE;
 TEX r3, T3, texture[3], 2D;
 MAD  rTemp0,  r0, 2.0, -1.0;
 MAD  rTemp1,  r2, 2.0, -1.0;
-DP3 r5.rgb, rTemp0, rTemp1;
+DP3_SAT r5.rgb, rTemp0, rTemp1;
+CMP r5.rgb, rTemp1.z, 0.0, r5;
 MAD  rTemp1,  r1, 2.0, -1.0;
-DP3 r4.rgb, rTemp0, rTemp1;
-MUL r0.rgb, r5, r5;
+DP3_SAT r4.rgb, rTemp0, rTemp1;
+MUL r5.rgb, r5, r5;
 MOV r5.rgb, r5.b;
-MUL r0.rgb, r4, c[1];
+MUL r4.rgb, r4, c[1];
 MUL r5.a, r5.r, r5.r;
 MUL r0.rgb, r4, v1;
 MUL r1.rgb, v1, c[0];

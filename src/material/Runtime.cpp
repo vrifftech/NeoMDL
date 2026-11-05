@@ -108,7 +108,7 @@ K2HardwareSelection selectK2HardwareCapabilities(const K2HardwareInputs& inputs)
     K2HardwareSelection result;
     result.arbFragmentPrograms=has(ArbFragmentProgram);
     result.atiValidation=has(AtiFragmentShader) && (inputs.useAtiFragmentShaders&1)!=0;
-    result.bumpMapCardValidation=!result.atiValidation;
+    result.bumpMapCardValidation=result.arbFragmentPrograms || !result.atiValidation;
     result.nonRadeon8500Validation=!result.atiValidation || has(ArbDepthTexture);
     result.multitexture=has(Multitexture);
     result.cubeMap=has(CubeMap|Multitexture);
@@ -207,8 +207,10 @@ EnginePartTriMeshSelection selectEnginePartTriMeshRenderPath(
     if(game==EngineMaterialGame::Kotor2)
         result.waterAlpha=finite(result.waterAlpha,1.0f);
     result.bumpMap=k2BumpMap(material);
-    // Material::HasNormalMap is a literal false in the K1/K2 builds.
-    result.normalMap=false;
+    result.normalMap=result.bumpMap && props(material.bumpMap).engineBumpMapKind.value_or(
+        static_cast<std::int32_t>(props(material.bumpMap).bumpMapKind.value_or(
+            neoshared::material::BumpMapKind::None)))==2 &&
+        material.bumpMap.metadata->facts.engineBytesPerPixel==4;
     result.bumpyShinyMap=k2BumpyShinyMap(material);
     result.tangentBases=inputs.tangentBases;
     result.environmentMap=k2EnvironmentMap(material) || inputs.ownerEnvironmentMap;
@@ -380,6 +382,8 @@ RuntimeMaterial evaluateEnginePartTriMeshMaterial(
     result.skinBumpAvailable=selection.bumpMap && selection.tangentBases &&
         inputs.enableBumpMap && inputs.nv2xLevelShaders &&
         result.engineHardware.nv2xLevelShaders && result.engineHardware.bumpMapCardValidation;
+    result.skinNormalAvailable=selection.normalMap && !selection.tangentBases &&
+        inputs.enableBumpMap && inputs.nv2xLevelShaders && result.engineHardware.nv2xLevelShaders;
     result.engineSkinBumpFallback=selection.bumpMap && selection.tangentBases &&
         (!result.engineHardware.nv2xLevelShaders || !result.engineHardware.bumpMapCardValidation);
     result.skinEnvironmentAvailable=selection.environmentMap;
@@ -389,7 +393,7 @@ RuntimeMaterial evaluateEnginePartTriMeshMaterial(
         result.useEnvironmentMap=result.engineMaterialEnvironmentAvailable;
     if(surface.skinned) {
         result.useLightmap=false;
-        result.useBumpMap=result.skinBumpAvailable || result.skinShinyAvailable;
+        result.useBumpMap=result.skinBumpAvailable || result.skinShinyAvailable || result.skinNormalAvailable;
         result.useEnvironmentMap=result.skinShinyAvailable || result.skinEnvironmentAvailable;
     }
 

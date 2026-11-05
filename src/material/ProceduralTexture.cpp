@@ -590,6 +590,8 @@ std::vector<ProcedureImage> procedureNormalLevels(const ProcedureImage& image,fl
     if(authoredNormal) {
         if(image.bytes.size()<first.bytes.size())throw std::invalid_argument("Authored normal upload has fewer than four bytes per output pixel");
         std::copy_n(image.bytes.begin(),first.bytes.size(),first.bytes.begin());
+        for(std::size_t texel=0;texel<first.bytes.size();texel+=4)
+            std::swap(first.bytes[texel],first.bytes[texel+2]);
     } else {
         for(unsigned y=0;y<h;++y)for(unsigned x=0;x<w;++x) {
             const float v=float(image.bytes[std::size_t(y)*image.width+x])*bits(0x3b808081);
