@@ -132,20 +132,30 @@ std::vector<PreviewLight> bumpBaseLights(const MeshDrawParameters& p) {
     return lights;
 }
 const std::string bumpVertex=std::string(k1_programs::Bump)+"END\n";
+const std::string lightmapBumpVertex=std::string(k1_programs::Bump)+
+    "MOV result.texcoord[4], vertex.attrib[9];\n";
 const std::string& lightmapBumpFragment(bool specular,model::FogMode fog) {
     static const std::array<std::string,2> sources=[] {
         std::array<std::string,2> result;
         for(unsigned specular=0;specular<2;++specular) {
-            result[specular]="!!ARBfp1.0\nTEMP normal, direction, amount, base;\n"
+            result[specular]="!!ARBfp1.0\nTEMP normal, direction, amount, base, lightmap, value;\n"
                 "PARAM lightColor = program.local["+std::to_string(specular?0:1)+"];\n"
                 "TEX normal, fragment.texcoord[0], texture[0], 2D;\n"
                 "TEX direction, fragment.texcoord["+std::to_string(specular?2:1)+"], texture[1], CUBE;\n"
+                "TEX lightmap, fragment.texcoord[4], texture[2], 2D;\n"
+                "TEX base, fragment.texcoord[3], texture[3], 2D;\n"
                 "MAD normal.xyz, normal, 2.0, -1.0;\nMAD direction.xyz, direction, 2.0, -1.0;\n"
                 "DP3_SAT amount.x, normal, direction;\n"
-                "MUL amount.rgb, amount.x, fragment.color.secondary;\n"
-                "MUL amount.rgb, amount, lightColor;\n";
-            if(!specular)result[specular]+="TEX base, fragment.texcoord[0], texture[3], 2D;\nMUL amount.rgb, amount, base;\n";
-            result[specular]+="MOV result.color.rgb, amount;\nMOV result.color.a, 0.0;\nEND\n";
+                "MUL value.rgb, fragment.color.secondary, lightColor;\n";
+            if(specular)result[specular]+=
+                "MUL lightmap.rgb, lightmap, base;\n"
+                "MAD_SAT lightmap.rgb, fragment.color.primary, base, lightmap;\n"
+                "MAD_SAT result.color.rgb, amount.x, value, lightmap;\n";
+            else result[specular]+=
+                "MAD_SAT value.rgb, amount.x, value, fragment.color.primary;\n"
+                "ADD_SAT value.rgb, value, lightmap;\n"
+                "MUL result.color.rgb, value, base;\n";
+            result[specular]+="MOV result.color.a, 1.0;\nEND\n";
         }
         return result;
     }();
@@ -202,11 +212,13 @@ bool K1MaterialPass::prepare(g::Api& a,const MeshDrawParameters& p,std::string& 
     case Path::BumpMapped:
     case Path::NormalMapped: {
         const auto lights=bumpBaseLights(p);
+        if(p.material.useLightmap&&!p.skinBumpLights.empty())
+            return i.program(a,VP,i.lightProgram(lightmapBumpVertex,lights.data(),lights.size()),error)&&
+                i.program(a,FP,lightmapBumpFragment(selectedPath(p)==Path::LightMappedBumpSpecular,p.fog.mode),error);
         if(!i.program(a,VP,i.lightProgram(k1_programs::Standard,lights.data(),lights.size()),error))return false;
         if(p.material.useLightmap&&!i.program(a,FP,fixedFogFragment(FixedFragment::Lightmap,p.fog.mode),error))return false;
         return p.skinBumpLights.empty() || (i.program(a,VP,bumpVertex,error) &&
-            i.program(a,FP,p.material.useLightmap?lightmapBumpFragment(selectedPath(p)==Path::LightMappedBumpSpecular,p.fog.mode):
-                fixedFogFragment(FixedFragment::Bump,p.fog.mode),error));
+            i.program(a,FP,fixedFogFragment(FixedFragment::Bump,p.fog.mode),error));
     }
     default:return true;
     }
@@ -373,16 +385,20 @@ bool K1MaterialPass::draw(g::Api& a,const model::Mesh& mesh,const MeshDrawParame
             attributes();
             const auto baseLights=bumpBaseLights(p);
             setLights(baseLights.data(),baseLights.size());
-            if(!vp(i.lightProgram(k1_programs::Standard,baseLights.data(),baseLights.size())))return false;
-            if(p.material.useLightmap) {
-                if(!bind(1,false,p.lightmapTexture,true) || !fp(fixedFogFragment(FixedFragment::Lightmap,p.fog.mode)))return false;
+            const bool combined=p.material.useLightmap&&!p.skinBumpLights.empty();
+            if(!combined) {
+                if(!vp(i.lightProgram(k1_programs::Standard,baseLights.data(),baseLights.size())))return false;
+                if(p.material.useLightmap) {
+                    if(!bind(1,false,p.lightmapTexture,true) || !fp(fixedFogFragment(FixedFragment::Lightmap,p.fog.mode)))return false;
+                }
+                draw();
+                a.Disable(g::AlphaTest);a.Enable(g::Blend);a.Disable(Fog);
+                a.BlendFuncSeparate(g::One,g::One,g::Zero,g::One);
+                x.Fogfv(0x0b66,zero.data());
             }
-            draw();
-            a.Disable(g::AlphaTest);a.Enable(g::Blend);a.Disable(Fog);
-            a.BlendFuncSeparate(g::One,g::One,g::Zero,g::One);
-            x.Fogfv(0x0b66,zero.data());
             if(!bind(0,false,p.bumpTexture,true) || !bind(1,true,normalization,false) ||
-               !bind(2,true,normalization,false) || !bind(3,false,p.diffuseTexture,true))return false;
+               !bind(2,!combined,combined?p.lightmapTexture:normalization,combined) ||
+               !bind(3,false,p.diffuseTexture,true))return false;
             const auto local=[&](model::Vec3 q){return engineRotate(engineInverse(p.enginePartOrientation),
                 {q.x-p.enginePartPosition.x,q.y-p.enginePartPosition.y,q.z-p.enginePartPosition.z});};
             const auto camera=local({p.worldFromEye.values[12],p.worldFromEye.values[13],p.worldFromEye.values[14]});
@@ -397,7 +413,7 @@ bool K1MaterialPass::draw(g::Api& a,const model::Mesh& mesh,const MeshDrawParame
                     state.fragmentConstants[1][c]=light.color[c]*diffuse[c]*p.material.engineDiffuseBumpIntensity;
                 }
                 state.fragmentConstants[0][3]=state.fragmentConstants[1][3]=1;
-                if(!vp(bumpVertex) || !fp(p.material.useLightmap?
+                if(!vp(combined?i.lightProgram(lightmapBumpVertex,baseLights.data(),baseLights.size()):bumpVertex) || !fp(combined?
                     lightmapBumpFragment(path==Path::LightMappedBumpSpecular,p.fog.mode):
                     fixedFogFragment(FixedFragment::Bump,p.fog.mode)))return false;
                 draw();
