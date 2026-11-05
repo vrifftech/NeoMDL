@@ -1,0 +1,8 @@
+[Desktop Entry]
+Type=Application
+Name=NeoMDL
+Comment=Odyssey MDL/MDX model editor
+Exec=NeoMDL %f
+Icon=neomdl
+Terminal=false
+Categories=Graphics;3DGraphics;Development;

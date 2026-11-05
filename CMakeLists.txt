@@ -265,6 +265,7 @@ if(NEOMDL_BUILD_WX_GUI OR NEOMDL_BUILD_WX_MODULE)
 
         if(NEOMDL_BUILD_WX_GUI)
             if(WIN32)
+                enable_language(RC)
                 add_executable(NeoMDL WIN32 src/wx/main.cpp)
             elseif(APPLE)
                 add_executable(NeoMDL MACOSX_BUNDLE src/wx/main.cpp)
@@ -279,16 +280,29 @@ if(NEOMDL_BUILD_WX_GUI OR NEOMDL_BUILD_WX_MODULE)
                 PRODUCT_NAME "NeoMDL"
                 FILE_DESCRIPTION "Odyssey MDL/MDX model renderer"
                 INTERNAL_NAME "NeoMDL"
-                ORIGINAL_FILENAME "NeoMDL.exe")
+                ORIGINAL_FILENAME "NeoMDL.exe"
+                ICON "${CMAKE_CURRENT_SOURCE_DIR}/resources/neomdl.ico")
             if(APPLE)
                 neo_configure_macos_bundle(NeoMDL
                     NAME "NeoMDL"
                     IDENTIFIER "com.vrifftech.neomdl"
+                    ICON "${CMAKE_CURRENT_SOURCE_DIR}/resources/neomdl.icns"
                     VERSION "${PROJECT_VERSION}")
             endif()
             install(TARGETS NeoMDL
                 RUNTIME DESTINATION ${CMAKE_INSTALL_BINDIR}
                 BUNDLE DESTINATION .)
+            if(UNIX AND NOT APPLE)
+                foreach(NEO_ICON_SIZE 16 24 32 48 64 128 256 512)
+                    install(FILES resources/icons/${NEO_ICON_SIZE}x${NEO_ICON_SIZE}/neomdl.png
+                        DESTINATION ${CMAKE_INSTALL_DATAROOTDIR}/icons/hicolor/${NEO_ICON_SIZE}x${NEO_ICON_SIZE}/apps)
+                endforeach()
+                install(FILES resources/neomdl.svg
+                    DESTINATION ${CMAKE_INSTALL_DATAROOTDIR}/icons/hicolor/scalable/apps)
+                configure_file(resources/neomdl.desktop.in ${CMAKE_CURRENT_BINARY_DIR}/neomdl.desktop @ONLY)
+                install(FILES ${CMAKE_CURRENT_BINARY_DIR}/neomdl.desktop
+                    DESTINATION ${CMAKE_INSTALL_DATAROOTDIR}/applications)
+            endif()
         endif()
     elseif(NEOMDL_REQUIRE_WX_GUI)
         message(FATAL_ERROR "NeoMDL wx targets require wxWidgets core/base/adv/aui/gl/stc and OpenGL.")

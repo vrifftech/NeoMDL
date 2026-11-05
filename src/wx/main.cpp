@@ -6,7 +6,7 @@
 
 #include <wx/app.h>
 #include <wx/frame.h>
-#include <wx/iconbndl.h>
+#include <wx/icon.h>
 #include <wx/image.h>
 #include <wx/sizer.h>
 
@@ -15,10 +15,7 @@ namespace {
 class NeoMDLFrame final : public wxFrame {
 public:
     NeoMDLFrame() : wxFrame(nullptr, wxID_ANY, "NeoMDL") {
-        wxIconBundle icons;
-        wxIcon fallback(neomdl_icon_xpm);
-        if (fallback.IsOk()) icons.AddIcon(fallback);
-        SetIcons(icons);
+        SetIcon(wxIcon(neomdl_icon_xpm));
 
         neomodules::Context context;
         context.titleChanged = [this](const wxString& title) { SetTitle(title); };
