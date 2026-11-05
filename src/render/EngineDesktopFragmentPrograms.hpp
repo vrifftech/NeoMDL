@@ -194,7 +194,7 @@ PARAM c1 = program.local[1];
 TEMP r0, r1, r2, r3, r4;
 TEX r0, T0, texture[0], 2D;
 TEX r1, T1, texture[1], 2D;
-TEX r2, T2, texture[2], 2D;
+TEX r2, T2, texture[2], 3D;
 SUB r3.rgb, r0, r2;
 MUL r4.rgb, r3, r1;
 MOV r0.a, 1;
@@ -295,6 +295,13 @@ MOV r0.a, c1.a;
 MOV result.color, r0;
 END
 )ARB";
+
+inline const std::string SphereEnvironmentIllumination=[] {
+    std::string source=EnvironmentIllumination;
+    const std::string sampler="texture[1], CUBE";
+    source.replace(source.find(sampler),sampler.size(),"texture[1], 2D");
+    return source;
+}();
 
 // Text0x52d7e4, engine object0x5e9ae4.
 inline constexpr char Dirty[] = R"ARB(!!ARBfp1.0
@@ -403,8 +410,8 @@ inline const char* k2FragmentProgram(unsigned command,bool cube=false) {
     case 38:return Dirty;
     case 44:return DirtyLightmapMultiply;
     case 45:return DirtyLightmapAdd;
-    case 47:return DirtyEnvironmentLightmapMultiply;
-    case 48:return DirtyEnvironmentLightmapAdd;
+    case 47:return cube?cubeEnvironmentFragment(DirtyEnvironmentLightmapMultiply,2):DirtyEnvironmentLightmapMultiply;
+    case 48:return cube?cubeEnvironmentFragment(DirtyEnvironmentLightmapAdd,2):DirtyEnvironmentLightmapAdd;
     case 50:return skin_programs::ForceGlow;
     case 52:return cube?cubeEnvironmentFragment(skin_programs::ForceEnvironmentGlow,1):skin_programs::ForceEnvironmentGlow;
     case 55:return BumpGlow;
@@ -413,11 +420,11 @@ inline const char* k2FragmentProgram(unsigned command,bool cube=false) {
     case 58:return cube?cubeEnvironmentFragment(skin_programs::ForceEnvironmentDesaturate,1):skin_programs::ForceEnvironmentDesaturate;
     case 59:return cube?cubeEnvironmentFragment(EnvironmentLightmapDesaturate,2):EnvironmentLightmapDesaturate;
     case 68:return DirtyLightmapDesaturate;
-    case 71:return DirtyEnvironmentLightmapDesaturate;
+    case 71:return cube?cubeEnvironmentFragment(DirtyEnvironmentLightmapDesaturate,2):DirtyEnvironmentLightmapDesaturate;
     case 75:return Hologram;
     case 76:return HologramDesaturate;
     case 78:return Illumination;
-    case 79:return EnvironmentIllumination;
+    case 79:return cube?EnvironmentIllumination:SphereEnvironmentIllumination.c_str();
     case 92:return skin_programs::ForceIlluminationDesaturate;
     case 93:return skin_programs::ForceIlluminationDesaturate;
     case 19:return cube?skin_programs::CubeEnvironmentFragment:skin_programs::EnvironmentFragment;

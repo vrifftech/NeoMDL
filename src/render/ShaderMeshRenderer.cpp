@@ -526,6 +526,7 @@ bool ShaderMeshRenderer::drawPrepared(const neomdl::model::Mesh& mesh,
         engineK1Draw?mesh.engineDrawIndices:mesh.indices;
     const auto& drawBatches=p.engineCpuSkin?cpuSource->draws:mesh.engineDraws;
     const bool cpuBumpFallback=p.engineCpuSkin && p.material.engineSkinBumpTangent &&
+        p.skinOwnerAlpha>=1.0f && p.material.vertexOpacity>=1.0f &&
         (!p.material.engineHardware.nv1xLevelShaders || p.material.engineAtiValidation) &&
         !p.material.skinEnvironmentAvailable && p.skinEffect==SkinRenderEffect::None;
 
@@ -674,7 +675,7 @@ bool ShaderMeshRenderer::drawPrepared(const neomdl::model::Mesh& mesh,
         else if(p.ownerFragment==OwnerFragmentEffect::Illumination) {
             if(p.material.engineHardware.nv1xLevelShaders)command=78;
             ordinaryFragmentCleanup=0;
-        } else if(p.ownerFragment==OwnerFragmentEffect::IlluminationEnvironment) {command=79;ordinaryFragmentCleanup=32;}
+        } else if(p.ownerFragment==OwnerFragmentEffect::IlluminationEnvironment) {command=79;cube=p.environmentCube;ordinaryFragmentCleanup=32;}
         else if(engineProgram==MaterialProgram::Lightmap) {command=26;ordinaryFragmentCleanup=32;}
         else if(engineProgram==MaterialProgram::Environment) {command=19;cube=p.environmentCube;ordinaryFragmentCleanup=32;}
         else if(engineProgram==MaterialProgram::EnvironmentLightmap) {command=22;cube=p.environmentCube;ordinaryFragmentCleanup=37;}
@@ -1050,7 +1051,7 @@ bool ShaderMeshRenderer::drawPrepared(const neomdl::model::Mesh& mesh,
         a.Uniform1i(u.basisDebug,std::clamp(p.basisDebug,0,3));
         const auto& material=p.material;
         a.ActiveTexture(g::Texture0+2); a.BindTexture(g::Texture2D,
-            (useBump || (dirty&&!dirtyPlan.samplesVolume)) ? p.bumpTexture : 0u);
+            useBump ? p.bumpTexture : 0u);
         a.ActiveTexture(g::Texture0+3); a.BindTexture(g::Texture2D,
             useEnvironment && !p.environmentCube ? p.environmentTexture : 0u);
         a.ActiveTexture(g::Texture0+4); a.BindTexture(g::TextureCube,

@@ -23,7 +23,7 @@ enum class DirtyTextureRole { Diffuse, Environment, Lightmap, Volume };
 struct DirtyBindingEvent { DirtyTextureRole role; unsigned unit; };
 struct DirtyMaterialPlan {
     unsigned command{},cleanupCommand{32},volumeUnit{};
-    bool lightmap{},environment{},add{},desaturate{},forceLinear{},samplesVolume{true};
+    bool lightmap{},environment{},add{},desaturate{},forceLinear{};
     std::vector<DirtyBindingEvent> binds;
     bool fixedDispatch{};
 };

@@ -19,7 +19,9 @@ using Path=material::TriMeshRenderPath;
 Path selectedPath(const MeshDrawParameters& p) {
     if(!p.engineCpuSkin)return p.material.renderPath;
     if(p.material.skinEnvironmentAvailable)return Path::EnvironmentMapped;
-    return p.material.engineSkinBumpTangent&&(!p.material.engineHardware.nv1xLevelShaders||p.material.engineAtiValidation)?Path::BumpmapFallback:Path::Flat;
+    return p.skinOwnerAlpha>=1.0f && p.material.vertexOpacity>=1.0f &&
+        p.material.engineSkinBumpTangent&&(!p.material.engineHardware.nv1xLevelShaders||p.material.engineAtiValidation)
+        ?Path::BumpmapFallback:Path::Flat;
 }
 #define K1_FIXED_GL(X) \
  X(g::Boolean,IsTexture,(g::UInt)) \
@@ -250,7 +252,8 @@ bool K1MaterialPass::draw(g::Api& a,const model::Mesh& mesh,const MeshDrawParame
     const auto blend=[&](g::Enum s,g::Enum d){a.BlendFuncSeparate(s,d,s,d);};
     blend(p.material.blendFunction==material::BlendFunction::Replace?g::One:g::SrcAlpha,p.material.blendFunction==material::BlendFunction::Replace?g::Zero:p.material.blendFunction==material::BlendFunction::Additive?g::One:g::OneMinusSrcAlpha);
     enabled(a,g::AlphaTest,p.material.alphaTest);x.AlphaFunc(0x0204,p.material.alphaCutoff);
-    const float fog[]={p.fog.color.x,p.fog.color.y,p.fog.color.z,1};x.Fogfv(0x0b66,fog);x.Fogf(0x0b63,p.fog.start);x.Fogf(0x0b64,p.fog.end);x.Fogf(0x0b62,p.fog.density);x.Fogf(0x0b65,static_cast<float>(p.fog.mode==model::FogMode::Exponential?0x800:p.fog.mode==model::FogMode::ExponentialSquared?0x801:0x2601));enabled(a,Fog,p.fog.mode!=model::FogMode::Disabled);
+    const auto fogTint=p.material.blendFunction==material::BlendFunction::Additive?model::Vec3{}:p.fog.color;
+    const float fog[]={fogTint.x,fogTint.y,fogTint.z,1};x.Fogfv(0x0b66,fog);x.Fogf(0x0b63,p.fog.start);x.Fogf(0x0b64,p.fog.end);x.Fogf(0x0b62,p.fog.density);x.Fogf(0x0b65,static_cast<float>(p.fog.mode==model::FogMode::Exponential?0x800:p.fog.mode==model::FogMode::ExponentialSquared?0x801:0x2601));enabled(a,Fog,p.fog.mode!=model::FogMode::Disabled);
     const auto bind=[&](unsigned unit,bool cube,g::UInt texture,bool repeat){if(repeat&&texture&&p.rebindEngineTexture){texture=p.rebindEngineTexture(texture,error);if(!texture)return false;}state.bind(unit,cube,texture);auto& target=state.fixedTextureUnits[unit];
         if(p.material.engineHardware.cubeMap)target.enabled[1]=cube;
         target.enabled[2]=false;target.enabled[cube?1:0]=texture!=0;
@@ -328,14 +331,14 @@ bool K1MaterialPass::draw(g::Api& a,const model::Mesh& mesh,const MeshDrawParame
         for(unsigned row=0;row<3;++row)constants[93+row]=p.enginePartMaterial->vertex[row];
         const auto setLights=[&](const PreviewLight* lights,std::size_t lightCount) {
             for(unsigned n=0;n<lightCount;++n) {
-                const auto& light=lights[n];auto& pos=constants[70+4*n];
+                const auto& light=lights[n];const auto slot=LightParameterSlots[n];auto& pos=constants[slot];
                 for(unsigned row=0;row<3;++row)pos[row]=p.worldFromEye.values[row]*light.position[0]+
                     p.worldFromEye.values[4+row]*light.position[1]+p.worldFromEye.values[8+row]*light.position[2]+
                     p.worldFromEye.values[12+row]*light.position[3];
                 pos[3]=light.position[3];
-                constants[71+4*n]={{light.attenuation[0],light.attenuation[1],light.attenuation[2],0}};
-                constants[72+4*n]={{light.ambient[0],light.ambient[1],light.ambient[2],1}};
-                constants[73+4*n]={{light.diffuse[0],light.diffuse[1],light.diffuse[2],1}};
+                constants[slot+1]={{light.attenuation[0],light.attenuation[1],light.attenuation[2],0}};
+                constants[slot+2]={{light.ambient[0],light.ambient[1],light.ambient[2],1}};
+                constants[slot+3]={{light.diffuse[0],light.diffuse[1],light.diffuse[2],1}};
             }
         };
         const auto vp=[&](std::string_view program){const auto id=i.program(a,VP,program,error);if(!id)return false;x.BindProgramARB(VP,id);i.setLocalParameters(VP,id,0,constants.data(),constants.size());a.Enable(VP);return true;};
@@ -357,7 +360,8 @@ bool K1MaterialPass::draw(g::Api& a,const model::Mesh& mesh,const MeshDrawParame
             for(unsigned unit=1;unit<=4;++unit)if(!bind(unit,true,normalization,false))return false;
             if(!bind(5,true,p.environmentTexture,true))return false;
             constants[15]={{1,0,1,0}};
-            if(p.material.engineWaterAlpha<1.0f){blend(g::SrcAlpha,g::OneMinusSrcAlpha);state.fragmentConstants[0]={{1,1,1,p.material.engineWaterAlpha}};}
+            state.fragmentConstants[0]={{1,1,1,p.material.engineWaterAlpha}};
+            if(p.material.engineWaterAlpha<1.0f){blend(g::SrcAlpha,g::OneMinusSrcAlpha);}
             else blend(0x0305,g::One);
             if(!vp(k1_programs::Shiny)||!fp(skin_programs::ShinyFragment))return false;
             draw();cleanup();

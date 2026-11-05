@@ -27,6 +27,7 @@ uniform float uTransformHandedness;
 uniform int uSkinEffect;
 uniform int uOwnerFragment;
 uniform int uMaterialProgram;
+uniform int uEnvironmentMode;
 uniform int uForceSightCommand;
 uniform vec4 uForceSightColor;
 uniform float uForceSightDesaturation;
@@ -124,7 +125,7 @@ void main() {
     }
     float skinFog = length(eye.xyz);
     // Vertex-program materials use radial distance; fixed transforms use eye-z.
-    bool engineVertex = uMaterialProgram>0 && uMaterialProgram<5;
+    bool engineVertex = (uMaterialProgram>0 && uMaterialProgram<5) || uDirtyCommand!=0;
     vFogCoordinate = (engineVertex || uExactK2Skin || uSkinEffect == 2)
         ? (uSkinEffect == 1 ? -skinFog : skinFog)
         : (uMaterialProgram==5 ? abs(eye.z) : -eye.z);
@@ -179,9 +180,11 @@ void main() {
         }
         // ARB vertex primary colors are clamped before interpolation.
         vColor=clamp(vec4(primary,uColor.a),0.0,1.0);
-        if (uOwnerFragment==3 || uMaterialProgram==3 || uMaterialProgram==4) {
-            vec3 reflection=eye.xyz-2.0*dot(engineNormal,eye.xyz)*engineNormal;
-            vBitangent=uEyeToWorld*normalize(reflection);
+        if (uOwnerFragment==3 || uMaterialProgram==3 || uMaterialProgram==4 ||
+            uDirtyCommand==47 || uDirtyCommand==48 || uDirtyCommand==71) {
+            vec3 reflection=normalize(reflect(eye.xyz,normalize(uNormalMatrix*aRawNormal)));
+            if(uEnvironmentMode==2)vBitangent=uEyeToWorld*reflection;
+            else vBitangent=vec3(reflection.xy/(2.0*length(reflection+vec3(0.0,0.0,1.0)))+vec2(0.5),0.0);
         }
     }
     // RenderFlat temporarily disables lighting/color arrays and sets white.
@@ -341,7 +344,7 @@ vec3 sampleEnvironment(vec3 direction) {
         : texture2D(uEnvironmentTexture,direction.xy).rgb;
 }
 float fogAmount() {
-    float d=uExactK2Skin ? vFogCoordinate : max(0.0,vFogCoordinate);
+    float d=abs(vFogCoordinate);
     if(uFogMode==1) return clamp((uFogData.y-d)/(uFogData.y-uFogData.x),0.0,1.0);
     float x=uFogData.z*d;
     if(uFogMode==2) return clamp(exp(-x),0.0,1.0);
@@ -420,7 +423,7 @@ void main() {
         vec3 rgb=base.rgb*(vColor.rgb+2.0*uOwnerIllumination-vec3(1.0));
         float alpha=base.a;
         if(uOwnerFragment==3) {
-            rgb=base.a*rgb+(1.0-base.a)*textureCube(uEnvironmentCube,vBitangent).rgb;
+            rgb=base.a*rgb+(1.0-base.a)*sampleEnvironment(vBitangent);
             alpha=1.0; // getter supplies RGB; caller initializes c1.a to one
         }
         if(uAlphaTest && !(alpha>uAlphaCutoff)) discard;
@@ -431,13 +434,13 @@ void main() {
         // Both shell vertex programs emit white primary and raw texture UV0.
         vec4 shell=texture2D(uDiffuseTexture,vUv0);
         if(uAlphaTest && !(shell.a>uAlphaCutoff)) discard;
-        shell.rgb=mix(uFogColor,shell.rgb,fogAmount());
+        shell.rgb=mix(uAdditive?vec3(0.0):uFogColor,shell.rgb,fogAmount());
         gl_FragColor=shell;
         return;
     }
     if(uDirtyCommand!=0) {
         vec4 base=texture2D(uDiffuseTexture,vUv0);
-        vec3 dirt=uDirtyCommand==68 ? texture2D(uBumpTexture,vDirty.xy).rgb : texture3D(uDirtyTexture,vDirty).rgb;
+        vec3 dirt=texture3D(uDirtyTexture,vDirty).rgb;
         vec3 value=base.rgb;
         bool env=uDirtyCommand==47||uDirtyCommand==48||uDirtyCommand==71;
         if(env)value+=sampleEnvironment(vBitangent)*(1.0-base.a);
@@ -450,7 +453,9 @@ void main() {
             alpha=uDirtyForce.y;
         }
         if(uAlphaTest && !(alpha>uAlphaCutoff))discard;
-        gl_FragColor=vec4(rgb,alpha);return; // none of these engine FP strings enables fog
+        if(uDirtyCommand!=68 && uDirtyCommand!=71)
+            rgb=mix(uAdditive?vec3(0.0):uFogColor,rgb,fogAmount());
+        gl_FragColor=vec4(rgb,alpha);return;
     }
     if(uMaterialProgram>0) {
         // The ARB vertex programs pass the authored coordinates through. They
@@ -470,7 +475,7 @@ void main() {
         if(uMaterialProgram==3 || uMaterialProgram==4) {
             // Environment/EMLM VP normalize reflection per VERTEX and rotate
             // to world. Do not normalize the interpolated coordinates again.
-            // 2D targets consume reflection.xy, not a sphere-map reassembly.
+            // Flat environment maps receive sphere coordinates from the vertex stage.
             vec3 env=sampleEnvironment(vBitangent);
             rgb+=(1.0-base.a)*env;
             alpha=uEnvironmentAlpha; // fragment env[0].a; neither texel nor primary alpha

@@ -12,6 +12,8 @@ namespace neomdl::render::desktop_programs {
 namespace g=gl;
 constexpr g::Enum VP=0x8620, FP=0x8804, ProgramBinding=0x8677;
 constexpr g::Enum ModelView=0x1700, Projection=0x1701, MatrixMode=0x0ba0, Fog=0x0b60;
+// Eight four-register light blocks, separate from bones, bump, camera and material parameters.
+inline constexpr std::array<unsigned,8> LightParameterSlots{{69,73,77,81,85,0,4,8}};
 #define DESKTOP_PROGRAM_GL(X) \
  X(void,GenProgramsARB,(g::Size,g::UInt*)) \
  X(void,DeleteProgramsARB,(g::Size,const g::UInt*)) \
@@ -46,7 +48,7 @@ struct LegacyGuard {
                 const float* modelView=nullptr);
     ~LegacyGuard();
 };
-const char* standardFogFragment(bool kotor1);
+const std::string& flatSkinFragment(model::FogMode);
 const std::string& fogFragment(std::string_view source,model::FogMode);
 const char* cubeEnvironmentFragment(const char* source,unsigned unit);
 struct ProgramCache {

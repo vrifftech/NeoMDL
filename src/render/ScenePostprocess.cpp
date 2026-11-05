@@ -67,8 +67,9 @@ uniform sampler2DRect uScene;
 uniform sampler2D uAux; uniform sampler2D uOutline; uniform sampler2D uLut;
 uniform int uMode;
 uniform vec3 uSize; uniform vec3 uRows[3]; uniform vec3 uTap[4];
-uniform vec4 uParameters;
+uniform vec4 uParameters, uSceneBounds;
 varying vec2 vUv; varying vec4 vColor;
+vec4 sampleScene(vec2 uv){return sceneSample(uScene,clamp(uv,uSceneBounds.xy,uSceneBounds.zw));}
 vec4 postColor(vec4 c){
 #ifdef K1_DESKTOP
     if(uFogMode!=0){
@@ -103,9 +104,9 @@ void main(){
         vec3 d=field.rgb*2.0-1.0;
         vec2 pixel=vUv*uSize.xy;
         vec2 uv=vec2(dot(d,vec3(uSize.x/10.0,0.0,pixel.x)),dot(d,vec3(0.0,uSize.y/10.0,pixel.y)));
-        gl_FragColor=postColor(vec4(sceneSample(uScene,uv).rgb,field.a));return;
+        gl_FragColor=postColor(vec4(sampleScene(uv).rgb,field.a));return;
     }
-    vec4 c=sceneSample(uScene,vUv*uSize.xy);
+    vec4 c=sampleScene(vUv*uSize.xy);
     if(uMode==0)c.a=1.0; // RenderFrameToTexture selects Decal in both games
     if(uMode==1)c.rgb=vec3(dot(c.rgb,uRows[0]),dot(c.rgb,uRows[1]),dot(c.rgb,uRows[2]));
     if(uMode==2){
@@ -114,7 +115,8 @@ void main(){
     }
     if(uMode==4)c=vec4(texture2D(uAux,vUv).rgb*uParameters.x+c.rgb*(1.0-uParameters.x),1.0);
     if(uMode==5 || uMode==9){
-        c.rgb=vec3(texture2D(uLut,vec2(c.r,.5)).r,texture2D(uLut,vec2(c.g,.5)).g,texture2D(uLut,vec2(c.b,.5)).b);
+        vec3 lookup=(c.rgb*255.0+vec3(0.5))/256.0;
+        c.rgb=vec3(texture2D(uLut,vec2(lookup.r,.5)).r,texture2D(uLut,vec2(lookup.g,.5)).g,texture2D(uLut,vec2(lookup.b,.5)).b);
 #ifdef K1_DESKTOP
         c.a=vColor.a;
 #else
@@ -144,7 +146,7 @@ struct ScenePostprocess::Impl {
     struct Target {g::UInt fbo{},texture{};int width{},height{};};
     Target history[2],desktopMips[4],desktopFiltered;
     g::UInt capture{},lut{},overbrightLut{},program{},vbo{},ibo{};
-    g::Int mode{-1},mvp{-1},size{-1},parameters{-1},rows{-1},taps{-1},fogMode{-1},fogData{-1},fogColor{-1};
+    g::Int mode{-1},mvp{-1},size{-1},parameters{-1},sceneBounds{-1},rows{-1},taps{-1},fogMode{-1},fogData{-1},fogColor{-1};
     int targetWidth{},targetHeight{},historyFront{};
     bool targetDesktopArbShaders{true};std::uint64_t epoch{};
     model::GameVersion targetGame{model::GameVersion::Kotor2},programGame{model::GameVersion::Kotor2};
@@ -221,13 +223,6 @@ struct ScenePostprocess::Impl {
     void restore() noexcept {
         if(!api||!frame)return;
         auto& a=*api;auto& f=*frame;
-        if(atiMatrices) {
-            for(unsigned n=0;n<6;++n){a.ActiveTexture(g::Texture0+n);ati.x.MatrixMode(0x1702);ati.x.PopMatrix();}
-            ati.x.MatrixMode(0x1700);ati.x.PopMatrix();ati.x.MatrixMode(0x1701);ati.x.PopMatrix();
-            ati.x.PopAttrib();ati.x.BindProgramARB(desktop_programs::VP,static_cast<g::UInt>(atiVertexProgram));
-            ati.x.BindProgramARB(desktop_programs::FP,static_cast<g::UInt>(atiFragmentProgram));
-            ati.x.MatrixMode(atiMatrixMode);atiMatrices=false;
-        }
         bindFbo(Fbo,f.draw);
         if(f.draw&&!f.drawBuffers.empty())drawBuffers(static_cast<g::Size>(f.drawBuffers.size()),f.drawBuffers.data());
         else a.DrawBuffer(f.drawBuffer);
@@ -236,6 +231,13 @@ struct ScenePostprocess::Impl {
         a.ReadBuffer(f.drawFboReadBuffer);
         if(separate)bindFbo(ReadFbo,f.read);
         a.ReadBuffer(f.readBuffer);
+        if(atiMatrices) {
+            for(unsigned n=0;n<6;++n){a.ActiveTexture(g::Texture0+n);ati.x.MatrixMode(0x1702);ati.x.PopMatrix();}
+            ati.x.MatrixMode(0x1700);ati.x.PopMatrix();ati.x.MatrixMode(0x1701);ati.x.PopMatrix();
+            ati.x.PopAttrib();ati.x.BindProgramARB(desktop_programs::VP,static_cast<g::UInt>(atiVertexProgram));
+            ati.x.BindProgramARB(desktop_programs::FP,static_cast<g::UInt>(atiFragmentProgram));
+            ati.x.MatrixMode(atiMatrixMode);atiMatrices=false;
+        }
         a.Viewport(f.viewport[0],f.viewport[1],f.viewport[2],f.viewport[3]);
         a.ClearColor(f.clearColor[0],f.clearColor[1],f.clearColor[2],f.clearColor[3]);a.ClearDepth(f.clearDepth);a.ClearStencil(f.clearStencil);
         if(f.scissor)a.Enable(Scissor);else a.Disable(Scissor);
@@ -302,6 +304,7 @@ struct ScenePostprocess::Impl {
             a.Uniform1i(a.GetUniformLocation(program,"uOutline"),2);a.Uniform1i(a.GetUniformLocation(program,"uLut"),3);
             mode=a.GetUniformLocation(program,"uMode");mvp=a.GetUniformLocation(program,"uMvp");size=a.GetUniformLocation(program,"uSize");
             parameters=a.GetUniformLocation(program,"uParameters");rows=a.GetUniformLocation(program,"uRows[0]");taps=a.GetUniformLocation(program,"uTap[0]");
+            sceneBounds=a.GetUniformLocation(program,"uSceneBounds");
             fogMode=a.GetUniformLocation(program,"uFogMode");fogData=a.GetUniformLocation(program,"uFogData");fogColor=a.GetUniformLocation(program,"uFogColor");
         }catch(...){if(vs)a.DeleteShader(vs);if(fs)a.DeleteShader(fs);if(next)a.DeleteProgram(next);throw;}
     }
@@ -409,7 +412,7 @@ struct ScenePostprocess::Impl {
     void captureHost() {
         bindHost();api->ActiveTexture(g::Texture0);api->BindTexture(captureTarget(),capture);
         api->CopyTexSubImage2D(captureTarget(),0,0,0,frame->viewport[0],frame->viewport[1],
-            effectDimensions.captureWidth,effectDimensions.captureHeight);
+            frame->viewport[2],frame->viewport[3]);
         error("Desktop scene capture");
     }
     void saveAtiMatrices() {
@@ -546,6 +549,10 @@ struct ScenePostprocess::Impl {
         a.UniformMatrix4fv(mvp,1,0,projection.values.data());const float dimensions[]={float(frame->viewport[2])/(k1Desktop()?effectDimensions.captureWidth:1),
             float(frame->viewport[3])/(k1Desktop()?effectDimensions.captureHeight:1),0};
         a.Uniform3fv(size,1,dimensions);a.Uniform4fv(parameters,1,params.data());
+        const float halfTexelX=k1Desktop()?.5f/effectDimensions.captureWidth:.5f;
+        const float halfTexelY=k1Desktop()?.5f/effectDimensions.captureHeight:.5f;
+        const float bounds[]={halfTexelX,halfTexelY,dimensions[0]-halfTexelX,dimensions[1]-halfTexelY};
+        a.Uniform4fv(sceneBounds,1,bounds);
         if(k1Desktop()){
             a.Uniform1i(fogMode,desktopFogEnabled?static_cast<int>(sceneFog.mode):0);
             const float data[]={sceneFog.start,sceneFog.end,sceneFog.density};

@@ -913,8 +913,10 @@ bool TextureCache::bind(MeshDrawParameters& p,std::string& error) {
     if(p.material.useBumpMap) {
         if(!use(p.bumpTexture,&p.material.bumpUv))return false;
         const auto found=procedureIds_.find(p.bumpTexture);
-        if(found!=procedureIds_.end() && found->second->normalUpload)
+        if(found!=procedureIds_.end() && found->second->normalUpload) {
             p.material.bumpKind=neoshared::material::BumpMapKind::AuthoredNormal;
+            p.material.bumpScale=1.0f;
+        }
     }
     if(p.material.useEnvironmentMap&&!use(p.environmentTexture,nullptr,true))return false;
     return true;

@@ -80,12 +80,13 @@ bool resolveMaterialProgram(const MeshDrawParameters& p, MaterialProgram& progra
         program=p.material.skinEnvironmentAvailable
             ? MaterialProgram::Environment : MaterialProgram::FlatFixed;
     } else if(p.exactK2SkinVertexProgram) {
-        if(p.material.skinNormalAvailable) {
+        const bool opaque=p.skinOwnerAlpha>=1.0f && p.material.vertexOpacity>=1.0f;
+        if(opaque && p.material.skinNormalAvailable) {
             program=MaterialProgram::SkinNormal;return true;
         }
         // RenderSkinnedVP 0x1097e0 tests bumpy-shiny before the separate
         // BumpMapCardValidate / NV2x gates used by ordinary skin bump.
-        if(p.material.skinShinyAvailable || p.material.skinBumpAvailable) {
+        if(opaque && (p.material.skinShinyAvailable || p.material.skinBumpAvailable)) {
             if(!p.bumpTexture || !p.diffuseTexture) {
                 error="Engine skin-bump path requires its resolved bump and diffuse textures";return false;
             }

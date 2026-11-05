@@ -27,7 +27,7 @@ bool makeDirtyMaterialPlan(const DirtyMaterialInputs& in,
     case 38:p.forceLinear=true;break;
     case 44:case 47:break; // subtract variants retain the texture's min/mag filters
     case 45:case 48:p.add=true;p.forceLinear=true;break;
-    case 68:p.samplesVolume=false;p.forceLinear=true;break; // actual ARB string samples retained texture[2], 2D!
+    case 68:p.forceLinear=true;break;
     case 71:p.forceLinear=true;break;
     default:return fail("engine command "+std::to_string(p.command)+" returns without selecting a program; retained arbitrary fragment state is not a volume consumer");
     }

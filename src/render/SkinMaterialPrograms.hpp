@@ -1,4 +1,6 @@
 #pragma once
+#include <string>
+#include <string_view>
 // Executing Desktop ARB skin programs, not unused shader inventory. Bindings are
 // relocated to private local constants/explicit attributes; arithmetic is intact.
 // RenderSkinnedVP 0x108372, ARB dispatcher 0xf64b4, InitExtensions 0x8b430.
@@ -160,6 +162,20 @@ DP3   vReg4.z, program.local[90], vReg3;
 MOV   vReg4.w, program.local[16].w;
 MOV   result.texcoord[1], vReg4;
 )ARB";
+inline std::string_view skinEnvironmentVertex(bool cube) {
+    if(cube)return SkinEnvironment;
+    static const std::string sphere=[] {
+        std::string source=SkinEnvironment;
+        source.erase(source.find("DP3   vReg4.x, program.local[92], vReg3;"));
+        source+="ADD vReg4.xyz, vReg3, {0.0, 0.0, 1.0, 0.0};\n"
+            "DP3 vReg4.w, vReg4, vReg4;\nRSQ vReg4.w, vReg4.w;\n"
+            "MUL vReg4.w, vReg4.w, 0.5;\n"
+            "MAD result.texcoord[1].xy, vReg3, vReg4.w, 0.5;\n"
+            "MOV result.texcoord[1].zw, {0.0, 0.0, 0.0, 1.0};\n";
+        return source;
+    }();
+    return sphere;
+}
 inline constexpr char Bump[] = R"ARB(!!ARBvp1.0
 PARAM mvMatrix[4] = { state.matrix.modelview[0] };
 PARAM mvpMatrix[4] = { state.matrix.mvp };

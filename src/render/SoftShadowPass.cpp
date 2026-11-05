@@ -146,7 +146,7 @@ struct SoftShadowPass::Impl {
     int width{},height{};
     SoftShadowFilter filter{};
     struct Frame {
-        g::Int viewport[4]{},drawFbo{},readFbo{},drawBuffer{},readBuffer{},rectangle{},unpack{};
+        g::Int viewport[4]{},drawFbo{},readFbo{},drawBuffer{},readBuffer{},drawFboReadBuffer{},rectangle{},unpack{};
         float clear[4]{};
         g::Boolean scissor{},srgb{};
         g::Int matrixMode{};
@@ -213,6 +213,12 @@ struct SoftShadowPass::Impl {
         a.GetIntegerv(FramebufferBinding,&f.drawFbo);
         if (separateTargets) a.GetIntegerv(ReadFramebufferBinding,&f.readFbo);else f.readFbo=f.drawFbo;
         a.GetIntegerv(DrawBuffer,&f.drawBuffer);a.GetIntegerv(ReadBuffer,&f.readBuffer);
+        f.drawFboReadBuffer=f.readBuffer;
+        if(separateTargets && f.drawFbo!=f.readFbo) {
+            bind(ReadFramebuffer,static_cast<g::UInt>(f.drawFbo));
+            a.GetIntegerv(ReadBuffer,&f.drawFboReadBuffer);
+            bind(ReadFramebuffer,static_cast<g::UInt>(f.readFbo));
+        }
         a.GetIntegerv(UnpackBufferBinding,&f.unpack);
         f.scissor=a.IsEnabled(ScissorTest);if (srgbSupported) f.srgb=a.IsEnabled(FramebufferSrgb);
         a.ActiveTexture(g::Texture0);
@@ -232,6 +238,12 @@ struct SoftShadowPass::Impl {
     void restoreState() noexcept {
         if (!frame || !api) return;
         auto& a=*api;const auto& f=*frame;
+        bind(Framebuffer,static_cast<g::UInt>(f.drawFbo));
+        a.DrawBuffer(static_cast<g::Enum>(f.drawBuffer));a.ReadBuffer(static_cast<g::Enum>(f.drawFboReadBuffer));
+        if(separateTargets && f.drawFbo!=f.readFbo) {
+            bind(ReadFramebuffer,static_cast<g::UInt>(f.readFbo));
+            a.ReadBuffer(static_cast<g::Enum>(f.readBuffer));
+        }
         if(f.legacyState) {
             for(unsigned unit=0;unit<4;++unit) {
                 a.ActiveTexture(g::Texture0+unit);legacy.matrixMode(0x1702);legacy.popMatrix();
@@ -240,9 +252,6 @@ struct SoftShadowPass::Impl {
             legacy.matrixMode(0x1700);legacy.popMatrix();
             legacy.matrixMode(static_cast<g::Enum>(f.matrixMode));legacy.popAttrib();
         }
-        if (separateTargets) {bind(DrawFramebuffer,static_cast<g::UInt>(f.drawFbo));bind(ReadFramebuffer,static_cast<g::UInt>(f.readFbo));}
-        else bind(Framebuffer,static_cast<g::UInt>(f.drawFbo));
-        a.DrawBuffer(static_cast<g::Enum>(f.drawBuffer));a.ReadBuffer(static_cast<g::Enum>(f.readBuffer));
         a.Viewport(f.viewport[0],f.viewport[1],f.viewport[2],f.viewport[3]);
         a.ClearColor(f.clear[0],f.clear[1],f.clear[2],f.clear[3]);
         if (f.scissor) a.Enable(ScissorTest);else a.Disable(ScissorTest);
@@ -315,25 +324,23 @@ struct SoftShadowPass::Impl {
                 throw;
             }
         }
-        // Treat the intermediate pair as one resource. A partial allocation or
-        // incomplete attachment must remain retryable on a subsequent frame.
-        try {
-            if (!fbos[0] || !fbos[1]) {
+        if (!fbos[0] || !fbos[1]) {
+            try {
                 texture(resampled,g::Texture2D,512,512);texture(filtered,g::Texture2D,512,512);
                 gen(2,fbos);
+                if (!fbos[0] || !fbos[1]) throw std::runtime_error("Cannot allocate engine soft-shadow framebuffers");
+                for (unsigned n=0;n<2;++n) {
+                    bind(Framebuffer,fbos[n]);attach(Framebuffer,ColorAttachment0,g::Texture2D,n==0?resampled:filtered,0);
+                    a.DrawBuffer(ColorAttachment0);a.ReadBuffer(ColorAttachment0);
+                    if (check(Framebuffer)!=FramebufferComplete) throw std::runtime_error("Incomplete engine soft-shadow framebuffer");
+                }
+                checkError("intermediate framebuffer allocation");
+            } catch (...) {
+                remove(2,fbos);fbos[0]=fbos[1]=0;
+                const g::UInt abandoned[]={resampled,filtered};a.DeleteTextures(2,abandoned);
+                resampled=filtered=0;
+                throw;
             }
-            if (!fbos[0] || !fbos[1]) throw std::runtime_error("Cannot allocate engine soft-shadow framebuffers");
-            for (unsigned n=0;n<2;++n) {
-                bind(Framebuffer,fbos[n]);attach(Framebuffer,ColorAttachment0,g::Texture2D,n==0?resampled:filtered,0);
-                a.DrawBuffer(ColorAttachment0);a.ReadBuffer(ColorAttachment0);
-                if (check(Framebuffer)!=FramebufferComplete) throw std::runtime_error("Incomplete engine soft-shadow framebuffer");
-            }
-            checkError("intermediate framebuffer allocation");
-        } catch (...) {
-            remove(2,fbos);fbos[0]=fbos[1]=0;
-            const g::UInt abandoned[]={resampled,filtered};a.DeleteTextures(2,abandoned);
-            resampled=filtered=0;
-            throw;
         }
         if (width!=w || height!=h || !savedScene || !mask) {
             texture(savedScene,Rect,w,h);texture(mask,Rect,w,h);

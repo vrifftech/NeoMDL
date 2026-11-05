@@ -43,11 +43,14 @@ const std::string& fogFragment(std::string_view source,model::FogMode mode) {
     }
     return text;
 }
-const char* standardFogFragment(bool kotor1) {
-    // K1 ATI initialization0x2e3abd invokes MOV through the two-argument
-    // wrapper; shim0xc77e delegates it to Op1 and ignores argument2.
-    static const std::string k1=[](){std::string result=skin_programs::StandardFogFragment;const auto at=result.find("LRP r0.rgb");result.insert(at,"MOV r0.a, v0.a;\n");return result;}();
-    return kotor1?k1.c_str():skin_programs::StandardFogFragment;
+const std::string& flatSkinFragment(model::FogMode fog) {
+    static constexpr char source[]=R"ARB(!!ARBfp1.0
+TEMP base;
+TEX base, fragment.texcoord[0], texture[0], 2D;
+MUL result.color, base, fragment.color.primary;
+END
+)ARB";
+    return fogFragment(source,fog);
 }
 std::string format(const char* text,unsigned a,unsigned b=0) {
     std::array<char,2048> bytes{};const int count=std::snprintf(bytes.data(),bytes.size(),text,a,b);
@@ -64,7 +67,7 @@ const std::string& ProgramCache::lightProgram(std::string_view source,const Prev
     using namespace skin_programs;
     std::string result(source);result+=Light529592;
     for(unsigned n=0;n<count;++n) {
-        const unsigned slot=70+n*4;
+        const unsigned slot=LightParameterSlots[n];
         if(lights[n].position[3]==0) {
             // Explicit inspection headlight, not an authored K2 light. The
             // ordinary engine point-light snippets below are unchanged.

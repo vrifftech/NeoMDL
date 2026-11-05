@@ -6488,6 +6488,10 @@ void ModelCanvas::drawMesh(const neomdl::model::Mesh& mesh,
             const auto bump=textureFor(
                 material.bumpMap,parameters.material.bumpUv.layer,resources);
             parameters.bumpTexture=bump.cube ? 0u : bump.id;
+            if(bump.engineNormal) {
+                parameters.material.bumpKind=neoshared::material::BumpMapKind::AuthoredNormal;
+                parameters.material.bumpScale=1.0f;
+            }
         }
         if(parameters.material.useEnvironmentMap) {
             // K2 Material has one shared runtime slot. envmaptexture is loaded

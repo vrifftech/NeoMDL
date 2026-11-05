@@ -50,18 +50,14 @@ bool prepareDirtyBindings(gl::Api& a,MeshDrawParameters& p,const material::Dirty
                 }
             }
         }
-        // The EMLM FP is hard-coded to a 2D environment sampler, even when
-        // the dispatcher just virtually bound an environment CUBEMAP.
-        if(plan.environment) {p.environmentTexture=state.binding(2,false);p.environmentCube=false;}
-        // Command68 binds a 3D image, but its original string says 2D. It must
-        // consume the retained OTHER target, never a fabricated volume slice.
-        if(!plan.samplesVolume)p.bumpTexture=state.binding(2,false);
         if(plan.desaturate&&p.material.engineHardware.arbFragmentPrograms) {
             state.fragmentConstants[1]={{0,0,0,p.dirty.settings.forceAlpha}};
             state.fragmentConstants[7]={{.3f,.59f,.11f,p.dirty.settings.desaturation}};
         }
         if(p.material.engineHardware.arbFragmentPrograms)
-            if(const auto* fragment=desktop_programs::k2FragmentProgram(plan.command))state.bindFragmentProgram(fragment);
+            if(const auto* fragment=desktop_programs::k2FragmentProgram(plan.command,p.environmentCube))
+                state.bindFragmentProgram(plan.desaturate?std::string_view(fragment):
+                    desktop_programs::fogFragment(fragment,p.fog.mode));
         a.ActiveTexture(gl::Texture0);
         return true;
     } catch(const std::exception& e) {error=e.what();return false;}

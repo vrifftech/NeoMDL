@@ -63,7 +63,7 @@ void main(){vec4 base=texture2D(texture0,uv0);vec3 rgb=base.rgb*primary.rgb;
  if(forceSight){rgb=vec3(dot(rgb,vec3(.30,.59,.11))*desaturation);
   // Engine desaturating Lightmap FP calculates r2.a, but outputs r0.a!
   if(lightmapped)alpha=base.a;
- }else if((k1||!lightmapped)&&fogMode!=0){float t=1.;
+ }else if(fogMode!=0){float t=1.;
   if(fogMode==1)t=(fogData.y-fogCoordinate)/(fogData.y-fogData.x);
   else if(fogMode==2)t=exp(-fogData.z*fogCoordinate);
   else t=exp(-pow(fogData.z*fogCoordinate,2.));rgb=mix(fogColor,rgb,clamp(t,0.,1.));}
@@ -284,7 +284,9 @@ bool GrassPass::draw(gl::Api& a,const GrassScene& scene,const EngineGrassRenderS
                         desktopTextures.fixedSecondTexture=true;
                         desktopTextures.fixedTextureUnits[1].enabled[0]=true;
                     }
-                    if(const auto* fragment=desktop_programs::k2FragmentProgram(d.programId))desktopTextures.bindFragmentProgram(fragment);
+                    if(const auto* fragment=desktop_programs::k2FragmentProgram(d.programId))
+                        desktopTextures.bindFragmentProgram(forceSight?std::string_view(fragment):
+                            desktop_programs::fogFragment(fragment,raster.fog?cfg.fog.mode:model::FogMode::Disabled));
                 }
                 const auto desktopProgram=fixedForce?desktopFixedProgram_:desktopProgram_;
                 const auto& uniforms=fixedForce?desktopFixedUniforms_:desktopUniforms_;
