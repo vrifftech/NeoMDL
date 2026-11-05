@@ -18,6 +18,7 @@
 #include <neoshared/texture/Error.hpp>
 #include <neoshared/texture/FileUtil.hpp>
 #include "NeoSettings.hpp"
+#include "NeoViewState.hpp"
 #include "NeoGameDirectoryMenu.hpp"
 #include "NeoGameInstallResolver.hpp"
 
@@ -172,6 +173,17 @@ enum CommandId {
     ID_About,
     ID_Exit,
     ID_DetonateEmitters,
+    ID_Undo,
+    ID_Redo,
+    ID_Find,
+    ID_DarkMode,
+    ID_FontIncrease,
+    ID_FontDecrease,
+    ID_FontReset,
+    ID_Workflow,
+    ID_ClearRecent,
+    ID_RecentFirst,
+    ID_RecentLast = ID_RecentFirst + neosettings::kMaxRecentFiles - 1,
 };
 
 enum PreviewFeature : unsigned {
@@ -332,6 +344,8 @@ public:
 
         animationChoice_->SetToolTip(
             "Choose an animation to preview. In Advanced animation, Add Animation layers the selected clip.");
+        rateSpin_->SetToolTip("Playback multiplier for the selected active run and for newly started animations. Negative values play backwards.");
+        loopCheck_->SetToolTip("Loop the selected active run and newly started animations.");
         runModeChoice_->SetToolTip(
             "Engine priority class: base replaces lower base runs, queued starts FIFO, overlay remains above them.");
         immediateCheck_->SetToolTip(
@@ -856,9 +870,8 @@ public:
         updateDetails(selectedNode_);
     }
     void refreshDetails() { updateDetails(selectedNode_); }
-    void setAppearance(bool dark) {
-        wxui::applyTheme(this, dark);
-        if (asciiEditor_) asciiEditor_->setAppearance(dark);
+    void setSourceAppearance(bool dark, double fontScale) {
+        if (asciiEditor_) asciiEditor_->setAppearance(dark, fontScale);
         canvas_->Refresh(false);
     }
 
@@ -1227,7 +1240,8 @@ private:
             const auto slider = length > 0.0f
                 ? static_cast<int>(std::lround(time * 1000.0f / length)) : 0;
             timeline_->SetValue(std::clamp(slider, 0, 1000));
-            if (wxWindow::FindFocus() != rateSpin_)
+            auto* focus = wxWindow::FindFocus();
+            if (focus != rateSpin_ && !rateSpin_->IsDescendant(focus))
                 rateSpin_->SetValue(run->playbackRate);
             if (!run->outOfOrder()) loopCheck_->SetValue(run->looping());
             std::ostringstream label;
@@ -1931,6 +1945,8 @@ class ModelEditorPanelImpl final : public ModelEditorPanel {
 public:
     ModelEditorPanelImpl(wxWindow* parent, neomodules::Context context)
         : ModelEditorPanel(parent, std::move(context)) {
+        dark_ = settings_.darkMode();
+        fontScale_ = settings_.fontScale();
         if(context_.captureModFolder)modFolder_=context_.captureModFolder();
         tabs_ = new wxAuiNotebook(this, wxID_ANY, wxDefaultPosition, wxDefaultSize,
             wxAUI_NB_TOP | wxAUI_NB_TAB_MOVE | wxAUI_NB_CLOSE_ON_ACTIVE_TAB |
@@ -1943,6 +1959,9 @@ public:
         moduleStatusBar()->SetStatusWidths(3, widths);
         buildMenus();
         bindEvents();
+        if (!context_.embedded)
+            fontScaleWheelFilter_.attach(wxGetTopLevelParent(this), [this](int steps) { changeFontScale(steps); });
+        setAppearance(dark_, fontScale_);
         updateState();
     }
 
@@ -1976,6 +1995,7 @@ public:
                 const auto* page = pageAt(index);
                 if (neoshared::sameResourcePath(page->document().path(), path)) {
                     tabs_->SetSelection(index);
+                    settings_.addRecentFile(path);
                     return true;
                 }
             }
@@ -2012,8 +2032,9 @@ public:
                 document->appendDiagnostic(std::move(installationWarning));
             }
 
-            if (activateResource(document->identity())) return true;
-            addDocument(std::move(document),installationSession,combined);
+            if (!activateResource(document->identity()))
+                addDocument(std::move(document),installationSession,combined);
+            settings_.addRecentFile(path);
             return true;
         } catch (const neoshared::bif::JobCancelled&) {
             return false;
@@ -2068,11 +2089,20 @@ public:
         return true;
     }
 
-    void setAppearance(bool dark, double) override {
+    void setAppearance(bool dark, double fontScale) override {
         dark_ = dark;
+        fontScale_ = fontScale;
         wxui::applyTheme(this, dark_);
+        neoview::applyFontScale(this, fontScale_);
         for (std::size_t index = 0; index < tabs_->GetPageCount(); ++index)
-            pageAt(index)->setAppearance(dark_);
+            pageAt(index)->setSourceAppearance(dark_, fontScale_);
+        updateMenuChecks();
+    }
+
+    void changeFontScale(int steps) {
+        fontScale_ = neoview::steppedFontScale(fontScale_, steps);
+        settings_.setFontScale(fontScale_);
+        setAppearance(dark_, fontScale_);
     }
 
     std::vector<std::filesystem::path> openPaths() const override {
@@ -2511,7 +2541,9 @@ private:
                     sounds=prepareSceneAudioPlayback(pending,resolver,game,job);
                 })) {page->Destroy();return;}
                 page->installArea(std::move(pending),std::move(sounds));
-                page->setAppearance(dark_);
+                wxui::applyTheme(page, dark_);
+                neoview::applyFontScale(page, fontScale_);
+                page->setSourceAppearance(dark_, fontScale_);
                 if(!tabs_->AddPage(page,wxui::toWx(page->document().title()),true))throw std::runtime_error("Could not add module scene tab");
                 page->resumeLoadingPlayback();
             } catch(...) {page->Destroy();throw;}
@@ -2997,12 +3029,14 @@ private:
 
     void chooseAndOpenModel(const std::filesystem::path& initialDirectory = {}) {
         wxFileDialog dialog(
-            this, "Open Odyssey model", neosettings::pathToWx(initialDirectory),
+            this, "Open Odyssey models", neosettings::pathToWx(initialDirectory),
             wxEmptyString,
             "Odyssey models (*.mdl;*.mdx;*.mdl.ascii)|*.mdl;*.MDL;*.mdx;*.MDX;*.mdl.ascii;*.MDL.ASCII|All files (*.*)|*.*",
-            wxFD_OPEN | wxFD_FILE_MUST_EXIST);
-        if (dialog.ShowModal() == wxID_OK)
-            openFile(neosettings::pathFromWx(dialog.GetPath()));
+            wxFD_OPEN | wxFD_FILE_MUST_EXIST | wxFD_MULTIPLE);
+        if (dialog.ShowModal() != wxID_OK) return;
+        wxArrayString paths;
+        dialog.GetPaths(paths);
+        for (const auto& path : paths) openFile(neosettings::pathFromWx(path));
     }
 
     void chooseTextureOverride() {
@@ -3200,7 +3234,9 @@ private:
                                    context_.compact, [this] { updateState(); });
         page->setResourceSession(std::move(session));
         page->setFileResources(std::move(fileResources));
-        page->setAppearance(dark_);
+        wxui::applyTheme(page, dark_);
+        neoview::applyFontScale(page, fontScale_);
+        page->setSourceAppearance(dark_, fontScale_);
         const auto index = replacement ? static_cast<std::size_t>(tabs_->GetPageIndex(replacement)) : tabs_->GetPageCount();
         if (!tabs_->InsertPage(index, page, title, true)) {
             page->Destroy();
@@ -3281,9 +3317,12 @@ private:
     void buildMenus() {
         auto* bar = new wxMenuBar;
         auto* file = new wxMenu;
-        file->Append(ID_Open, "&Open Model...\tCtrl+O");
+        file->Append(ID_Open, context_.embedded ? "&Open Models...\tCtrl+Shift+O" : "&Open Models...\tCtrl+O");
+        recentFilesMenu_ = new wxMenu;
+        neosettings::populateRecentFilesMenu(*recentFilesMenu_, settings_, ID_RecentFirst, ID_ClearRecent);
+        file->AppendSubMenu(recentFilesMenu_, "Open &Recent");
         file->Append(ID_Reload, "&Reload Model\tCtrl+R", "Reload the model from disk and reset its preview.");
-        file->Append(ID_SaveAscii, "Save &ASCII\tCtrl+S", "Save the text in the ASCII editor.");
+        file->Append(ID_SaveAscii, "Save &ASCII\tCtrl+S", "Save ASCII source text and collision companions. Use Compile ASCII to Binary to create MDL/MDX.");
         file->Append(ID_SaveAsciiAs, "Save ASCII As...\tCtrl+Shift+S", "Save the editor text to another file.");
         gameDirectoryMenu_ = neogames::appendOpenGameDirectoryMenu(
             *this, *file,
@@ -3307,11 +3346,17 @@ private:
         file->AppendSeparator();
         file->Append(ID_CloseModel, "&Close Model\tCtrl+W");
         file->Append(ID_CloseAll, "Close &All");
-        file->AppendSeparator();
-        file->Append(ID_Exit, "E&xit");
+        if (!context_.embedded) {
+            file->AppendSeparator();
+            file->Append(ID_Exit, "E&xit");
+        }
         bar->Append(file, "&File");
 
         auto* edit = new wxMenu;
+        edit->Append(ID_Undo, "&Undo ASCII Edit\tCtrl+Z", "Undo changes to the ASCII source text.");
+        edit->Append(ID_Redo, "&Redo ASCII Edit\tCtrl+Y");
+        edit->Append(ID_Find, "&Find in ASCII...\tCtrl+F");
+        edit->AppendSeparator();
         edit->Append(ID_NodeProperties, "Selected Node Properties...", "Edit the selected node's properties.");
         edit->Append(ID_NodeTransform,"Selected Node Transform...","Edit the selected binary node's base position, rotation and scale.");
         edit->Append(ID_VertexProperties, "Selected Mesh Vertex Properties...", "Edit stored vertex attributes in binary models, or source tables in ASCII models.");
@@ -3347,6 +3392,7 @@ private:
         bar->Append(developerMenu_, "&Developer");
 
         helpMenu_ = new wxMenu;
+        helpMenu_->Append(ID_Workflow, "Model Editing Workflow...");
         helpMenu_->Append(ID_About, "&About NeoMDL");
         bar->Append(helpMenu_, "&Help");
         setModuleMenus(bar);
@@ -3361,6 +3407,13 @@ private:
                 menu->Destroy(menu->FindItemByPosition(0));
 
         auto* view = viewMenu_;
+        if (!context_.embedded) {
+            view->AppendCheckItem(ID_DarkMode, "&Dark Mode");
+            view->Append(ID_FontIncrease, "Increase UI Font Size\tCtrl++");
+            view->Append(ID_FontDecrease, "Decrease UI Font Size\tCtrl+-");
+            view->Append(ID_FontReset, "Reset UI Font Size\tCtrl+0");
+            view->AppendSeparator();
+        }
         view->AppendCheckItem(ID_AsciiEditor, "ASCII Editor");
         view->Append(ID_FrameModel, "&Frame Model", "Press F while the viewport has keyboard focus.");
         auto* camera = new wxMenu;
@@ -3540,6 +3593,7 @@ private:
         const auto setCheck = [this](int id, bool checked) {
             if (auto* item = viewMenu_->FindItem(id)) item->Check(checked);
         };
+        setCheck(ID_DarkMode, dark_);
         setCheck(ID_OrbitCamera, active && !active->authoredCameraActive() && !active->freeFlyCameraActive());
         setCheck(ID_FreeFlyCamera, active && active->freeFlyCameraActive());
         setCheck(ID_AsciiEditor, active && active->asciiEditor() && active->asciiVisible());
@@ -4128,6 +4182,9 @@ private:
     }
 
     void bindEvents() {
+        Bind(wxEVT_MENU, [this](wxCommandEvent& event) {
+            openFile(settings_.recentFiles().at(static_cast<std::size_t>(event.GetId() - ID_RecentFirst)));
+        }, ID_RecentFirst, ID_RecentLast);
         Bind(wxEVT_IDLE, [this](wxIdleEvent& event) {
             wxString navigation;
             if (const auto* page = activePage()) {
@@ -4154,6 +4211,23 @@ private:
             if (jobRunning_) return;
             switch (event.GetId()) {
             case ID_Open: chooseAndOpenModel(); return;
+            case ID_Undo: activePage()->asciiEditor()->undo(); return;
+            case ID_Redo: activePage()->asciiEditor()->redo(); return;
+            case ID_Find:
+                activePage()->showAscii(true);
+                activePage()->asciiEditor()->focusSearch();
+                updateState(); return;
+            case ID_DarkMode:
+                settings_.setDarkMode(event.IsChecked());
+                setAppearance(event.IsChecked(), fontScale_); return;
+            case ID_FontIncrease: changeFontScale(1); return;
+            case ID_FontDecrease: changeFontScale(-1); return;
+            case ID_FontReset:
+                fontScaleWheelFilter_.reset();
+                settings_.setFontScale(neoview::kDefaultFontScale);
+                setAppearance(dark_, neoview::kDefaultFontScale); return;
+            case ID_ClearRecent:
+                settings_.clearRecentFiles(); return;
             case ID_Reload: reloadModel(activePage()->fileResources(), activePage()->resourceSession()); return;
             case ID_ModelResources: chooseModelResources(); return;
             case ID_SaveAscii: activePage()->asciiEditor()->save(); return;
@@ -4324,11 +4398,23 @@ private:
                 wxMessageBox("NeoMDL " NEOMDL_VERSION "\n\nModel viewer, ASCII editor and ASCII / binary MDL converter for Knights of the Old Republic I and II.\n\nEdit an individual model's ASCII beside its 3D preview. Inspect geometry, materials, animations, particles, lightsabers and area layouts. Model dependencies resolve through the model directory, the active resource session or a selected game installation.",
                              "About NeoMDL", wxOK | wxICON_INFORMATION, this);
                 return;
+            case ID_Workflow:
+                wxMessageBox(
+                    "Open a model, then click a mesh in the viewport or select a node in the tree.\n\n"
+                    "Binary editing: use File > Binary Mesh Editor to edit a model file. Save Copy writes a new MDL/MDX pair and opens it.\n\n"
+                    "ASCII editing: generate Standard or Advanced ASCII for a binary model, or open existing ASCII. Edits update the preview after a short pause. Save ASCII writes source text; File > Compile ASCII to Binary creates the game model. Undo/Redo applies to ASCII edits.\n\n"
+                    "Textures or supermodels missing? Choose Tools > Model Resource Installation, then inspect Resource Scope and Load Report. Changing the installation reloads the model and resets its preview.\n\n"
+                    "View and Scene effects, camera changes and playback are previews. These settings are not written into the model. Area previews do not edit or save module placements.\n\n"
+                    "Quick Convert and batch conversion read files from disk. Save ASCII edits before converting those files.",
+                    "Model Editing Workflow", wxOK | wxICON_INFORMATION, this);
+                return;
             case ID_Exit: requestModuleClose(); return;
             default: event.Skip(); return;
             }
         });
         Bind(wxEVT_MENU_OPEN, [this](wxMenuEvent& event) {
+            if (event.GetMenu() == recentFilesMenu_)
+                neosettings::populateRecentFilesMenu(*recentFilesMenu_, settings_, ID_RecentFirst, ID_ClearRecent);
             updateState();
             event.Skip();
         });
@@ -4345,6 +4431,9 @@ private:
             if (tabs_->GetPageText(index) != title) tabs_->SetPageText(index, title);
         }
         const bool area = active && !active->areaScene().empty();
+        enableModuleCommand(ID_Undo, editor && editor->ready() && !area && editor->canUndo());
+        enableModuleCommand(ID_Redo, editor && editor->ready() && !area && editor->canRedo());
+        enableModuleCommand(ID_Find, editor && editor->ready() && !area);
         const unsigned features = active ? active->previewFeatures() : 0u;
         if (features != previewMenuFeatures_) buildPreviewMenus(features);
         const std::pair<int, const char*> areaCommands[] = {
@@ -4424,7 +4513,8 @@ private:
         updateMenuChecks();
         if (const auto* page = active) {
             const auto& document = page->document();
-            setModuleStatusText(std::string(page->sourceFormat()) + " | " + neomdl::model::modelSummary(document.model()), 0);
+            setModuleStatusText((area && document.hasModelOwner() ? "Area preview | " : "") +
+                std::string(page->sourceFormat()) + " | " + neomdl::model::modelSummary(document.model()), 0);
             std::ostringstream right;
             right << document.loadedTextureCount() << " texture(s)";
             if (document.textureOverride())
@@ -4447,6 +4537,10 @@ private:
     wxAuiNotebook* tabs_{};
     RenderOptions options_;
     int asciiNormalMode_{};
+    neosettings::AppSettings settings_{"NeoMDL"};
+    neoview::FontScaleWheelFilter fontScaleWheelFilter_;
+    wxMenu* recentFilesMenu_{};
+    double fontScale_{neoview::kDefaultFontScale};
     bool dark_{};
     wxMenu* viewMenu_{};
     wxMenu* sceneMenu_{};

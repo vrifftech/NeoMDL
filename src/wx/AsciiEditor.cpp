@@ -15,6 +15,7 @@
 #include <wx/stc/stc.h>
 
 #include <algorithm>
+#include <cmath>
 
 namespace neomdl::ui {
 
@@ -42,13 +43,16 @@ AsciiEditor::AsciiEditor(wxWindow* parent, std::shared_ptr<const ModelDocument> 
     saveLocation_ = new wxStaticText(this, wxID_ANY, "ASCII file: not saved", wxDefaultPosition,
         wxDefaultSize, wxST_ELLIPSIZE_MIDDLE | wxST_NO_AUTORESIZE);
     layout->Add(saveLocation_, 0, wxEXPAND | wxLEFT | wxRIGHT | wxBOTTOM, FromDIP(5));
+    auto* saveHint = new wxStaticText(this, wxID_ANY,
+        "Save ASCII saves source text. Compile ASCII to Binary creates MDL/MDX.");
+    saveHint->Wrap(FromDIP(320));
+    layout->Add(saveHint, 0, wxEXPAND | wxLEFT | wxRIGHT | wxBOTTOM, FromDIP(5));
     editor_ = new wxStyledTextCtrl(this);
     editor_->SetCodePage(wxSTC_CP_UTF8);
     editor_->SetWrapMode(wxSTC_WRAP_NONE);
     editor_->SetUseTabs(false);
     editor_->SetTabWidth(2);
     editor_->SetMarginType(0, wxSTC_MARGIN_NUMBER);
-    editor_->SetMarginWidth(0, FromDIP(60));
     editor_->SetMarginWidth(1, 0);
     editor_->SetReadOnly(true);
     layout->Add(editor_, 1, wxEXPAND);
@@ -79,8 +83,7 @@ AsciiEditor::AsciiEditor(wxWindow* parent, std::shared_ptr<const ModelDocument> 
     });
     Bind(wxEVT_CHAR_HOOK, [this](wxKeyEvent& event) {
         if (event.ControlDown() && event.GetKeyCode() == 'F') {
-            search_->SetFocus();
-            search_->SelectAll();
+            focusSearch();
         } else if (event.ControlDown() && event.GetKeyCode() == WXK_RETURN && update_->IsEnabled()) {
             if (ready_) updatePreview();
             else generateAscii(format_->GetSelection()==1);
@@ -97,7 +100,7 @@ AsciiEditor::AsciiEditor(wxWindow* parent, std::shared_ptr<const ModelDocument> 
     } else {
         update_->SetLabel("Generate ASCII");
         update_->Enable(true);
-        status_->ChangeValue("Binary model loaded. Generate ASCII only when you want to edit its source text.");
+        status_->ChangeValue("Binary model loaded. File > Binary Mesh Editor edits binary model files with Save Copy. Generate ASCII to edit source text.");
     }
 }
 
@@ -255,14 +258,22 @@ void AsciiEditor::replaceText(const std::string& text) {
     updateAt_ = std::chrono::steady_clock::now();
 }
 
-void AsciiEditor::setAppearance(bool dark) {
+bool AsciiEditor::canUndo() const { return editor_->CanUndo(); }
+bool AsciiEditor::canRedo() const { return editor_->CanRedo(); }
+void AsciiEditor::undo() { editor_->Undo(); }
+void AsciiEditor::redo() { editor_->Redo(); }
+void AsciiEditor::focusSearch() { search_->SetFocus(); search_->SelectAll(); }
+
+void AsciiEditor::setAppearance(bool dark, double fontScale) {
     const auto colors = wxui::themePalette(dark);
-    editor_->StyleSetFont(wxSTC_STYLE_DEFAULT, wxFont(wxFontInfo(10).Family(wxFONTFAMILY_TELETYPE)));
+    const auto points = static_cast<int>(std::lround(10 * fontScale));
+    editor_->StyleSetFont(wxSTC_STYLE_DEFAULT, wxFont(wxFontInfo(points).Family(wxFONTFAMILY_TELETYPE)));
     editor_->StyleSetForeground(wxSTC_STYLE_DEFAULT, colors.text);
     editor_->StyleSetBackground(wxSTC_STYLE_DEFAULT, colors.field);
     editor_->StyleClearAll();
     editor_->StyleSetForeground(wxSTC_STYLE_LINENUMBER, colors.mutedText);
     editor_->StyleSetBackground(wxSTC_STYLE_LINENUMBER, colors.panel);
+    editor_->SetMarginWidth(0, editor_->TextWidth(wxSTC_STYLE_LINENUMBER, "9999999") + FromDIP(8));
     editor_->SetCaretForeground(colors.text);
     editor_->SetSelBackground(true, colors.selection);
     editor_->SetSelForeground(true, colors.selectionText);

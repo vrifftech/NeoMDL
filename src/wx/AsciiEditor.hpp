@@ -40,7 +40,12 @@ public:
     const std::shared_ptr<const ModelDocument>& source() const { return source_; }
     void updatePreview();
     void setPreviewEnabled(bool enabled) { previewEnabled_ = enabled; }
-    void setAppearance(bool dark);
+    void setAppearance(bool dark, double fontScale = 1.0);
+    bool canUndo() const;
+    bool canRedo() const;
+    void undo();
+    void redo();
+    void focusSearch();
     void cancelAndWait();
     bool save(bool choosePath = false);
     const CollisionSet& collisions() const noexcept { return collisions_; }

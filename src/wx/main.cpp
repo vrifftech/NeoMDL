@@ -5,12 +5,28 @@
 #include "neomdl_icon.xpm"
 
 #include <wx/app.h>
+#include <wx/dnd.h>
 #include <wx/frame.h>
 #include <wx/icon.h>
 #include <wx/image.h>
 #include <wx/sizer.h>
 
+#include <vector>
+
 namespace {
+
+class ModelDropTarget final : public wxFileDropTarget {
+public:
+    explicit ModelDropTarget(neomdl::ui::ModelEditorPanel* panel) : panel_(panel) {}
+    bool OnDropFiles(wxCoord, wxCoord, const wxArrayString& files) override {
+        bool opened = false;
+        for (const auto& file : files)
+            opened = panel_->openFile(neosettings::pathFromWx(file)) || opened;
+        return opened;
+    }
+private:
+    neomdl::ui::ModelEditorPanel* panel_;
+};
 
 class NeoMDLFrame final : public wxFrame {
 public:
@@ -21,6 +37,7 @@ public:
         context.titleChanged = [this](const wxString& title) { SetTitle(title); };
         context.closeRequested = [this] { Close(); };
         panel_ = neomdl::ui::createModelEditorPanel(this, std::move(context));
+        SetDropTarget(new ModelDropTarget(panel_));
         SetMenuBar(panel_->takeMenus().release());
         auto* layout = new wxBoxSizer(wxVERTICAL);
         layout->Add(panel_, 1, wxEXPAND);
@@ -63,8 +80,12 @@ public:
         auto* frame = new NeoMDLFrame;
         frame->Show();
         if (argc > 1) {
-            const auto path = neosettings::pathFromWx(wxString(argv[1]));
-            frame->CallAfter([frame, path] { frame->openStartup(path); });
+            std::vector<std::filesystem::path> paths;
+            for (int index = 1; index < argc; ++index)
+                paths.push_back(neosettings::pathFromWx(wxString(argv[index])));
+            frame->CallAfter([frame, paths] {
+                for (const auto& path : paths) frame->openStartup(path);
+            });
         }
         return true;
     }
