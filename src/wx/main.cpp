@@ -76,6 +76,7 @@ public:
     bool OnInit() override {
         SetAppName("NeoMDL");
         SetVendorName("Neo Tools");
+        wxui::initializeTheme("NeoMDL");
         wxInitAllImageHandlers();
         auto* frame = new NeoMDLFrame;
         frame->Show();
