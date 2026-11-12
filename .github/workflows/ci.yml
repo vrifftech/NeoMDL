@@ -9,7 +9,7 @@ permissions:
   contents: read
 
 concurrency:
-  group: ${{ github.workflow }}-${{ github.ref }}
+  group: ${{ github.workflow }}-${{ github.event_name }}-${{ github.event.pull_request.number || github.sha }}
   cancel-in-progress: true
 
 jobs:
@@ -144,8 +144,7 @@ jobs:
             -ExtraCMakeArgs @('-DNEOMDL_BUILD_WX_MODULE=OFF', '-DNEOMDL_BUILD_AREA_CLI=OFF')
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           if (-not (Test-Path "$stage/bin/NeoMDL.exe")) { throw 'NeoMDL.exe was not installed' }
-          Compress-Archive -Path "$stage/*" `
-            -DestinationPath "$env:RUNNER_TEMP/NeoMDL-$env:BUILD_PLATFORM.zip"
+          Copy-Item "$stage/bin/NeoMDL.exe" "$env:RUNNER_TEMP/NeoMDL-$env:BUILD_PLATFORM.exe"
 
       - name: Upload build
         uses: actions/upload-artifact@v7
@@ -154,3 +153,15 @@ jobs:
           path: ${{ runner.temp }}/NeoMDL-${{ matrix.platform }}.*
           if-no-files-found: error
           retention-days: 7
+
+  release:
+    name: Publish release
+    needs: [build]
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    permissions:
+      actions: read
+      contents: write
+    uses: vrifftech/neoshared/.github/workflows/publish-release.yml@main
+    with:
+      version-file: CMakeLists.txt
+      artifact-pattern: NeoMDL-*
