@@ -7,15 +7,18 @@ if(CMAKE_SOURCE_DIR STREQUAL CMAKE_CURRENT_SOURCE_DIR AND NOT DEFINED CMAKE_MSVC
     set(CMAKE_MSVC_RUNTIME_LIBRARY "MultiThreaded$<$<CONFIG:Debug>:Debug>" CACHE STRING "MSVC runtime library")
 endif()
 
-project(NeoMDL VERSION 0.1.12
+include("${CMAKE_CURRENT_LIST_DIR}/cmake/NeoSharedSource.cmake")
+include("${NEOSHARED_ROOT}/cmake/NeoVersion.cmake")
+neo_read_version_header(NEOMDL_VERSION
+    "${CMAKE_CURRENT_LIST_DIR}/src/core/Version.hpp"
+    NEOMDL_VERSION_STRING)
+project(NeoMDL VERSION ${NEOMDL_VERSION}
     DESCRIPTION "C++17/wxWidgets Odyssey MDL/MDX model renderer"
     LANGUAGES CXX)
 
-include("${CMAKE_CURRENT_LIST_DIR}/cmake/NeoSharedSource.cmake")
 include(GNUInstallDirs)
 message(STATUS "Using neoshared: ${NEOSHARED_ROOT}")
 include("${NEOSHARED_ROOT}/cmake/NeoMinimalRelease.cmake")
-include("${NEOSHARED_ROOT}/cmake/NeoVersion.cmake")
 include("${NEOSHARED_ROOT}/cmake/NeoMacOSBundle.cmake")
 set(NEOSHARED_ENABLE_ERF ON CACHE BOOL
     "Build the NeoShared ERF/MOD/RIM core required by installation resource lookup" FORCE)
