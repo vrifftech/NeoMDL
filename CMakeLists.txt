@@ -7,7 +7,7 @@ if(CMAKE_SOURCE_DIR STREQUAL CMAKE_CURRENT_SOURCE_DIR AND NOT DEFINED CMAKE_MSVC
     set(CMAKE_MSVC_RUNTIME_LIBRARY "MultiThreaded$<$<CONFIG:Debug>:Debug>" CACHE STRING "MSVC runtime library")
 endif()
 
-project(NeoMDL VERSION 0.1.11
+project(NeoMDL VERSION 0.1.12
     DESCRIPTION "C++17/wxWidgets Odyssey MDL/MDX model renderer"
     LANGUAGES CXX)
 
