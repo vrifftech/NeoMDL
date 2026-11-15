@@ -1410,7 +1410,7 @@ private:
         const bool tangentsReadable = enabledChannel(0x80u, mesh.mdxTangentOffset, 36u, "tangent");
         const bool skinChannelsReadable = mesh.skinned &&
             channelReadable(mesh.mdxWeightOffset, 16u) &&
-            channelReadable(mesh.mdxBoneIndexOffset, 8u);
+            channelReadable(mesh.mdxBoneIndexOffset, 16u);
         if (mesh.skinned && !skinChannelsReadable)
             throw ModelError(sourcePrefix(label_) + "Skin mesh " + model_.nodes[nodeIndex].name +
                              " has unreadable MDX weight/bone-index channels");
@@ -1463,9 +1463,10 @@ private:
                 for (std::size_t component = 0u; component < influence.weights.size(); ++component) {
                     influence.weights[component] = mdx.f32(
                         row + mesh.mdxWeightOffset + component * 4u, "MDX skin weight");
-                    influence.boneIndices[component] = mdx.u16(
-                        row + mesh.mdxBoneIndexOffset + component * 2u,
-                        "MDX skin bone index");
+                    influence.boneIndices[component] = static_cast<std::uint16_t>(
+                        static_cast<std::int32_t>(mdx.f32(
+                            row + mesh.mdxBoneIndexOffset + component * 4u,
+                            "MDX skin bone index")));
                 }
             }
         }

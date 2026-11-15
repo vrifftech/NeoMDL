@@ -2729,6 +2729,7 @@ neomdl::model::AnimationPlayResult ModelCanvas::playAnimationRun(
                                     playbackRate, flags, startTime);
     collectAnimationRuntimeEvents();
     if (result) {
+        animationRuntime_.rebuildPose(false);
         rebuildPose(false);
         Refresh(false);
     }

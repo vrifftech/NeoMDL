@@ -1098,7 +1098,10 @@ private:
         canvas_->clearAnimationRuns();
         stopPlayback();
         eventLog_.clear();
-        if (startAnimationRun() && resume) startPlayback();
+        if (startAnimationRun()) {
+            canvas_->frameModel();
+            if (resume) startPlayback();
+        }
         updateDetails(selectedNode_);
     }
 
