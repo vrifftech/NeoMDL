@@ -8,6 +8,7 @@
 #include <model/LightningControl.hpp>
 #include "core/EmitterBucket.hpp"
 #include "core/CreatureLipSync.hpp"
+#include "core/RoomSurfaceMesh.hpp"
 #include <neoshared/texture/FileUtil.hpp>
 #include <neoshared/PathUtf8.hpp>
 #include <neoshared/glu/Perspective.hpp>
@@ -471,13 +472,6 @@ ModelCanvas::ModelCanvas(wxWindow* parent)
     Bind(wxEVT_KEY_DOWN, &ModelCanvas::onKey, this);
     Bind(wxEVT_KEY_UP, &ModelCanvas::onKey, this);
     Bind(wxEVT_KILL_FOCUS, &ModelCanvas::onFocusLost, this);
-    Bind(wxEVT_IDLE, [this](wxIdleEvent& event) {
-        if (freeFlyCameraActive() && std::any_of(flyMovement_.begin(), flyMovement_.end(),
-                                               [](bool down) { return down; })) {
-            Refresh(false);
-            event.RequestMore();
-        }
-    });
 }
 
 ModelCanvas::~ModelCanvas() {
@@ -2252,6 +2246,7 @@ void ModelCanvas::setMeshVisibility(std::set<std::size_t> hidden,std::optional<s
 void ModelCanvas::copyCameraFrom(const ModelCanvas& source) {
     yaw_=source.yaw_;pitch_=source.pitch_;distance_=source.distance_;center_=source.center_;
     freeFly_=source.freeFly_;flyPosition_=source.flyPosition_;flySpeed_=source.flySpeed_;
+    flyCollision_=source.flyCollision_;
     cameraScene_.deactivate();resetCameraInput();
     if (const auto& attachment=source.cameraScene_.activeAttachment()) {
         synchronizeCameraScene();cameraScene_.activate(*attachment);bindExternalCameraControl();
@@ -3053,6 +3048,7 @@ void ModelCanvas::updateAnimationVisibility() {
 
 void ModelCanvas::advance(float elapsedSeconds, bool advanceParticles,
                           bool advanceAnimations) {
+    const bool cameraMoved = advanceCamera();
     if (!std::isfinite(elapsedSeconds) || elapsedSeconds < 0.0f) elapsedSeconds = 0.0f;
     synchronizeWorldClockCreatures();
     std::uint64_t snapshotMicroseconds=0u;
@@ -3161,7 +3157,7 @@ void ModelCanvas::advance(float elapsedSeconds, bool advanceParticles,
     }
     updateSceneBounds();
     if (elapsedSeconds > 0.0f &&
-        (options_.danglySimulation || options_.previewEmitters ||
+        (cameraMoved || options_.danglySimulation || options_.previewEmitters ||
          options_.previewLightsabers || options_.previewLights ||
          options_.previewTriggers ||
          !areaScene_.empty() || cameraScene_.anyActive() || animationAdvanced || textureCache_.hasProcedures() ||
@@ -3265,7 +3261,6 @@ void ModelCanvas::frameModel() {
         extent = maximumExtent(bounds);
     }
     distance_ = std::max(2.0f, extent * 2.1f);
-    flySpeed_ = extent * 0.5f;
     Refresh(false);
 }
 
@@ -3273,7 +3268,6 @@ void ModelCanvas::framePosition(model::Vec3 position, float extent) {
     useViewerCamera(false);
     center_=position;
     distance_=extent*2.1f;
-    flySpeed_=extent*0.5f;
     Refresh(false);
 }
 
@@ -3686,7 +3680,36 @@ model::Vec3 ModelCanvas::viewerCameraPosition() const {
     return {center_.x + offset.x, center_.y + offset.y, center_.z + offset.z};
 }
 
-void ModelCanvas::advanceCamera() {
+void ModelCanvas::moveFlyCamera(model::Vec3 position) {
+    if (flyCollision_) {
+        constexpr float clearance = 0.15f;
+        const model::Vec3 delta{position.x-flyPosition_.x, position.y-flyPosition_.y,
+                                position.z-flyPosition_.z};
+        const auto direction = model::normalize(delta);
+        const auto distance = std::hypot(delta.x, delta.y, delta.z);
+        model::Vec3 end{position.x+direction.x*clearance, position.y+direction.y*clearance,
+                         position.z+direction.z*clearance};
+        for (const auto& room : areaScene_.rooms()) {
+            RoomSurfaceHitInfo hit;
+            if (room.walkmesh && engineRoomHitAll(*room.walkmesh, flyPosition_, end, hit))
+                end = hit.position;
+        }
+        SceneHitInfo hit;
+        hit.surfaceMask = 0xbfffffffu; // Trigger volumes do not block navigation.
+        hit.includeClassificationOne = true;
+        hit.checkAlpha = false;
+        if (sceneQueries_.hit(flyPosition_, end, hit)) end = hit.position;
+        const auto travel = std::clamp(std::hypot(end.x-flyPosition_.x, end.y-flyPosition_.y,
+                                                 end.z-flyPosition_.z)-clearance, 0.0f, distance);
+        position = {flyPosition_.x+direction.x*travel, flyPosition_.y+direction.y*travel,
+                    flyPosition_.z+direction.z*travel};
+    }
+    flyPosition_ = position;
+    const auto offset = cameraOffset({0.0f, 0.0f, distance_});
+    center_ = {position.x-offset.x, position.y-offset.y, position.z-offset.z};
+}
+
+bool ModelCanvas::advanceCamera() {
     const auto now = std::chrono::steady_clock::now();
     const auto elapsedSeconds = std::chrono::duration<float>(now - cameraTick_).count();
     cameraTick_ = now;
@@ -3698,11 +3721,12 @@ void ModelCanvas::advanceCamera() {
         const auto length = std::hypot(direction.x, direction.y, direction.z);
         if (length > 0.0f) {
             const auto step = flySpeed_ * elapsedSeconds * (wxGetKeyState(WXK_SHIFT) ? 4.0f : 1.0f) / length;
-            flyPosition_.x += direction.x * step;
-            flyPosition_.y += direction.y * step;
-            flyPosition_.z += direction.z * step;
+            moveFlyCamera({flyPosition_.x+direction.x*step, flyPosition_.y+direction.y*step,
+                           flyPosition_.z+direction.z*step});
+            return true;
         }
     }
+    return false;
 }
 
 void ModelCanvas::onPaint(wxPaintEvent&) {
@@ -3712,7 +3736,6 @@ void ModelCanvas::onPaint(wxPaintEvent&) {
     // procedural scene work until that snapshot is committed or discarded.
     if (loading_) return;
     if (!context_ || !SetCurrent(*context_)) return;
-    advanceCamera();
     initializeGl();
     textureCache_.flushRetiredTextures();
     meshRenderer_.flushRetiredGeometry();
@@ -3831,19 +3854,14 @@ void ModelCanvas::onMouse(wxMouseEvent& event) {
         event.Skip();
         return;
     }
-    if (event.LeftDown() || (freeFly_ && event.RightDown())) {
-        draggingRotate_ = true;
+    if (event.LeftDown() || event.RightDown() || event.MiddleDown()) {
+        draggingRotate_ = event.LeftIsDown() || event.MiddleIsDown() || (freeFly_ && event.RightIsDown());
+        draggingPan_ = !freeFly_ && event.RightIsDown();
         lastMouse_ = event.GetPosition();
         if (!HasCapture()) CaptureMouse();
-    } else if (event.RightDown() || event.MiddleDown()) {
-        draggingPan_ = true;
-        lastMouse_ = event.GetPosition();
-        if (!HasCapture()) CaptureMouse();
-    } else if (event.LeftUp() || (freeFly_ && event.RightUp())) {
-        draggingRotate_ = event.LeftIsDown() || (freeFly_ && event.RightIsDown());
-        if (!draggingRotate_ && !draggingPan_ && HasCapture()) ReleaseMouse();
-    } else if (event.RightUp() || event.MiddleUp()) {
-        draggingPan_ = event.MiddleIsDown() || (!freeFly_ && event.RightIsDown());
+    } else if (event.LeftUp() || event.RightUp() || event.MiddleUp()) {
+        draggingRotate_ = event.LeftIsDown() || event.MiddleIsDown() || (freeFly_ && event.RightIsDown());
+        draggingPan_ = !freeFly_ && event.RightIsDown();
         if (!draggingRotate_ && !draggingPan_ && HasCapture()) ReleaseMouse();
     } else if (event.Dragging()) {
         const auto current = event.GetPosition();
@@ -3852,15 +3870,21 @@ void ModelCanvas::onMouse(wxMouseEvent& event) {
         if (draggingRotate_ && !selectionStart_) {
             yaw_ += static_cast<float>(delta.x) * 0.5f;
             pitch_ = std::clamp(pitch_ + static_cast<float>(delta.y) * 0.5f, -89.0f, 89.0f);
+            if (freeFly_) {
+                const auto offset = cameraOffset({0.0f, 0.0f, distance_});
+                if (event.MiddleIsDown())
+                    moveFlyCamera({center_.x+offset.x, center_.y+offset.y, center_.z+offset.z});
+                else
+                    center_ = {flyPosition_.x-offset.x, flyPosition_.y-offset.y, flyPosition_.z-offset.z};
+            }
         }
         if (draggingPan_) {
-            const auto scale = freeFly_ ? flySpeed_ * 0.003f : std::max(0.001f, distance_ * 0.0015f);
+            const auto scale = std::max(0.001f, distance_ * 0.0015f);
             const auto offset = cameraOffset({-static_cast<float>(delta.x) * scale,
                                               static_cast<float>(delta.y) * scale, 0.0f});
-            auto& position = freeFly_ ? flyPosition_ : center_;
-            position.x += offset.x;
-            position.y += offset.y;
-            position.z += offset.z;
+            center_.x += offset.x;
+            center_.y += offset.y;
+            center_.z += offset.z;
         }
         Refresh(false);
     }
@@ -4279,7 +4303,9 @@ void ModelCanvas::drawScene() {
         (explicitDirtyArea_?explicitDirtyIdentity_:areaScene_.identity())+"#"+std::to_string(dirtyAreaEpoch_));
     std::vector<render::ProcedureRegistration> pendingProcedures;
     std::unordered_set<const neoshared::texture::TextureData*> registeredTextures;
+    std::unordered_set<const ModelDocument*> registeredDocuments;
     const auto registerDocument=[&](const ModelDocument& resource) {
+        if (!registeredDocuments.insert(&resource).second) return;
         const auto registerTexture=[&](const std::string& name) {
             const auto* image=resource.texture(name);const auto metadata=resource.textureMetadata(name);
             if(!image || !metadata || !registeredTextures.insert(image).second)return;

@@ -164,6 +164,7 @@ enum CommandId {
     ID_ViewAreaCamera,
     ID_OrbitCamera,
     ID_FreeFlyCamera,
+    ID_FreeFlyCollision,
     ID_CameraControls,
     ID_CameraSettings,
     ID_ShowReferences,
@@ -847,6 +848,8 @@ public:
     }
     bool freeFlyCameraActive() const noexcept { return canvas_->freeFlyCameraActive(); }
     float freeFlySpeed() const noexcept { return canvas_->freeFlySpeed(); }
+    bool freeFlyCollision() const noexcept { return canvas_->freeFlyCollision(); }
+    void setFreeFlyCollision(bool enabled) { canvas_->setFreeFlyCollision(enabled); }
     const CameraScene& cameraScene() const noexcept {return canvas_->cameraScene();}
     const TriggerScene& triggerScene() const noexcept {return canvas_->triggerScene();}
     bool viewThroughSelectedCamera() {
@@ -3422,6 +3425,7 @@ private:
         auto* camera = new wxMenu;
         camera->AppendCheckItem(ID_OrbitCamera, "&Orbit");
         camera->AppendCheckItem(ID_FreeFlyCamera, "&Free Fly", "Press Shift+F while the viewport has keyboard focus.");
+        camera->AppendCheckItem(ID_FreeFlyCollision, "Free Fly &Collision", "Stop the free-fly camera at loaded walls, floors and objects.");
         camera->Append(ID_CameraControls, "Navigation Controls...");
         if (features & PreviewCameras) {
             camera->AppendSeparator();
@@ -3599,6 +3603,7 @@ private:
         setCheck(ID_DarkMode, dark_);
         setCheck(ID_OrbitCamera, active && !active->authoredCameraActive() && !active->freeFlyCameraActive());
         setCheck(ID_FreeFlyCamera, active && active->freeFlyCameraActive());
+        setCheck(ID_FreeFlyCollision, active && active->freeFlyCollision());
         setCheck(ID_AsciiEditor, active && active->asciiEditor() && active->asciiVisible());
         setCheck(ID_Textures, options_.textures);
         setCheck(ID_Lightmaps, options_.lightmaps);
@@ -4192,8 +4197,10 @@ private:
             wxString navigation;
             if (const auto* page = activePage()) {
                 if (page->authoredCameraActive()) navigation = "Authored Camera";
-                else if (page->freeFlyCameraActive())
+                else if (page->freeFlyCameraActive()) {
                     navigation = wxString::Format("Free Fly | %.3g units/s", double(page->freeFlySpeed()));
+                    if (page->freeFlyCollision()) navigation += " | Collision";
+                }
                 else navigation = "Orbit";
             }
             if (moduleStatusBar()->GetStatusText(2) != navigation)
@@ -4371,20 +4378,25 @@ private:
                 if (auto* page = activePage()) page->useViewerCamera(!page->freeFlyCameraActive());
                 updateState();
                 return;
+            case ID_FreeFlyCollision:
+                activePage()->setFreeFlyCollision(event.IsChecked());
+                updateMenuChecks();
+                return;
             case ID_CameraControls:
                 wxMessageBox(
                     "Left click: select a mesh; Shift-click: add or remove a mesh\n"
                     "Click empty space to clear selection\n\n"
                     "Orbit\n"
-                    "  Left drag: rotate around the pivot\n"
-                    "  Right or middle drag: pan\n"
+                    "  Left or middle drag: rotate around the pivot\n"
+                    "  Right drag: pan\n"
                     "  Mouse wheel: move closer or farther, continuing past the pivot\n\n"
                     "Free Fly (Shift+F to toggle)\n"
                     "  Click the viewport to give it keyboard focus\n"
                     "  W/S: forward/backward; A/D: left/right\n"
                     "  Q/E: down/up; hold Shift: move four times faster\n"
-                    "  Left or right drag: look around; middle drag: pan\n"
+                    "  Left or right drag: look around; middle drag: orbit the pivot\n"
                     "  Mouse wheel up/down: increase/decrease movement speed\n\n"
+                    "View > Camera > Free Fly Collision: stop at loaded collision geometry\n\n"
                     "F: return to Orbit and frame the model or area.",
                     "Camera Navigation", wxOK | wxICON_INFORMATION, this);
                 return;
@@ -4512,6 +4524,7 @@ private:
         enableModuleCommand(ID_ViewAreaCamera,active&&!active->cameraScene().areaCameras().empty());
         enableModuleCommand(ID_OrbitCamera, hasDocument);
         enableModuleCommand(ID_FreeFlyCamera, hasDocument);
+        enableModuleCommand(ID_FreeFlyCollision, hasDocument);
         enableModuleCommand(ID_CameraSettings,active&&active->cameraScene().engineRuntime());
         updateMenuChecks();
         if (const auto* page = active) {

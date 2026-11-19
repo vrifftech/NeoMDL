@@ -519,6 +519,8 @@ public:
     void useViewerCamera(bool freeFly);
     bool freeFlyCameraActive() const noexcept { return freeFly_ && !authoredCameraActive(); }
     float freeFlySpeed() const noexcept { return flySpeed_; }
+    bool freeFlyCollision() const noexcept { return flyCollision_; }
+    void setFreeFlyCollision(bool enabled) noexcept { flyCollision_ = enabled; }
     bool authoredCameraActive() const noexcept { return cameraScene_.anyActive()||dialogueCameraActive_||dialogueActorCameraActive_||activeAreaReplayCamera(); }
     ReferenceReattachResult reattachReferences(
         std::optional<std::size_t> ownerReference,
@@ -586,7 +588,8 @@ private:
     void onCaptureLost(wxMouseCaptureLostEvent& event);
     void considerMeshPick(const neomdl::render::MeshSubmission& submission);
     void resetCameraInput();
-    void advanceCamera();
+    bool advanceCamera();
+    void moveFlyCamera(model::Vec3 position);
     model::Vec3 cameraOffset(model::Vec3 local) const;
     model::Vec3 viewerCameraPosition() const;
     void initializeGl();
@@ -838,10 +841,11 @@ private:
     struct PolygonDrag {std::size_t vertex;model::Vec3 position;};
     std::optional<PolygonDrag> polygonDrag_;
     bool freeFly_{};
+    bool flyCollision_{};
     std::array<bool, 6> flyMovement_{};
     std::chrono::steady_clock::time_point cameraTick_{std::chrono::steady_clock::now()};
     model::Vec3 flyPosition_{};
-    float flySpeed_{5.0f};
+    float flySpeed_{2.0f};
     wxPoint lastMouse_;
     float yaw_{35.0f};
     float pitch_{25.0f};
