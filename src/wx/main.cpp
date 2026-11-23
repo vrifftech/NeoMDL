@@ -1,3 +1,4 @@
+#include "NeoUpdater.hpp"
 #include "wx/ModelEditorPanel.hpp"
 
 #include "NeoSettings.hpp"
@@ -80,6 +81,10 @@ public:
         wxInitAllImageHandlers();
         auto* frame = new NeoMDLFrame;
         frame->Show();
+#if !defined(__EMSCRIPTEN__)
+        neoupdate::install(*frame, NEO_UPDATE_APPLICATION, NEO_UPDATE_VERSION);
+#endif
+
         if (argc > 1) {
             std::vector<std::filesystem::path> paths;
             for (int index = 1; index < argc; ++index)

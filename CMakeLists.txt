@@ -276,6 +276,7 @@ if(NEOMDL_BUILD_WX_GUI OR NEOMDL_BUILD_WX_MODULE)
                 add_executable(NeoMDL src/wx/main.cpp)
             endif()
             target_include_directories(NeoMDL PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src/wx)
+            neo_enable_updates(NeoMDL "NeoMDL" "${PROJECT_VERSION}")
             target_link_libraries(NeoMDL PRIVATE neomdl_wx)
             target_compile_features(NeoMDL PRIVATE cxx_std_17)
             neo_add_windows_version_resource(NeoMDL
