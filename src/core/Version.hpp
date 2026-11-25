@@ -1,3 +1,3 @@
 #pragma once
 
-#define NEOMDL_VERSION_STRING "0.1.15"
+#define NEOMDL_VERSION_STRING "0.1.16"
