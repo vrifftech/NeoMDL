@@ -2285,6 +2285,8 @@ private:
             catch (const neoshared::bif::JobCancelled&) {
                 setModuleStatusText("Operation cancelled; current documents and scenes retained.", 0);
                 return false;
+            } catch (const std::exception& error) {
+                throw std::runtime_error(detail + ": " + error.what());
             }
         }
         if (!dialog.Update(1000) || cancelJob_.load()) {
