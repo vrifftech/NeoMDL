@@ -2,8 +2,11 @@
 #include "core/ResourceContext.hpp"
 #include "core/Engine2DA.hpp"
 #include <twoda/TwoDAFile.hpp>
+#include <algorithm>
+#include <iomanip>
 #include <map>
 #include <optional>
+#include <sstream>
 #include <stdexcept>
 
 namespace neomdl::detail {
@@ -22,7 +25,16 @@ struct AreaLoadTables {
         if(it==files.end()) {
             const auto r=resolver(file,0x7e1);areaTableRequire(bool(r),"missing "+file+".2da");
             job.update(0,0,"Decoding "+file+".2da");
-            neo2da::TwoDAFile t;t.loadBytes(r->bytes);job.check();it=files.emplace(file,std::move(t)).first;
+            neo2da::TwoDAFile t;
+            try {t.loadBytes(r->bytes);}
+            catch(const neo2da::TwoDAError& error) {
+                std::ostringstream context;
+                context<<file<<".2da from "<<r->sourceDescription<<"\nBytes: "<<r->bytes.size()<<"\nHeader:";
+                for(std::size_t n=0;n<std::min<std::size_t>(32,r->bytes.size());++n)
+                    context<<' '<<std::hex<<std::setfill('0')<<std::setw(2)<<unsigned(r->bytes[n]);
+                throw neo2da::TwoDAError(context.str()+"\n"+error.what(),error.helpContext());
+            }
+            job.check();it=files.emplace(file,std::move(t)).first;
         }
         return it->second;
     }
