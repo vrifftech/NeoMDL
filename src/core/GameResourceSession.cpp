@@ -229,7 +229,8 @@ bool GameResourceSession::open(const neoshared::game::GameInstall& supplied,std:
                 for(std::size_t n=0;n<aliases.size();++n)aliases[n].precedence=n;
             }
         }
-        for(auto& alias:aliases)alias.maximumDepth=b.game==model::GameVersion::Kotor1?0:1;
+        for(auto& alias:aliases)alias.maximumDepth=neoshared::override_aliases::overrideDepth(
+            b.game==model::GameVersion::Kotor1?neoshared::override_aliases::Game::Kotor:neoshared::override_aliases::Game::Kotor2);
         const auto directoryAliases=neoshared::override_aliases::directoryAliases(b.root,
             b.game==model::GameVersion::Kotor1?neoshared::override_aliases::Game::Kotor:neoshared::override_aliases::Game::Kotor2);
         const auto directory=[&](const std::string& name) {
@@ -455,6 +456,7 @@ ResourceResolver GameResourceSession::resolver() const {
         };
         if(b.mod&&b.mod->shadows(key.first,key.second,state->module?state->module->name:std::string{}))
             return b.mod->resolve(key.first,key.second,state->module?state->module->name:std::string{},job);
+        if(type==3006)return {}; // TXB is not a PC-game texture candidate.
         struct Location {const Mount* mount;std::size_t index;neoshared::ResourcePriority priority;};
         const auto locate=[&](const Key& wanted)->std::optional<Location> {
             for(const auto* mount:{&b.overrides,&b.priority,&state->images,&b.images,&state->archives,&b.globals})
@@ -465,10 +467,10 @@ ResourceResolver GameResourceSession::resolver() const {
         };
         const auto selected=locate(key);if(!selected)return {};
         if(neoshared::isTextureType(type)) {
-            const auto requested=std::size_t(std::find(std::begin(neoshared::textureTypes),std::end(neoshared::textureTypes),type)-std::begin(neoshared::textureTypes));
-            for(std::size_t n=0;n<std::size(neoshared::textureTypes);++n)
-                if(const auto other=locate({key.first,neoshared::textureTypes[n]});other&&
-                    std::pair{other->priority,n}<std::pair{selected->priority,requested})return {};
+            for(const auto format:neoshared::kotorTextureTypes)
+                if(const auto other=locate({key.first,format});other&&
+                    neoshared::texturePreference(other->priority,format)<
+                    neoshared::texturePreference(selected->priority,type))return {};
         }
         if(selected->mount)return read(*selected->mount,selected->index,selected->mount==&b.overrides?"directory":
             selected->mount==&b.priority?"priority archive":selected->priority==neoshared::ResourcePriority::Image?"image":"archive");
