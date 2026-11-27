@@ -775,6 +775,10 @@ public:
     const std::shared_ptr<GameResourceSession>& resourceSession() const {return resourceSession_;}
     void setFileResources(ResourceResolver resolver) { fileResources_ = std::move(resolver); }
     const ResourceResolver& fileResources() const { return fileResources_; }
+    void setResourceCapture(neoshared::ResourceResolverFactory capture) {resourceCapture_=std::move(capture);}
+    const neoshared::ResourceResolverFactory& resourceCapture() const {return resourceCapture_;}
+    void setResourceSnapshot(std::optional<neoshared::ResourceDocument> source) {resourceSnapshot_=std::move(source);}
+    const std::optional<neoshared::ResourceDocument>& resourceSnapshot() const {return resourceSnapshot_;}
     void setOptions(const RenderOptions& options) {
         canvas_->setOptions(options);
         updateAnimationControls();
@@ -1317,7 +1321,6 @@ private:
             for (std::size_t index = 0; index < document_->model().nodes.size(); ++index)
                 appendNode(root, index);
         }
-        tree_->Expand(root);
     }
 
     void updateDetails(std::optional<std::size_t> selected) {
@@ -1945,6 +1948,8 @@ private:
     unsigned loadingSuspensions_{};
     std::shared_ptr<GameResourceSession> resourceSession_;
     ResourceResolver fileResources_;
+    neoshared::ResourceResolverFactory resourceCapture_;
+    std::optional<neoshared::ResourceDocument> resourceSnapshot_;
 };
 
 class ModelEditorPanelImpl final : public ModelEditorPanel {
@@ -1994,7 +1999,7 @@ public:
         }
     }
 
-    bool openFile(const std::filesystem::path& path) override {
+    bool openFile(const std::filesystem::path& path,neoshared::ResourceResolverFactory resources={}) override {
         if (jobRunning_) return false;
         try {
             for (std::size_t index = 0; index < tabs_->GetPageCount(); ++index) {
@@ -2007,7 +2012,11 @@ public:
             }
             // Packed headers identify the game. ASCII construction uses the
             // explicitly selected engine rules before resolving dependencies.
-            const auto host = captureHostResolver();
+            if(!resources&&context_.captureSourceResources) {
+                neoshared::ResourceDocument source;source.sourcePath=path;
+                resources=context_.captureSourceResources(source);
+            }
+            const auto host = captureHostResolver({},resources);
             auto document = std::make_unique<ModelDocument>();
             ModelFileSource source;
             std::optional<model::GameVersion> asciiGame;
@@ -2038,8 +2047,10 @@ public:
                 document->appendDiagnostic(std::move(installationWarning));
             }
 
-            if (!activateResource(document->identity()))
+            if (!activateResource(document->identity())) {
                 addDocument(std::move(document),installationSession,combined);
+                activePage()->setResourceCapture(std::move(resources));
+            }
             settings_.addRecentFile(path);
             return true;
         } catch (const neoshared::bif::JobCancelled&) {
@@ -2050,12 +2061,13 @@ public:
         }
     }
 
-    bool openResource(neoshared::ResourceDocument resource) override {
+    bool openResource(neoshared::ResourceDocument resource,neoshared::ResourceResolverFactory resources={}) override {
         if (jobRunning_) return false;
         if (!resource.identity.empty() && activateResource(resource.identity)) return true;
         try {
             auto document = std::make_unique<ModelDocument>();
-            const auto resolver = captureHostResolver(resource.module.empty()?neoshared::bif::ModFolder::moduleName(resource.sourcePath):resource.module);
+            if(!resources&&context_.captureSourceResources)resources=context_.captureSourceResources(resource);
+            const auto resolver = captureHostResolver(resource.module.empty()?neoshared::bif::ModFolder::moduleName(resource.sourcePath):resource.module,resources);
             std::optional<model::GameVersion> asciiGame;
             if (!loadModelWithGame("Loading model resource",asciiGame,
                 [&](const neoshared::bif::JobControl& job,std::optional<model::GameVersion> game) {
@@ -2065,6 +2077,8 @@ public:
             // the resolved identity as well so opening both halves reuses one tab.
             if (activateResource(document->identity())) return true;
             addDocument(std::move(document));
+            activePage()->setResourceCapture(std::move(resources));
+            activePage()->setResourceSnapshot(std::move(resource));
             return true;
         } catch (const std::exception& error) {
             wxui::showError(this, error);
@@ -2166,22 +2180,43 @@ private:
         }
     }
 
-    void reloadModel(ResourceResolver resources, std::shared_ptr<GameResourceSession> session) {
+    bool reloadModel(ResourceResolver resources, std::shared_ptr<GameResourceSession> session) {
         auto* page = activePage();
-        if (!confirmDiscard(page)) return;
+        if (!confirmDiscard(page)) return false;
         try {
             auto document = std::make_unique<ModelDocument>();
             std::optional<model::GameVersion> game = page->document().model().game;
             if (!loadModelWithGame("Reloading model", game,
                 [&](const neoshared::bif::JobControl& job, std::optional<model::GameVersion> target) {
-                    auto source=readModelFileSource(page->document().path(),job);source.mod=modFolder_;
-                    document->openFile(std::move(source), resources, job, target);
-                })) return;
+                    if(page->resourceSnapshot())document->openResource(*page->resourceSnapshot(),resources,job,target);
+                    else {
+                        auto source=readModelFileSource(page->document().path(),job);source.mod=modFolder_;
+                        document->openFile(std::move(source), resources, job, target);
+                    }
+                })) return false;
             addDocument(std::move(document), std::move(session), std::move(resources), page);
+            return true;
         } catch (const std::exception& error) {
             wxui::showError(this, error);
+            return false;
         }
     }
+
+    void reloadModelResources() try {
+        auto* page=activePage();
+        auto session=page->resourceSession();
+        if(session) {
+            const auto installation=*session->installation();
+            session=std::make_shared<GameResourceSession>();
+            if(!runJob("Refreshing model resources",[&](const neoshared::bif::JobControl& job) {
+                std::string error;
+                if(!session->open(installation,error,job,modFolder_))throw std::runtime_error(error);
+            }))return;
+        }
+        const auto host=page->resourceCapture()?captureHostResolver({},page->resourceCapture()):ResourceResolver{};
+        auto resources=combineResolvers(host,session?session->resolver():ResourceResolver{});
+        reloadModel(std::move(resources),std::move(session));
+    } catch(const std::exception& error) {wxui::showError(this,error);}
 
     void chooseModelResources() {
         const auto* page = activePage();
@@ -2214,7 +2249,7 @@ private:
                     if (!session->open(install, error, job,modFolder_)) throw std::runtime_error(error);
                 })) return;
             }
-            reloadModel(session ? session->resolver() : ResourceResolver{}, session);
+            if(reloadModel(session ? session->resolver() : ResourceResolver{}, session))activePage()->setResourceCapture({});
         } catch (const std::exception& error) {
             wxui::showError(this, error);
         }
@@ -2296,9 +2331,9 @@ private:
         return true;
     }
 
-    ResourceResolver captureHostResolver(const std::string& module={}) const {
-        if (context_.captureResourceResolver) {
-            auto resolver = !module.empty()&&context_.captureScopedResourceResolver?
+    ResourceResolver captureHostResolver(const std::string& module={},const neoshared::ResourceResolverFactory& source={}) const {
+        if (source || context_.captureResourceResolver) {
+            auto resolver = source?source():!module.empty()&&context_.captureScopedResourceResolver?
                 context_.captureScopedResourceResolver(module):context_.captureResourceResolver();
             if (!resolver) return {};
             return [resolver = std::move(resolver)](const std::string& resref, std::uint16_t type) {
@@ -3242,6 +3277,10 @@ private:
                                    context_.compact, [this] { updateState(); });
         page->setResourceSession(std::move(session));
         page->setFileResources(std::move(fileResources));
+        if(replacement) {
+            page->setResourceCapture(replacement->resourceCapture());
+            if(page->document().path().empty())page->setResourceSnapshot(replacement->resourceSnapshot());
+        }
         wxui::applyTheme(page, dark_);
         neoview::applyFontScale(page, fontScale_);
         page->setSourceAppearance(dark_, fontScale_);
@@ -3329,7 +3368,7 @@ private:
         recentFilesMenu_ = new wxMenu;
         neosettings::populateRecentFilesMenu(*recentFilesMenu_, settings_, ID_RecentFirst, ID_ClearRecent);
         file->AppendSubMenu(recentFilesMenu_, "Open &Recent");
-        file->Append(ID_Reload, "&Reload Model\tCtrl+R", "Reload the model from disk and reset its preview.");
+        file->Append(ID_Reload, "&Reload Model\tCtrl+R", "Reload model resources and reset its preview.");
         file->Append(ID_SaveAscii, "Save &ASCII\tCtrl+S", "Save ASCII source text and collision companions. Use Compile ASCII to Binary to create MDL/MDX.");
         file->Append(ID_SaveAsciiAs, "Save ASCII As...\tCtrl+Shift+S", "Save the editor text to another file.");
         gameDirectoryMenu_ = neogames::appendOpenGameDirectoryMenu(
@@ -4240,7 +4279,7 @@ private:
                 setAppearance(dark_, neoview::kDefaultFontScale); return;
             case ID_ClearRecent:
                 settings_.clearRecentFiles(); return;
-            case ID_Reload: reloadModel(activePage()->fileResources(), activePage()->resourceSession()); return;
+            case ID_Reload: reloadModelResources(); return;
             case ID_ModelResources: chooseModelResources(); return;
             case ID_SaveAscii: activePage()->asciiEditor()->save(); return;
             case ID_SaveAsciiAs: activePage()->asciiEditor()->save(true); return;
@@ -4490,7 +4529,7 @@ private:
         enableModuleCommand(ID_ClearTextureOverride, modelPreview && active->document().textureOverride());
         enableModuleCommand(ID_ResourceProvenance,hasDocument);
         const bool looseModel = active && !active->document().path().empty() && !area;
-        enableModuleCommand(ID_Reload, looseModel);
+        enableModuleCommand(ID_Reload, active && !area && (looseModel || active->resourceSnapshot().has_value()));
         enableModuleCommand(ID_ModelResources, looseModel);
         enableModuleCommand(ID_LoadArea,hasDocument&&engineAreaRuntimeSupported(activePage()->document().model().game));
         enableModuleCommand(ID_ClearArea,hasDocument&&!activePage()->areaScene().empty());
