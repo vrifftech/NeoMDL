@@ -13,6 +13,9 @@
 #include <wx/sizer.h>
 #include <wx/stattext.h>
 
+#include <fstream>
+#include <set>
+
 namespace neomdl::ui {
 
 void chooseConversionNaming(wxWindow* parent) {
@@ -45,8 +48,10 @@ void showBatchConversion(wxWindow* parent, ConversionMode mode, const AuthoringJ
         wxDefaultPosition, wxDefaultSize, wxDIRP_DEFAULT_STYLE | wxDIRP_USE_TEXTCTRL);
     layout->Add(directory, 0, wxEXPAND | wxALL, dip(10));
     auto* settings = new wxBoxSizer(wxHORIZONTAL);
-    settings->Add(new wxStaticText(&dialog, wxID_ANY, "Game for ASCII compilation"), 0, wxALIGN_CENTER_VERTICAL | wxRIGHT, dip(6));
+    settings->Add(new wxStaticText(&dialog, wxID_ANY,
+        mode == ConversionMode::Binary ? "Output game" : "Game for ASCII inputs"), 0, wxALIGN_CENTER_VERTICAL | wxRIGHT, dip(6));
     auto* game = new wxChoice(&dialog, wxID_ANY); game->Append("K1"); game->Append("K2"); game->SetSelection(0);
+    game->SetToolTip("Binary-to-ASCII conversion detects the game from the input file.");
     settings->Add(game, 0, wxRIGHT, dip(18));
     auto* naming = new wxChoice(&dialog, wxID_ANY);
     for (const auto* name : asciiNamingLabels) naming->Append(name);
@@ -73,27 +78,38 @@ void showBatchConversion(wxWindow* parent, ConversionMode mode, const AuthoringJ
     layout->Add(buttons, 0, wxEXPAND | wxALL, dip(10));
     dialog.SetSizer(layout); dialog.SetMinSize(parent->FromDIP(wxSize(820,510)));
     std::vector<std::filesystem::path> paths;
+    std::set<std::filesystem::path> asciiInputs;
     const auto controls = [&] {
         remove->Enable(files->GetSelectedItemCount() != 0);
         convert->Enable(!paths.empty() && !directory->GetPath().empty());
         advanced->Enable(mode != ConversionMode::Binary); naming->Enable(mode != ConversionMode::Binary);
+        game->Enable(mode == ConversionMode::Binary || !asciiInputs.empty());
     };
     add->Bind(wxEVT_BUTTON, [&](wxCommandEvent&) {
         wxFileDialog file(&dialog, "Add Models", {}, {},
             "Models (*.mdl;*.mdl.ascii)|*.mdl;*.MDL;*.mdl.ascii;*.MDL.ASCII", wxFD_OPEN | wxFD_FILE_MUST_EXIST | wxFD_MULTIPLE);
         if (file.ShowModal() != wxID_OK) return;
         wxArrayString selected; file.GetPaths(selected);
-        for (const auto& name : selected) {
-            const auto path = neosettings::pathFromWx(name);
-            if (std::find(paths.begin(), paths.end(), path) != paths.end()) continue;
-            files->InsertItem(paths.size(), name); paths.push_back(path);
-        }
-        if (directory->GetPath().empty()) directory->SetPath(neosettings::pathToWx(paths.front().parent_path()));
+        try {
+            for (const auto& name : selected) {
+                const auto path = neosettings::pathFromWx(name);
+                if (std::find(paths.begin(), paths.end(), path) != paths.end()) continue;
+                std::ifstream input(path, std::ios::binary);
+                input.exceptions(std::ios::failbit | std::ios::badbit);
+                std::vector<std::uint8_t> header(8);
+                input.read(reinterpret_cast<char*>(header.data()), header.size());
+                if (model::isAsciiModelInput(header)) asciiInputs.insert(path);
+                files->InsertItem(paths.size(), name); paths.push_back(path);
+                if (directory->GetPath().empty()) directory->SetPath(neosettings::pathToWx(path.parent_path()));
+            }
+        } catch (const std::exception& error) { wxui::showError(&dialog, error); }
         controls();
     });
     remove->Bind(wxEVT_BUTTON, [&](wxCommandEvent&) {
         for (long i = files->GetItemCount() - 1; i >= 0; --i)
-            if (files->GetItemState(i, wxLIST_STATE_SELECTED)) { paths.erase(paths.begin() + i); files->DeleteItem(i); }
+            if (files->GetItemState(i, wxLIST_STATE_SELECTED)) {
+                asciiInputs.erase(paths[i]); paths.erase(paths.begin() + i); files->DeleteItem(i);
+            }
         controls();
     });
     files->Bind(wxEVT_LIST_ITEM_SELECTED, [&](wxListEvent&) { controls(); });

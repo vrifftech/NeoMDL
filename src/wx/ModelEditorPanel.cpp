@@ -342,7 +342,6 @@ public:
         timeline_ = new wxSlider(playback, wxID_ANY, 0, 0, 1000, wxDefaultPosition,
                                  wxDefaultSize, wxSL_HORIZONTAL);
         timeLabel_ = new wxStaticText(playback, wxID_ANY, "No active run");
-        timeLabel_->SetMinSize(wxSize(FromDIP(150), wxDefaultCoord));
 
         animationChoice_->SetToolTip(
             "Choose an animation to preview. In Advanced animation, Add Animation layers the selected clip.");
@@ -359,15 +358,15 @@ public:
         reportLoopCheck_->SetToolTip(
             "Include animation loop events in detailed diagnostics.");
         playButton_->SetToolTip(
-            "Play or pause the preview, including any layered animations.");
+            "Play or pause this model's animation runs. Area objects and reference models have independent playback.");
         fadeRunButton_->SetToolTip(
             "Fade out the selected animation using its transition time.");
         removeRunButton_->SetToolTip(
             "Remove the selected animation immediately.");
-        clearRunsButton_->SetToolTip("Stop all animations and return to the bind pose.");
+        clearRunsButton_->SetToolTip("Stop this model's animation runs and return it to the bind pose.");
 
         auto* clipRow = new wxWrapSizer(wxHORIZONTAL);
-        clipRow->Add(new wxStaticText(playback, wxID_ANY, "Animation:"), 0,
+        clipRow->Add(new wxStaticText(playback, wxID_ANY, "Model animation:"), 0,
                      wxALIGN_CENTER_VERTICAL | wxRIGHT | wxBOTTOM, FromDIP(5));
         clipRow->Add(animationChoice_, 0,
                      wxALIGN_CENTER_VERTICAL | wxRIGHT | wxBOTTOM, FromDIP(6));
@@ -815,11 +814,11 @@ public:
         canvas_->installArea(std::move(pending),std::move(sounds));
         updatePreviewFeatures();
         updateAsciiVisibility();
+        updateDetails(selectedNode_);
     }
     void configureSceneAudio(std::optional<ExoRandom::State> state) {canvas_->configureSceneAudio(state);}
 
     void stopSceneAudio() {canvas_->stopSceneAudio();}
-    void ensureSceneAudioProvider() {canvas_->ensureSceneAudioProvider();}
     std::optional<ExoRandom::State> sceneAudioRandomState() const {return canvas_->sceneAudioRandomState();}
     const std::string& sceneAudioStatus() const {return canvas_->sceneAudioStatus();}
     const ShadowScene& shadowScene() const noexcept {return canvas_->shadowScene();}
@@ -827,7 +826,7 @@ public:
     std::string engineExecutionReport() const {return canvas_->engineExecutionReport();}
     void setSceneShadowInputs(SceneShadowInputs inputs) {canvas_->setSceneShadowInputs(std::move(inputs));}
     void setSceneCasterEnabled(LightOwnerId owner,bool enabled) {canvas_->setSceneCasterEnabled(owner,enabled);}
-    void clearArea() { canvas_->clearArea(); updatePreviewFeatures(); updateAsciiVisibility(); }
+    void clearArea() { canvas_->clearArea(); updatePreviewFeatures(); updateAsciiVisibility(); updateDetails(selectedNode_); }
     const AreaScene& areaScene() const noexcept { return canvas_->areaScene(); }
     void setAreaRoom(std::optional<LightRoomId> id) { canvas_->setAreaRoom(id); }
     void useReplayedAreaRoom() {canvas_->useReplayedAreaRoom();}
@@ -1285,8 +1284,9 @@ private:
         }
 
         if (playing_ && !hasRuns) playing_ = false;
-        playButton_->SetValue(playing_);
-        playButton_->SetLabel(playing_ ? "Pause" : "Play");
+        if (playButton_->GetValue() != playing_) playButton_->SetValue(playing_);
+        const wxString playLabel = playing_ ? "Pause" : "Play";
+        if (playButton_->GetLabel() != playLabel) playButton_->SetLabel(playLabel);
         if (auto* parent = timeLabel_->GetParent()) parent->Layout();
     }
 
@@ -1347,6 +1347,10 @@ private:
             updateDetailedDiagnostics(selected);
         } else {
             std::ostringstream text;
+            if (document_->hasModelOwner() && !areaScene().empty())
+                text << "Model being edited: " << document_->title() << "\n"
+                     << "Area context: " << areaScene().layoutSource().fileName << "\n"
+                     << "Save and Compile apply to the model.\n\n";
             if (selectedNodes_.size()>1) text<<selectedNodes_.size()<<" nodes selected\n\n";
             if (selected) {
                 const auto& node = document_->model().nodes[*selected];
@@ -2321,7 +2325,7 @@ private:
         wxSingleChoiceDialog dialog(this,
             "Choose resources for this model. Files beside the model take precedence.\n"
             "Applying reloads the model and resets its preview.\n\n"
-            "Manage installations under File > Open Model from Saved Directory.",
+            "Manage installations under Open Model from Saved Directory > Manage Directories.",
             "Model Resource Installation", choices);
         dialog.SetSelection(selected);
         if (dialog.ShowModal() != wxID_OK) return;
@@ -2762,7 +2766,7 @@ private:
             wxMessageBox("Open a model using a supported area runtime before loading area context.","Area context",wxOK|wxICON_INFORMATION,this);
             return;
         }
-        wxFileDialog dialog(this,"Load area layout (packed room models)",wxEmptyString,wxEmptyString,
+        wxFileDialog dialog(this,"Load area context for the current model",wxEmptyString,wxEmptyString,
             "Area layouts (*.lyt)|*.lyt;*.LYT",wxFD_OPEN|wxFD_FILE_MUST_EXIST);
         if (dialog.ShowModal()!=wxID_OK) return;
         try {
@@ -2932,7 +2936,7 @@ private:
             names.Add(wxui::toWx(object->label()+" — "+areaObjectKindName(object->kind())+
                 " ["+std::to_string(object->instanceIndex())+"]"));objects.push_back(object.get());
         }
-        if(objects.empty()){wxMessageBox("This layout has no animated room or track Gobs.","Area animation",wxOK|wxICON_INFORMATION,this);return;}
+        if(objects.empty()){wxMessageBox("This area has no objects with independent animation playback.","Area animation",wxOK|wxICON_INFORMATION,this);return;}
         const int selected=wxGetSingleChoiceIndex("Select an independent area owner", "Area animation",names,this);
         if(selected<0)return;
         const auto* object=objects.at(static_cast<std::size_t>(selected));
@@ -2958,10 +2962,14 @@ private:
         const int selected=wxGetSingleChoiceIndex("Room receiving PlayRoomAnimation", "Room script animation",names,this);
         if(selected<0)return;
         wxDialog dialog(this,wxID_ANY,"Room script animation");auto* root=new wxBoxSizer(wxVERTICAL);
-        root->Add(new wxStaticText(&dialog,wxID_ANY,"Animation number (engine unsigned 16-bit conversion)"),0,wxALL,10);
+        root->Add(new wxStaticText(&dialog,wxID_ANY,"Script animation number (PlayRoomAnimation)"),0,wxALL,10);
         auto* number=new wxSpinCtrl(&dialog,wxID_ANY,wxEmptyString,wxDefaultPosition,wxDefaultSize,
             wxSP_ARROW_KEYS,std::numeric_limits<std::int32_t>::min(),std::numeric_limits<std::int32_t>::max(),0);
-        root->Add(number,0,wxEXPAND|wxALL,10);root->Add(dialog.CreateButtonSizer(wxOK|wxCANCEL),0,wxALL,10);
+        number->SetToolTip("The engine converts this number to an unsigned 16-bit value.");
+        root->Add(number,0,wxEXPAND|wxALL,10);
+        root->Add(new wxStaticText(&dialog,wxID_ANY,
+            "To select an animation by name, use Area Object Animation instead."),0,wxALL,10);
+        root->Add(dialog.CreateButtonSizer(wxOK|wxCANCEL),0,wxALL,10);
         dialog.SetSizerAndFit(root);if(dialog.ShowModal()!=wxID_OK)return;
         page->playRoomAnimation(page->areaScene().rooms()[std::size_t(selected)].name,number->GetValue());
     }
@@ -2971,34 +2979,38 @@ private:
         for(const auto& object:page->areaScene().objects())if(object->kind()==AreaObjectKind::Door) {
             names.Add(wxui::toWx(object->label()));instances.push_back(object->instanceIndex());
         }
-        const int selected=wxGetSingleChoiceIndex("Choose an loaded door", "Door OpenState",names,this);
+        const int selected=wxGetSingleChoiceIndex("Choose a loaded door", "Door State",names,this);
         if(selected<0)return;
-        wxArrayString states;
-        for(unsigned state=0;state<4;++state)states.Add(wxString::Format("OpenState %u",state));
-        const int state=wxGetSingleChoiceIndex("Apply the engine serialized door state", "Door OpenState",states,this);
-        if(state<0)return;
         const auto* object=page->areaScene().object(instances.at(static_cast<std::size_t>(selected)));
         const auto& command=object->effectiveVisualState().animation;
-        const auto initial=command?command->doorAnimationSelector:1;
-        wxDialog selectorDialog(this,wxID_ANY,"Door animation selector");
-        auto* box=new wxBoxSizer(wxVERTICAL);
-        box->Add(new wxStaticText(&selectorDialog,wxID_ANY,
-            "Engine OpenState 3 uses client animation 0x147 when this value is zero, and 0x14A otherwise.\n"
-            "The engine door constructor initializes it to 1."),0,wxALL,10);
-        auto* selector=new wxSpinCtrl(&selectorDialog,wxID_ANY,wxEmptyString,wxDefaultPosition,wxDefaultSize,
-            wxSP_ARROW_KEYS,std::numeric_limits<std::int32_t>::min(),std::numeric_limits<std::int32_t>::max(),initial);
-        box->Add(selector,0,wxEXPAND|wxALL,10);
-        box->Add(selectorDialog.CreateButtonSizer(wxOK|wxCANCEL),0,wxALL,10);selectorDialog.SetSizerAndFit(box);
-        if(selectorDialog.ShowModal()!=wxID_OK)return;
+        wxDialog dialog(this,wxID_ANY,"Door State");auto* box=new wxBoxSizer(wxVERTICAL);
+        box->Add(new wxStaticText(&dialog,wxID_ANY,"Preview state for the selected door"),0,wxALL,10);
+        auto* state=new wxChoice(&dialog,wxID_ANY);
+        for(const auto* label:{"Closed (0)","Open, first direction (1)","Open, second direction (2)","Special animation (3)"})state->Append(label);
+        state->SetSelection(0);box->Add(state,0,wxEXPAND|wxALL,10);
+        auto* advanced=new wxCollapsiblePane(&dialog,wxID_ANY,"Advanced animation selector");
+        auto* panel=advanced->GetPane();auto* fields=new wxBoxSizer(wxVERTICAL);
+        fields->Add(new wxStaticText(panel,wxID_ANY,
+            "State 3 uses animation 0x147 when the selector is zero, and 0x14A otherwise.\n"
+            "Other states do not use this selector."),0,wxALL,10);
+        auto* selector=new wxSpinCtrl(panel,wxID_ANY,wxEmptyString,wxDefaultPosition,wxDefaultSize,
+            wxSP_ARROW_KEYS,std::numeric_limits<std::int32_t>::min(),std::numeric_limits<std::int32_t>::max(),
+            command?command->doorAnimationSelector:1);
+        selector->Enable(false);fields->Add(selector,0,wxEXPAND|wxALL,10);panel->SetSizer(fields);
+        state->Bind(wxEVT_CHOICE,[=](wxCommandEvent&){selector->Enable(state->GetSelection()==3);});
+        box->Add(advanced,0,wxEXPAND|wxALL,10);
+        box->Add(dialog.CreateButtonSizer(wxOK|wxCANCEL),0,wxALL|wxALIGN_RIGHT,10);dialog.SetSizerAndFit(box);
+        if(dialog.ShowModal()!=wxID_OK)return;
         std::string error;
-        if(!page->setDoorOpenState(instances.at(static_cast<std::size_t>(selected)),static_cast<std::uint8_t>(state),selector->GetValue(),error))
+        if(!page->setDoorOpenState(instances.at(static_cast<std::size_t>(selected)),
+            static_cast<std::uint8_t>(state->GetSelection()),selector->GetValue(),error))
             wxMessageBox(wxui::toWx(error),"Door state not applied",wxOK|wxICON_ERROR,this);
     }
     void showSceneAudio(bool developer = false) {
         auto* page=activePage();if(!page)return;
         wxDialog dialog(this,wxID_ANY,developer ? "Scene Audio Inputs" : "Scene Audio");auto* box=new wxBoxSizer(wxVERTICAL);
         box->Add(new wxStaticText(&dialog,wxID_ANY,wxui::toWx(page->sceneAudioStatus())),0,wxALL,10);
-        wxArrayString commands;commands.Add("Play area sounds");commands.Add("Enable animation sounds");commands.Add("Stop all scene sounds");
+        wxArrayString commands;commands.Add("Play area sounds");commands.Add("Stop all scene sounds");
         auto* action=new wxChoice(&dialog,wxID_ANY,wxDefaultPosition,wxDefaultSize,commands);action->SetSelection(0);
         box->Add(action,0,wxEXPAND|wxALL,10);
         wxTextCtrl* state = nullptr;
@@ -3017,7 +3029,7 @@ private:
         box->Add(dialog.CreateButtonSizer(wxOK|wxCANCEL),0,wxALL|wxALIGN_RIGHT,10);dialog.SetSizerAndFit(box);
         if(dialog.ShowModal()!=wxID_OK)return;
         try {
-            if(action->GetSelection()==2){page->stopSceneAudio();return;}
+            if(action->GetSelection()==1){page->stopSceneAudio();return;}
             std::optional<ExoRandom::State> captured;
             if(developer&&action->GetSelection()==0&&!state->GetValue().empty()) {
                 ExoRandom::State words{};std::istringstream text(state->GetValue().ToStdString());
@@ -3028,8 +3040,7 @@ private:
                 }
                 text>>std::ws;if(!text.eof())throw std::runtime_error("Enter exactly four state words.");captured=words;
             }
-            if(action->GetSelection()==0)page->configureSceneAudio(captured);
-            else page->ensureSceneAudioProvider();
+            page->configureSceneAudio(captured);
         }catch(const std::exception& error){wxui::showError(this,error);}
     }
     void showAreaWeather(bool developer = false) {
@@ -3062,7 +3073,7 @@ private:
             roomDisabled->Enable(!k1);
             overrideType=new wxSpinCtrl(&dialog,wxID_ANY,wxEmptyString,wxDefaultPosition,wxDefaultSize,wxSP_ARROW_KEYS,0,255,current.serverOverride);
             add("Captured server override (255 allows scheduling)",overrideType);
-            shadow=number("Engine shadowalpha replay state",page->weatherShadowAlpha());
+            shadow=number("Shadow alpha (trace only)",page->weatherShadowAlpha());shadow->SetEditable(false);
             sounds=new wxTextCtrl(&dialog,wxID_ANY);add("Thunder resource directory (optional)",sounds);sounds->Enable(!k1);
         } else {
             placement=new wxChoice(&dialog,wxID_ANY);
@@ -3098,7 +3109,7 @@ private:
             if (developer) {
                 input.playerPosition.reset();if(supplyPlayer->GetValue())input.playerPosition=model::Vec3{read(x),read(y),read(z)};
                 input.roomWeatherDisabled=roomDisabled->GetValue();
-                input.serverOverride=static_cast<std::uint8_t>(overrideType->GetValue());input.shadowAlpha=read(shadow);
+                input.serverOverride=static_cast<std::uint8_t>(overrideType->GetValue());
             }
             const auto soundDirectory=developer ? neosettings::pathFromWx(sounds->GetValue()) : std::filesystem::path{};
             const auto resolver=page->areaScene().resourceResolver();
@@ -3108,7 +3119,7 @@ private:
             if(input.enabled&&!runJob("Loading engine weather models and sound",[&](const neoshared::bif::JobControl& job) {
                 prepared.resources=prepareWeatherResources(resolver,job,page->areaScene().game(),asciiResources);
                 const auto soundResolver=soundDirectory.empty()?resolver:directoryResources(soundDirectory,resolver);
-                if(!k1) {
+                if(!k1&&input.thunderEnabled) {
                     const std::vector<std::string> names{"as_wt_thundercl1","as_wt_thundercl2","as_wt_thunderds1","as_wt_thunderds2"};
                     prepared.thunder=prepareSceneAudioPlayback(names,soundResolver,
                         page->areaScene().game(),job);
@@ -3139,21 +3150,24 @@ private:
             setModuleStatusText(wxui::toWx("Grass: "+std::to_string(stats.faces)+" admitted faces, "+std::to_string(stats.blades)+" potential blades; geometry is allocated by camera range."),0);
         }catch(const std::exception& error){wxMessageBox(wxui::toWx(error.what()),"Area grass not loaded",wxOK|wxICON_ERROR,this);}
     }
-    void chooseGrassOptions() {
+    void chooseGrassOptions() { editGrassOptions(false); }
+    void chooseGrassRendering() { editGrassOptions(true); }
+    void editGrassOptions(bool developer) {
         auto* page=activePage();if(!page||page->areaScene().empty()||!engineAreaRuntimeSupported(page->areaScene().game()))return;
         auto settings=page->areaScene().grass().settings();
-        wxDialog dialog(this,wxID_ANY,"Engine triangle-bin grass",wxDefaultPosition,wxDefaultSize,wxDEFAULT_DIALOG_STYLE|wxRESIZE_BORDER);
+        wxDialog dialog(this,wxID_ANY,developer ? "Grass Rendering Diagnostics" : "Grass Settings",wxDefaultPosition,wxDefaultSize,wxDEFAULT_DIALOG_STYLE|wxRESIZE_BORDER);
         auto* box=new wxBoxSizer(wxVERTICAL);
         box->Add(new wxStaticText(&dialog,wxID_ANY,"Load an ARE and surfacemat.2da before enabling grass.\nThese controls are per-document preview inputs, not gameplay state."),0,wxALL,10);
         const auto check=[&](const char* label,bool value){auto* c=new wxCheckBox(&dialog,wxID_ANY,label);c->SetValue(value);box->Add(c,0,wxLEFT|wxRIGHT|wxBOTTOM,10);return c;};
-        auto* enabled=check("Render engine grass bins",settings.enabled);
-        auto* wind=check("Update near-bin wind",settings.wind);
-        auto* lightmaps=check("Admit face lightmap tails",settings.lightmaps);
-        auto* textured=check("Engine textured-grass branch",settings.textured);
+        auto* enabled=check("Show grass",settings.enabled);
+        auto* wind=check("Animate grass in wind",settings.wind);
+        auto* lightmaps=developer ? check("Use face lightmaps",settings.lightmaps) : nullptr;
+        auto* textured=developer ? check("Use textured grass rendering",settings.textured) : nullptr;
         box->Add(dialog.CreateSeparatedButtonSizer(wxOK|wxCANCEL),0,wxEXPAND|wxALL,10);dialog.SetSizerAndFit(box);
         if(dialog.ShowModal()!=wxID_OK)return;
-        settings.enabled=enabled->GetValue();settings.wind=wind->GetValue();settings.lightmaps=lightmaps->GetValue();
-        settings.textured=textured->GetValue();settings.areaWind.reset();
+        settings.enabled=enabled->GetValue();settings.wind=wind->GetValue();
+        if(developer) {settings.lightmaps=lightmaps->GetValue();settings.textured=textured->GetValue();}
+        settings.areaWind.reset();
         try {page->configureGrass(settings);}catch(const std::exception& error){wxMessageBox(wxui::toWx(error.what()),"Grass options",wxOK|wxICON_ERROR,this);}
     }
 
@@ -3467,8 +3481,8 @@ private:
             },
             neogames::GameDirectoryGameIds{"kotor", "kotor2"},
             "Open Model from Saved &Directory");
-        file->Append(ID_LoadArea, "Load Area Layout...");
-        file->Append(ID_ModuleArea, "Load Module Area...");
+        file->Append(ID_LoadArea, "Load Area Context...", "Preview the current model inside a LYT layout. Saves still apply to the model.");
+        file->Append(ID_ModuleArea, "Open Module Area...", "Open a module scene in a new tab for preview.");
         file->AppendSeparator();
         file->Append(ID_ExportAscii, "Export ASCII MDL...", "Export the loaded model or current ASCII edits with conversion options.");
         file->Append(ID_ExportPacked, "Compile ASCII to &Binary...",
@@ -3568,40 +3582,43 @@ private:
         }
         view->AppendSubMenu(camera, "&Camera");
         view->AppendSeparator();
-        view->AppendCheckItem(ID_Textures, "Show &Textures");
+        auto* display = new wxMenu;
+        view->AppendSubMenu(display, "Shared Display (All Tabs)");
+        display->AppendCheckItem(ID_Textures, "Show &Textures");
         if (!area) {
             auto* textureOverride = new wxMenu;
             textureOverride->Append(ID_LoadTextureOverride, "Load from File...",
                 "Preview an image on all meshes in this model tab using their existing UVs.");
             textureOverride->Append(ID_ClearTextureOverride, "Clear Override",
                 "Restore the model's authored textures.");
-            view->AppendSubMenu(textureOverride, "Texture Override");
+            view->AppendSubMenu(textureOverride, "Texture Override (This Tab)");
         }
-        view->AppendCheckItem(ID_Lightmaps, "Show &Lightmaps");
-        view->AppendCheckItem(ID_Wireframe, "&Wireframe");
-        view->AppendCheckItem(ID_CullBackfaces, "Cull &Backfaces");
-        view->AppendCheckItem(ID_Lighting, "&Lighting");
-        view->AppendCheckItem(ID_Headlight, "Preview Key Light");
-        if (features & PreviewLights) view->AppendCheckItem(ID_PreviewLights, "Authored Model Lights");
-        if (area) view->AppendCheckItem(ID_EngineShadows, "Area Shadows");
-        view->AppendCheckItem(ID_Fog, "Show Fog");
-        view->Append(ID_LightingSettings, "Lighting and Fog Settings...");
-        view->Append(ID_OwnerVisualEffects,"Owner Visual Effects (Preview)...");
-        view->Append(ID_SceneEffects,"Scene Effects (Preview)...");
+        display->AppendCheckItem(ID_Lightmaps, "Show &Lightmaps");
+        display->AppendCheckItem(ID_Wireframe, "&Wireframe");
+        display->AppendCheckItem(ID_CullBackfaces, "Cull &Backfaces");
+        display->AppendCheckItem(ID_Lighting, "&Lighting");
+        display->AppendCheckItem(ID_Headlight, "Preview Key Light");
+        if (features & PreviewLights) display->AppendCheckItem(ID_PreviewLights, "Authored Model Lights");
+        if (area) view->AppendCheckItem(ID_EngineShadows, "Area Shadows (This Tab)");
+        display->AppendCheckItem(ID_Fog, "Show Fog");
+        view->Append(ID_LightingSettings, "Lighting and Fog (This Tab)...");
+        view->Append(ID_OwnerVisualEffects,"Owner Visual Effects (This Tab)...");
+        view->Append(ID_SceneEffects,"Scene Effects (This Tab)...");
         if (features & (PreviewReferences | PreviewParticles | PreviewLightsabers | PreviewDangly))
-            view->AppendSeparator();
-        if (features & PreviewReferences) view->AppendCheckItem(ID_ShowReferences, "Referenced Models");
-        if (features & PreviewParticles) view->AppendCheckItem(ID_PreviewEmitters, "Particles");
-        if (features & PreviewLightsabers) view->AppendCheckItem(ID_PreviewLightsabers, "Lightsabers");
-        if (features & PreviewDangly) view->AppendCheckItem(ID_DanglySimulation, "Simulate &Dangly Meshes");
-        view->AppendSeparator();
-        view->AppendCheckItem(ID_Grid, "Show &Grid");
-        view->AppendCheckItem(ID_Axes, "Show &Axes");
+            display->AppendSeparator();
+        if (features & PreviewReferences) display->AppendCheckItem(ID_ShowReferences, "Referenced Models");
+        if (features & PreviewParticles) display->AppendCheckItem(ID_PreviewEmitters, "Particles");
+        if (features & PreviewLightsabers) display->AppendCheckItem(ID_PreviewLightsabers, "Lightsabers");
+        if (features & PreviewDangly) display->AppendCheckItem(ID_DanglySimulation, "Simulate &Dangly Meshes");
+        display->AppendSeparator();
+        display->AppendCheckItem(ID_Grid, "Show &Grid");
+        display->AppendCheckItem(ID_Axes, "Show &Axes");
         auto* inspection = new wxMenu;
         inspection->AppendCheckItem(ID_IsolateMeshes,"Isolate Selected Meshes","Temporarily show only the selected meshes in this viewport.");
         inspection->Append(ID_HideMeshes,"Hide Selected Meshes","Temporarily hide the selected meshes in this viewport.");
         inspection->Append(ID_ShowAllMeshes,"Show All Meshes","Clear temporary mesh hiding and isolation.");
         inspection->AppendSeparator();
+        inspection->Append(wxID_ANY, "Shared Overlays (All Tabs)")->Enable(false);
         inspection->AppendCheckItem(ID_ShowHidden, "Show Meshes with Render Flag Off");
         inspection->AppendCheckItem(ID_NodeHelpers, "Node Helpers");
         if (features & PreviewCameras) inspection->AppendCheckItem(ID_ShowCameras, "Camera Markers");
@@ -3614,7 +3631,7 @@ private:
         view->Append(ID_ResetDisplay, "Reset Shared Display Preferences");
 
         auto* scene = sceneMenu_;
-        scene->Append(ID_AdvancedSettings, "Preview Settings...");
+        scene->Append(ID_AdvancedSettings, "Preview Settings (This Tab)...");
         if (area) {
             scene->AppendSeparator();
             scene->Append(ID_AreaRoom, "Current Area Room...");
@@ -3623,7 +3640,7 @@ private:
             scene->AppendSeparator();
             auto* animation = new wxMenu;
             animation->Append(ID_AreaAnimation, "Area Object Animation...");
-            animation->Append(ID_RoomScriptAnimation, "Room Animation...");
+            animation->Append(ID_RoomScriptAnimation, "Room Script Animation...");
             animation->Append(ID_DoorState, "Door State...");
             scene->AppendSubMenu(animation, "&Animation");
             scene->AppendSeparator();
@@ -3700,6 +3717,9 @@ private:
             rendering->GetSizer()->Add(radius,0,wxEXPAND|wxALL,8);
         } else {
             action(rendering,"Lighting and Fog...",&ModelEditorPanelImpl::showLightingSettings);
+            if (active->document().hasModelOwner())
+                action(rendering,"Owner Visual Effects...",&ModelEditorPanelImpl::showOwnerVisualEffects);
+            action(rendering,"Scene Effects...",&ModelEditorPanelImpl::showSceneEffects);
             if (features & PreviewCameras)
                 action(rendering,"Camera Projection...",&ModelEditorPanelImpl::showCameraSettings);
             if (features & PreviewLightsabers)
@@ -3714,6 +3734,7 @@ private:
             if (developer) {
                 action(scene,"Shadow Inputs...",&ModelEditorPanelImpl::chooseSceneShadows);
                 action(scene,"Shadow Casters...",&ModelEditorPanelImpl::chooseShadowCasters);
+                action(scene,"Grass Rendering...",&ModelEditorPanelImpl::chooseGrassRendering);
             } else {
                 action(scene,"Area Environment...",&ModelEditorPanelImpl::chooseAreaEnvironment);
                 action(scene,"Grass Settings...",&ModelEditorPanelImpl::chooseGrassOptions);
@@ -3880,27 +3901,17 @@ private:
         root->Add(grid,0,wxEXPAND|wxLEFT|wxRIGHT,10);root->Show(grid,particles);
         grid=new wxFlexGridSizer(2,6,10);grid->AddGrowableCol(1,1);
         auto* windPreset=new wxChoice(&dialog,wxID_ANY);
-        windPreset->Append("Custom");
+        windPreset->Append("Choose a preset...");
         windPreset->Append("K2 wind: none");
         windPreset->Append("K2 wind: light");
         windPreset->Append("K2 wind: strong");
-        windPreset->SetSelection(0);add("Wind preset",windPreset);
+        windPreset->SetSelection(0);add("Apply wind preset",windPreset);
         const auto wind=vector("Global wind X / Y / Z",{q.x,q.y,q.z});
         const auto windDeviation=vector("Maximum deviation Z / X (degrees)",
             {settings.windMaximumDeviationZDegrees,settings.windMaximumDeviationXDegrees});
         const auto windPeriod=vector("Noise interpolation period (seconds)",
             {settings.windInterpolationPeriod});
         windPeriod[0]->SetRange(std::numeric_limits<float>::denorm_min(),std::numeric_limits<float>::max());
-        const auto nearlyEqual=[](float a,float b) {return std::fabs(a-b)<=1.0e-4f;};
-        for(unsigned mode=0;mode<=2;++mode) {
-            const auto preset=neomdl::model::k2AreaWindPreset(static_cast<std::uint8_t>(mode));
-            if(preset && nearlyEqual(q.x,preset->globalWind.x)&&nearlyEqual(q.y,preset->globalWind.y)&&
-               nearlyEqual(q.z,preset->globalWind.z)&&
-               nearlyEqual(settings.windMaximumDeviationZDegrees,preset->maximumDeviationZDegrees)&&
-               nearlyEqual(settings.windMaximumDeviationXDegrees,preset->maximumDeviationXDegrees)) {
-                windPreset->SetSelection(static_cast<int>(mode)+1);break;
-            }
-        }
         windPreset->Bind(wxEVT_CHOICE,[=](wxCommandEvent&) {
             const int selection=windPreset->GetSelection();
             if(selection<=0) return;
@@ -3912,6 +3923,7 @@ private:
             wind[2]->SetValue(preset->globalWind.z);
             windDeviation[0]->SetValue(preset->maximumDeviationZDegrees);
             windDeviation[1]->SetValue(preset->maximumDeviationXDegrees);
+            windPreset->SetSelection(0);
         });
         root->Add(grid,0,wxEXPAND|wxLEFT|wxRIGHT,10);
         grid=new wxFlexGridSizer(2,6,10);grid->AddGrowableCol(1,1);
@@ -3965,7 +3977,7 @@ private:
         wxDialog dialog(this, wxID_ANY, "Lightsaber Render Settings");
         auto* root = new wxBoxSizer(wxVERTICAL);
         root->Add(new wxStaticText(&dialog, wxID_ANY,
-            "KOTOR II lightsaber render globals; not saved into the MDL.\n"
+            "Lightsaber settings for this preview; not saved into the MDL.\n"
             "The engine bucket keeps owner insertion order and renders after particle emitters."),
             0, wxALL, 10);
 
@@ -4276,7 +4288,8 @@ private:
         auto* note=new wxStaticText(&dialog,wxID_ANY,
             "Viewer scene settings; not saved into the model.\n"
             "Up to eight lights per mesh, including the optional preview key.\n"
-            "Fog distances are scene units. MDL files do not supply scene fog color/range.");
+            "Fog distances are scene units. MDL files do not supply scene fog color/range.\n"
+            "Show Fog in Shared Display must also be enabled to display this fog.");
         root->Add(note,0,wxALL,10);
         auto* grid=new wxFlexGridSizer(2,8,12);grid->AddGrowableCol(1,1);
         const auto add=[&](const char* label,wxWindow* control) {
@@ -4304,6 +4317,14 @@ private:
         auto* density=number(options.fog.density,0,1000,0.005);add("Exponential density",density);
         auto* respect=new wxCheckBox(&dialog,wxID_ANY,"Respect each model's fog flag");
         respect->SetValue(options.fog.respectModelFlag);add("Fog eligibility",respect);
+        const auto enableFogFields=[=]() {
+            const int selected=mode->GetSelection();
+            color->Enable(selected!=0);respect->Enable(selected!=0);
+            start->Enable(selected==1);end->Enable(selected==1);
+            density->Enable(selected==2||selected==3);
+        };
+        mode->Bind(wxEVT_CHOICE,[=](wxCommandEvent&){enableFogFields();});
+        enableFogFields();
         root->Add(grid,1,wxEXPAND|wxLEFT|wxRIGHT|wxBOTTOM,10);
         root->Add(dialog.CreateButtonSizer(wxOK|wxCANCEL),0,wxEXPAND|wxALL,10);
         dialog.SetSizerAndFit(root);
@@ -4580,6 +4601,8 @@ private:
         for (std::size_t index = 0; index < tabs_->GetPageCount(); ++index) {
             const auto* page = pageAt(index);
             auto title = wxui::toWx(page->document().title());
+            if (page->document().hasModelOwner() && !page->areaScene().empty())
+                title += " [Area: " + wxui::toWx(page->areaScene().layoutSource().fileName) + "]";
             if (page->asciiEditor() && page->asciiEditor()->modified()) title += " *";
             if (tabs_->GetPageText(index) != title) tabs_->SetPageText(index, title);
         }
@@ -4631,7 +4654,8 @@ private:
         enableModuleCommand(ID_ModelResources, looseModel);
         enableModuleCommand(ID_LoadArea,hasDocument&&engineAreaRuntimeSupported(activePage()->document().model().game));
         enableModuleCommand(ID_ClearArea,hasDocument&&!activePage()->areaScene().empty());
-        enableModuleCommand(ID_AreaAnimation,hasDocument&&!activePage()->areaScene().objects().empty());
+        enableModuleCommand(ID_AreaAnimation,active&&std::any_of(active->areaScene().objects().begin(),
+            active->areaScene().objects().end(),[](const auto& object){return !object->staticPrimary();}));
         enableModuleCommand(ID_AreaRoom,activePage()&&!activePage()->areaScene().empty());
         enableModuleCommand(ID_SceneAudio,activePage()&&!activePage()->areaScene().empty());
         enableModuleCommand(ID_SceneAudioInputs,area);
