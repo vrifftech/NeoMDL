@@ -1780,6 +1780,21 @@ material::ForceSightSettings ModelCanvas::effectiveForceSight() const noexcept {
     return state;
 }
 
+void ModelCanvas::resetPreviewEffects() {
+    ownerEffects_.assign(ownerEffects_.size(), {});
+    textureAngles_.clear();
+    const auto epoch = sceneEffects_.historyEpoch + 1u;
+    sceneEffects_ = {};
+    sceneEffects_.historyEpoch = epoch;
+    sceneEffects_.desktopArbShaders = material::selectK2HardwareCapabilities(options_.engineHardware).arbFragmentPrograms;
+    scriptVideoEffect_ = false;
+    forceSightMilliseconds_ = 0;
+    synchronizeEngineQueries();
+    pendingGpuReset_ = true;
+    shaderErrorReported_ = false;
+    Refresh(false);
+}
+
 bool ModelCanvas::setSceneEffects(SceneEffectsSettings value,std::string& error,bool resetHistory) {
     error.clear();
     if(!document_||model::engineSceneStageOrder(document_->model().game).empty()) {

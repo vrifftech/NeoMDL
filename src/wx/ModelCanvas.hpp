@@ -307,6 +307,7 @@ public:
     // Index 0 is the main Gob; reference index n is owner n+1. Runtime-only.
     const OwnerVisualEffects& ownerVisualEffects(std::size_t owner) const;
     bool setOwnerVisualEffects(std::size_t owner, const OwnerVisualEffects&, std::string& error);
+    void resetPreviewEffects();
     const SceneEffectsSettings& sceneEffects() const noexcept { return sceneEffects_; }
     bool setSceneEffects(SceneEffectsSettings,std::string& error,bool resetHistory=true);
     void setScriptVideoEffect(bool enabled) noexcept {scriptVideoEffect_=enabled;}

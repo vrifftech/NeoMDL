@@ -372,6 +372,13 @@ bool ModelDocument::openResource(neoshared::ResourceDocument resource,
     return true;
 }
 
+void ModelDocument::adoptAsciiPath(const std::filesystem::path& path) {
+    path_ = path;
+    identity_ = resourceFileIdentity(path);
+    title_ = neoshared::pathToUtf8(path.filename());
+    sourceDescription_ = neoshared::genericPathToUtf8(path);
+}
+
 std::unique_ptr<ModelDocument> ModelDocument::rebuildAscii(const std::string& text,
     const neoshared::bif::JobControl& job, std::optional<model::GameVersion> game,
     bool includeAnimations) const {

@@ -19,9 +19,10 @@
 
 namespace neomdl::ui {
 
-AsciiEditor::AsciiEditor(wxWindow* parent, std::shared_ptr<const ModelDocument> source,
-    std::function<void(std::unique_ptr<ModelDocument>)> apply, std::function<void()> changed)
-    : wxPanel(parent), source_(std::move(source)), apply_(std::move(apply)), changed_(std::move(changed)) {
+AsciiEditor::AsciiEditor(wxWindow* parent, std::shared_ptr<ModelDocument> source,
+    std::function<void(std::unique_ptr<ModelDocument>)> apply, std::function<void()> changed, OutputValidator validateOutputs)
+    : wxPanel(parent), source_(std::move(source)), validateOutputs_(std::move(validateOutputs)),
+      apply_(std::move(apply)), changed_(std::move(changed)) {
     collisions_=source_->collisions();
     auto* layout = new wxBoxSizer(wxVERTICAL);
     auto* toolbar = new wxBoxSizer(wxHORIZONTAL);
@@ -45,7 +46,12 @@ AsciiEditor::AsciiEditor(wxWindow* parent, std::shared_ptr<const ModelDocument> 
     layout->Add(saveLocation_, 0, wxEXPAND | wxLEFT | wxRIGHT | wxBOTTOM, FromDIP(5));
     auto* saveHint = new wxStaticText(this, wxID_ANY,
         "Save ASCII saves source text. Compile ASCII to Binary creates MDL/MDX.");
-    saveHint->Wrap(FromDIP(320));
+    Bind(wxEVT_SIZE, [this, saveHint](wxSizeEvent& event) {
+        saveHint->SetLabel("Save ASCII saves source text. Compile ASCII to Binary creates MDL/MDX.");
+        saveHint->Wrap(event.GetSize().x - FromDIP(10));
+        Layout();
+        event.Skip();
+    });
     layout->Add(saveHint, 0, wxEXPAND | wxLEFT | wxRIGHT | wxBOTTOM, FromDIP(5));
     editor_ = new wxStyledTextCtrl(this);
     editor_->SetCodePage(wxSTC_CP_UTF8);
@@ -100,7 +106,7 @@ AsciiEditor::AsciiEditor(wxWindow* parent, std::shared_ptr<const ModelDocument> 
     } else {
         update_->SetLabel("Generate ASCII");
         update_->Enable(true);
-        status_->ChangeValue("Binary model loaded. File > Binary Mesh Editor edits binary model files with Save Copy. Generate ASCII to edit source text.");
+        status_->ChangeValue("Binary model loaded. Binary Mesh Editor edits a working file with Save Copy. Archive models first save a working copy. Generate ASCII to edit source text.");
     }
 }
 
@@ -318,11 +324,20 @@ bool AsciiEditor::save(bool choosePath) {
             destinations.push_back(output.path);
             companions.push_back(output.path);
         }
-        neoshared::checkResourceOutputs(destinations,protectedInputs);
+        validateOutputs_(destinations,protectedInputs);
         if((choosePath || savePath_.empty()) && !confirmCompanionOverwrite(this,companions)) return false;
         const auto buffer = text();
         neoshared::texture::writeFileBytes(path, std::vector<std::uint8_t>(buffer.begin(), buffer.end()));
         for(const auto& output:outputs) neoshared::texture::writeFileBytes(output.path,output.bytes);
+        if (source_->originalAscii() && path != source_->path()) {
+            // The preview worker reads the source identity and path. Finish it
+            // before adopting the saved file; rebuild against the new identity.
+            cancelled_.store(true);
+            if (worker_.valid()) worker_.wait();
+            source_->adoptAsciiPath(path);
+            pending_ = true;
+            updateAt_ = std::chrono::steady_clock::now();
+        }
         setSavePath(path);
         editor_->SetSavePoint();
         collisionsModified_=false;

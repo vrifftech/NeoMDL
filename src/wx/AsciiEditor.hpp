@@ -23,11 +23,14 @@ bool confirmCompanionOverwrite(wxWindow* parent,const std::vector<std::filesyste
 using AuthoringJob = std::function<bool(const wxString&,
     const std::function<void(const neoshared::bif::JobControl&)>&)>;
 
+using OutputValidator = std::function<void(const std::vector<std::filesystem::path>&,
+    const std::vector<std::filesystem::path>&)>;
+
 class AsciiEditor final : public wxPanel {
 public:
-    AsciiEditor(wxWindow* parent, std::shared_ptr<const ModelDocument> source,
+    AsciiEditor(wxWindow* parent, std::shared_ptr<ModelDocument> source,
                 std::function<void(std::unique_ptr<ModelDocument>)> apply,
-                std::function<void()> changed);
+                std::function<void()> changed, OutputValidator validateOutputs);
     ~AsciiEditor() override;
 
     bool ready() const noexcept { return ready_ && !generating_ && !requestedFormat_; }
@@ -37,7 +40,7 @@ public:
     bool modified() const;
     const std::filesystem::path& savePath() const noexcept { return savePath_; }
     std::string text() const;
-    const std::shared_ptr<const ModelDocument>& source() const { return source_; }
+    const std::shared_ptr<ModelDocument>& source() const { return source_; }
     void updatePreview();
     void setPreviewEnabled(bool enabled) { previewEnabled_ = enabled; }
     void setAppearance(bool dark, double fontScale = 1.0);
@@ -75,7 +78,8 @@ private:
     void generateAscii(bool advanced);
     void setSavePath(const std::filesystem::path& path);
 
-    std::shared_ptr<const ModelDocument> source_;
+    std::shared_ptr<ModelDocument> source_;
+    OutputValidator validateOutputs_;
     std::function<void(std::unique_ptr<ModelDocument>)> apply_;
     std::function<void()> changed_;
     wxStyledTextCtrl* editor_{};

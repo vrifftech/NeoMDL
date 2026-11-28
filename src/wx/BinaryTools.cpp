@@ -310,7 +310,8 @@ private:
 };
 
 std::optional<BinaryEditResult> saveBinaryCopy(wxWindow* parent,BinaryModelFile& file,std::size_t node,
-    const std::map<std::size_t,BinaryMeshEdit>& edits,const AuthoringJob& runJob,const std::optional<PlanarTransform>& transform={}) {
+    const std::map<std::size_t,BinaryMeshEdit>& edits,const AuthoringJob& runJob,const OutputValidator& validateOutputs,
+    const std::optional<PlanarTransform>& transform={}) {
     BinarySaveControls controls(file.model.game);
     wxFileDialog output(parent,"Save Edited Binary Copy",neosettings::pathToWx(file.path.parent_path()),
         neosettings::pathToWx(file.path.stem())+"-edited.mdl","Binary MDL (*.mdl)|*.mdl",wxFD_SAVE | wxFD_OVERWRITE_PROMPT);
@@ -365,7 +366,7 @@ std::optional<BinaryEditResult> saveBinaryCopy(wxWindow* parent,BinaryModelFile&
         destinations.push_back(item.path);
         if (item.path!=destination) companions.push_back(item.path);
     }
-    neoshared::checkResourceOutputs(destinations,protectedInputs);
+    validateOutputs(destinations,protectedInputs);
     if (!confirmCompanionOverwrite(parent,companions)) return {};
     if (!runJob("Saving binary copy",[&](const auto& job) {
         job.check();
@@ -377,6 +378,7 @@ std::optional<BinaryEditResult> saveBinaryCopy(wxWindow* parent,BinaryModelFile&
 } // namespace
 
 std::optional<BinaryEditResult> editBinaryMeshFields(wxWindow* parent, const AuthoringJob& runJob,
+    const OutputValidator& validateOutputs,
     const std::filesystem::path& input, std::optional<std::size_t> selectedOffset, BinaryMeshPage page,
     const std::set<std::size_t>& selectedOffsets) {
     auto path=input;
@@ -398,7 +400,7 @@ std::optional<BinaryEditResult> editBinaryMeshFields(wxWindow* parent, const Aut
             const auto index=static_cast<std::size_t>(node-file.model.nodes.begin());
             std::map<std::size_t,BinaryMeshEdit> edits;
             editBinaryTransform(parent,file,index,edits[index],"Save Copy...",[&](wxWindow* owner) {
-                saved=saveBinaryCopy(owner,file,index,edits,runJob);
+                saved=saveBinaryCopy(owner,file,index,edits,runJob,validateOutputs);
                 return saved.has_value();
             });
             return saved;
@@ -606,7 +608,7 @@ std::optional<BinaryEditResult> editBinaryMeshFields(wxWindow* parent, const Aut
                 }
                 std::optional<PlanarTransform> transform;
                 if(modelAngle->GetValue()!=0||modelFlipX->GetValue()||modelFlipY->GetValue())transform=planarTransform(float(modelAngle->GetValue()),modelFlipX->GetValue(),modelFlipY->GetValue());
-                const auto output=saveBinaryCopy(&dialog,file,current,outputEdits,runJob,transform);
+                const auto output=saveBinaryCopy(&dialog,file,current,outputEdits,runJob,validateOutputs,transform);
                 if (output) {saved=*output;dialog.EndModal(wxID_OK);}
             } catch (const std::exception& error) { wxui::showError(&dialog,error); }
         });
@@ -1024,7 +1026,7 @@ void inspectBinaryFile(wxWindow* parent, const AuthoringJob& runJob) {
         BinaryInspector dialog(parent,path,std::move(bytes),runJob); dialog.ShowModal();
     } catch (const std::exception& error) { wxui::showError(parent,error); }
 }
-void analyzeBinaryFiles(wxWindow* parent, const AuthoringJob& runJob) {
+void analyzeBinaryFiles(wxWindow* parent, const AuthoringJob& runJob, const OutputValidator& validateOutputs) {
     wxFileDialog input(parent,"Analyze Binary Models",{}, {},"Binary MDL (*.mdl)|*.mdl;*.MDL",
         wxFD_OPEN | wxFD_FILE_MUST_EXIST | wxFD_MULTIPLE);
     if (input.ShowModal() != wxID_OK) return;
@@ -1059,7 +1061,7 @@ void analyzeBinaryFiles(wxWindow* parent, const AuthoringJob& runJob) {
             std::vector<std::filesystem::path> inputs;
             for (const auto& name : paths) inputs.push_back(neosettings::pathFromWx(name));
             for (const auto& result : results) for (const auto& source : result.inputs) if (!source.empty()) inputs.push_back(source);
-            neoshared::checkResourceOutput(path,inputs);
+            validateOutputs({path},inputs);
             neoshared::texture::writeFileBytes(path,{report.begin(),report.end()});
         } catch (const std::exception& error) { wxui::showError(&dialog,error); }
     });

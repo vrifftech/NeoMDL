@@ -102,6 +102,7 @@ public:
         const neoshared::bif::JobControl& job = resourceLoadJob(),
         std::optional<model::GameVersion> game = std::nullopt,
         bool includeAnimations = true) const;
+    void adoptAsciiPath(const std::filesystem::path& path);
     const std::optional<std::string>& originalAscii() const noexcept { return originalAscii_; }
     const CollisionSet& collisions() const noexcept { return collisions_; }
 

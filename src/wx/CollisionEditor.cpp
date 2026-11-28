@@ -74,7 +74,8 @@ void AsciiEditor::editCollisions(const model::Model& asset) {
         "Edit vertices, face materials, hooks and roomlinks (face * 3 + edge). Compile rebuilds navigation and AABB data.\n"
         "Use MDL Mesh replaces this companion's geometry and links. Use WOK in MDL AABB replaces the selected model mesh.\n"
         "Room placement is applied when copying between local MDL and world WOK coordinates. Loaded WOK vertices keep their placement.\n"
-        "Apply retains companion edits. Save/Export Model includes them; individual companion export is also available below.");
+        "Apply retains companion edits for Save/Export Model; individual companion export is also available below.\n"
+        "The viewport shows MDL collision/AABB geometry, not these separate WOK/PWK/DWK companions.");
     layout->Add(note,0,wxALL,FromDIP(10));
     auto* exports=new wxBoxSizer(wxHORIZONTAL);
     auto* ascii=new wxButton(&dialog,wxID_ANY,"Export ASCII...");
@@ -170,7 +171,7 @@ void AsciiEditor::editCollisions(const model::Model& asset) {
             const auto path=neosettings::pathFromWx(file.GetPath());auto inputs=source_->openPaths();
             for(const auto& [kind,collision]:pending)
                 inputs.insert(inputs.end(),collision.inputs.begin(),collision.inputs.end());
-            neoshared::checkResourceOutput(path,inputs);
+            validateOutputs_({path},inputs);
             const auto output=collisionOutputs({{selected,pending.at(selected)}},path,packed);
             neoshared::texture::writeFileBytes(path,output.front().bytes);
         } catch(const std::exception& error) {wxui::showError(&dialog,error);}

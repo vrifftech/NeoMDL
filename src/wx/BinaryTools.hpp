@@ -15,10 +15,11 @@ struct BinaryEditResult {
 };
 
 std::optional<BinaryEditResult> editBinaryMeshFields(wxWindow* parent, const AuthoringJob& runJob,
+    const OutputValidator& validateOutputs,
     const std::filesystem::path& input = {}, std::optional<std::size_t> selectedOffset = {},
     BinaryMeshPage page = BinaryMeshPage::Properties, const std::set<std::size_t>& selectedOffsets = {});
 void inspectBinaryFile(wxWindow* parent, const AuthoringJob& runJob);
-void analyzeBinaryFiles(wxWindow* parent, const AuthoringJob& runJob);
+void analyzeBinaryFiles(wxWindow* parent, const AuthoringJob& runJob, const OutputValidator& validateOutputs);
 void compareBinaryFiles(wxWindow* parent, const AuthoringJob& runJob);
 
 } // namespace neomdl::ui

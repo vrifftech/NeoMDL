@@ -104,6 +104,7 @@ enum CommandId {
     ID_ConvertMesh,
     ID_RecalculateNormals,
     ID_BinaryMeshFields,
+    ID_SaveBinaryWorkingCopy,
     ID_InspectBinary,
     ID_CompareBinaries,
     ID_AnalyzeBinaries,
@@ -295,7 +296,7 @@ public:
 class ModelPage final : public wxPanel {
 public:
     ModelPage(wxWindow* parent, std::unique_ptr<ModelDocument> document,
-              const RenderOptions& options, bool compact, std::function<void()> changed = [] {})
+              const RenderOptions& options, bool compact, OutputValidator validateOutputs, std::function<void()> changed = [] {})
         : wxPanel(parent), document_(std::move(document)), changed_(std::move(changed)) {
         outputGame_ = document_->sourceModel().game;
         timer_.SetOwner(this);
@@ -460,7 +461,14 @@ public:
         if (document_->hasModelOwner()) {
             asciiEditor_ = new AsciiEditor(sourceSplit_, document_,
                 [this](std::unique_ptr<ModelDocument> document) { applyAsciiPreview(std::move(document)); },
-                [this] { updateEditingControls(); changed_(); });
+                [this] {
+                    if (asciiEditor_->source()->originalAscii() && !asciiEditor_->savePath().empty()) {
+                        if (document_->path() != asciiEditor_->savePath())
+                            document_->adoptAsciiPath(asciiEditor_->savePath());
+                        resourceSnapshot_.reset();
+                    }
+                    updateEditingControls(); changed_();
+                }, std::move(validateOutputs));
             sourceSplit_->SplitVertically(canvas_, asciiEditor_);
         } else sourceSplit_->Initialize(canvas_);
         splitter_->SetMinimumPaneSize(FromDIP(160));
@@ -511,7 +519,7 @@ public:
             updateDetails(selectedNode_);
         });
         editNode_->Bind(wxEVT_BUTTON, [this](wxCommandEvent&) {
-            wxCommandEvent command(wxEVT_MENU,ID_NodeProperties);
+            wxCommandEvent command(wxEVT_MENU,canSaveBinaryWorkingCopy() ? ID_SaveBinaryWorkingCopy : ID_NodeProperties);
             ProcessWindowEvent(command);
         });
         editVertices_->Bind(wxEVT_BUTTON, [this](wxCommandEvent&) {
@@ -664,8 +672,13 @@ public:
         return (asciiEditor_->advanced() && (!document_->sourceModel().asciiBuilt ||
             document_->model().nodes[*selectedNode_].asciiIdentity)) || selectedNameIsUnique();
     }
-    bool canEditBinaryNode() const {
-        return selectedNode_ && !document_->sourceModel().asciiBuilt && !document_->path().empty() &&
+    bool canEditBinaryFile() const {
+        return asciiEditor_ && !document_->sourceModel().asciiBuilt && !document_->path().empty() &&
+            canvas_->areaScene().empty() && !asciiEditor_->modified();
+    }
+    bool canEditBinaryNode() const { return selectedNode_ && canEditBinaryFile(); }
+    bool canSaveBinaryWorkingCopy() const {
+        return resourceSnapshot_ && asciiEditor_ && !document_->sourceModel().asciiBuilt &&
             canvas_->areaScene().empty() && !asciiEditor_->modified();
     }
     bool canEditBinaryMesh() const {
@@ -777,7 +790,9 @@ public:
     const ResourceResolver& fileResources() const { return fileResources_; }
     void setResourceCapture(neoshared::ResourceResolverFactory capture) {resourceCapture_=std::move(capture);}
     const neoshared::ResourceResolverFactory& resourceCapture() const {return resourceCapture_;}
-    void setResourceSnapshot(std::optional<neoshared::ResourceDocument> source) {resourceSnapshot_=std::move(source);}
+    void setResourceSnapshot(std::optional<neoshared::ResourceDocument> source) {
+        resourceSnapshot_=std::move(source);updateEditingControls();
+    }
     const std::optional<neoshared::ResourceDocument>& resourceSnapshot() const {return resourceSnapshot_;}
     void setOptions(const RenderOptions& options) {
         canvas_->setOptions(options);
@@ -789,6 +804,7 @@ public:
         if(ok) updateDetails(selectedNode_);
         return ok;
     }
+    void resetPreviewEffects() { canvas_->resetPreviewEffects(); }
     const SceneEffectsSettings& sceneEffects() const noexcept { return canvas_->sceneEffects(); }
     bool setSceneEffects(SceneEffectsSettings settings,std::string& error) {
         return canvas_->setSceneEffects(std::move(settings),error);
@@ -884,9 +900,12 @@ public:
 
 private:
     void updateEditingControls() {
-        editNode_->Enable(canEditNode() || canEditBinaryNode());
-        editNode_->SetLabel(canEditBinaryNode() ? canEditBinaryMesh() ? "Edit Binary Mesh..." : "Edit Node Transform..." : "Edit Selected Node...");
-        editNode_->SetToolTip(canEditBinaryNode() ? "Edit binary model data and save a new copy." : "Edit the selected node in the ASCII source.");
+        editNode_->Enable(canSaveBinaryWorkingCopy() || canEditNode() || canEditBinaryNode());
+        editNode_->SetLabel(canSaveBinaryWorkingCopy() ? "Save Binary Working Copy..." :
+            canEditBinaryNode() ? canEditBinaryMesh() ? "Edit Binary Mesh..." : "Edit Node Transform..." : "Edit Selected Node...");
+        editNode_->SetToolTip(canSaveBinaryWorkingCopy() ?
+            "Save this archive model and its companions as working files, then open them for binary editing." :
+            canEditBinaryNode() ? "Edit binary model data and save a new copy." : "Edit the selected node in the ASCII source.");
         editVertices_->Enable(document_->sourceModel().asciiBuilt ? canEditVertices() : canEditBinaryVertices());
         editControllers_->Enable(document_->sourceModel().asciiBuilt ? canEditNode() : canEditBinaryControllers());
         effects_->Enable(document_->hasModelOwner() && !model::engineSceneStageOrder(document_->model().game).empty());
@@ -2137,6 +2156,12 @@ public:
     }
 
 private:
+    void checkOutputs(const std::vector<std::filesystem::path>& paths,
+                      const std::vector<std::filesystem::path>& inputs) const {
+        neoshared::checkResourceOutputs(paths, inputs);
+        validateHostOutputs(paths, inputs);
+    }
+
     bool confirmDiscard(ModelPage* page) {
         const auto* editor = page->asciiEditor();
         if (!editor || !editor->modified()) return true;
@@ -2151,25 +2176,86 @@ private:
         return answer == wxID_NO || (answer == wxID_YES && page->asciiEditor()->save());
     }
 
-    void editBinaryMesh(BinaryMeshPage initialPage=BinaryMeshPage::Properties) {
+    bool saveBinaryWorkingCopy() {
         auto* page=activePage();
+        const auto source=*page->resourceSnapshot();
+        auto filename=std::filesystem::u8path(source.fileName);filename.replace_extension(".mdl");
+        wxFileDialog dialog(this,"Save Binary Working Copy and Companions",{},neosettings::pathToWx(filename),
+            "Binary models (*.mdl)|*.mdl",wxFD_SAVE|wxFD_OVERWRITE_PROMPT);
+        if(dialog.ShowModal()!=wxID_OK)return false;
+        const auto output=neosettings::pathFromWx(dialog.GetPath());
+        const auto resources=page->document().resourceResolver();
+        const auto selection=page->selectedPackedOffsets();
+        try {
+            auto inputs=page->document().openPaths();
+            std::vector<CollisionOutput> outputs;
+            if(!runJob("Preparing binary working copy",[&](const auto& job) {
+                const ResourceLoadScope scope(job);
+                const auto stem=modelFileStem(filename);
+                auto mdl=source.type==kMdlResourceType ? std::optional{source} : resources(stem,kMdlResourceType);
+                if(!mdl)throw std::runtime_error("The archive model's MDL companion is no longer available.");
+                auto mdx=source.type==kMdxResourceType ? std::optional{source} : resources(stem,kMdxResourceType);
+                auto companion=output;companion.replace_extension(".mdx");
+                outputs.push_back({output,std::move(mdl->bytes)});
+                // CPU-only models use an empty MDX, replacing any stale destination companion.
+                outputs.push_back({companion,mdx ? std::move(mdx->bytes) : std::vector<std::uint8_t>{}});
+                model::decodePackedModelBytes(outputs[0].bytes,outputs[1].bytes,source.sourceDescription,job,false);
+                inputs.insert(inputs.end(),mdl->protectedInputs.begin(),mdl->protectedInputs.end());
+                if(mdx)inputs.insert(inputs.end(),mdx->protectedInputs.begin(),mdx->protectedInputs.end());
+                for(const auto& [kind,asset]:page->document().collisions()) {
+                    const auto name=collisionPath(filename,kind);
+                    const auto type=kind==CollisionKind::Room?0x7e0:kind==CollisionKind::Placeable?0x805:0x804;
+                    auto collision=resources(neoshared::pathToUtf8(name.stem()),type);
+                    if(!collision)throw std::runtime_error("Collision companion is no longer available: "+neoshared::pathToUtf8(name));
+                    inputs.insert(inputs.end(),collision->protectedInputs.begin(),collision->protectedInputs.end());
+                    outputs.push_back({collisionPath(output,kind),std::move(collision->bytes)});
+                }
+            }))return false;
+            std::vector<std::filesystem::path> destinations,companions;
+            for(const auto& item:outputs)destinations.push_back(item.path);
+            companions.assign(destinations.begin()+1,destinations.end());
+            checkOutputs(destinations,inputs);
+            if(!confirmCompanionOverwrite(this,companions))return false;
+            for(const auto& item:outputs)neoshared::texture::writeFileBytes(item.path,item.bytes);
+            setModuleStatusText("Binary working copy saved to "+neosettings::pathToWx(output),0);
+            auto document=std::make_unique<ModelDocument>();
+            if(!runJob("Opening binary working copy",[&](const auto& job) {
+                auto working=readModelFileSource(output,job);working.mod=modFolder_;
+                document->openFile(std::move(working),resources,job);
+            }))return false;
+            addDocument(std::move(document),page->resourceSession(),resources,page,true);
+            activePage()->selectPackedNodes(selection,selection.empty()?std::nullopt:std::optional{*selection.begin()});
+            settings_.addRecentFile(output);
+            return true;
+        } catch(const std::exception& error) {
+            wxMessageBox("Could not complete the working-copy operation for:\n"+neosettings::pathToWx(output)+
+                "\n\n"+wxui::toWx(error.what()),"Binary Working Copy",wxOK|wxICON_ERROR,this);
+            return false;
+        }
+    }
+
+    void editBinaryMesh(BinaryMeshPage initialPage=BinaryMeshPage::Properties) {
+        if(activePage() && activePage()->canSaveBinaryWorkingCopy() && !saveBinaryWorkingCopy())return;
+        auto* page=activePage();
+        const bool current=page && page->canEditBinaryFile();
         const bool selected=page && (initialPage==BinaryMeshPage::Transform ? page->canEditBinaryNode() : page->canEditBinaryMesh());
         const auto offset=selected ? std::optional<std::size_t>{page->selectedPackedOffset()} : std::nullopt;
         const auto offsets=selected ? page->selectedPackedOffsets() : std::set<std::size_t>{};
         const auto saved=editBinaryMeshFields(this,
             [this](const wxString& title,const auto& work) {return runJob(title,work);},
-            selected ? page->document().path() : std::filesystem::path{},offset,initialPage,
+            [this](const auto& paths,const auto& inputs) {checkOutputs(paths,inputs);},
+            current ? page->document().path() : std::filesystem::path{},offset,initialPage,
             selected ? page->selectedPackedOffsets(true) : std::set<std::size_t>{});
         if (!saved) return;
         try {
             auto document=std::make_unique<ModelDocument>();
-            const auto resources=selected ? page->document().resourceResolver() : captureHostResolver();
+            const auto resources=current ? page->document().resourceResolver() : captureHostResolver();
             if (!runJob("Loading edited binary model",[&](const auto& job) {
                 auto source=readModelFileSource(saved->path,job);source.mod=modFolder_;
                 document->openFile(std::move(source),resources,job);
             })) return;
-            const auto session=selected ? page->resourceSession() : std::shared_ptr<GameResourceSession>{};
-            addDocument(std::move(document),session,resources,selected ? page : nullptr,selected);
+            const auto session=current ? page->resourceSession() : std::shared_ptr<GameResourceSession>{};
+            addDocument(std::move(document),session,resources,current ? page : nullptr,current);
             std::set<std::size_t> selection;
             for (const auto original : offsets) selection.insert(saved->nodeOffsets.at(original));
             activePage()->selectPackedNodes(selection,saved->nodeOffset);
@@ -2570,7 +2656,8 @@ private:
             // Create wx/GL ownership on the UI thread. The worker receives
             // only a private CPU scene, immutable resolver and engine snapshot.
             auto document=ModelDocument::emptySceneDocument(identity,module.name+" / "+area,game);
-            auto* page=new ModelPage(tabs_,std::move(document),options_,context_.compact);
+            auto* page=new ModelPage(tabs_,std::move(document),options_,context_.compact,
+                [this](const auto& paths,const auto& inputs){checkOutputs(paths,inputs);});
             page->setResourceSession(scope);
             page->suspendLoadingPlayback();
             try {
@@ -3140,7 +3227,7 @@ private:
                 destinations.push_back(collision.path);
                 companionPaths.push_back(collision.path);
             }
-            neoshared::checkResourceOutputs(destinations,protectedInputs);
+            checkOutputs(destinations,protectedInputs);
             model::AsciiExportResult exported;
             ConversionReport report;report.source=document.sourceDescription();report.game=document.model().game;
             std::vector<std::uint8_t> bytes;
@@ -3203,7 +3290,7 @@ private:
             const auto output=neosettings::pathFromWx(file.GetPath());
             auto companion=output;companion.replace_extension(".mdx");
             auto reportPath=output;reportPath+=".report.txt";
-            neoshared::checkResourceOutputs({output,companion,reportPath},protectedInputs);
+            checkOutputs({output,companion,reportPath},protectedInputs);
             protectedInputs.insert(protectedInputs.end(),{output,companion,reportPath});
             model::PackedExportResult exported;
             ConversionReport report;report.source=document.sourceDescription();report.game=controls.game;
@@ -3225,7 +3312,7 @@ private:
                 collisionPaths.push_back(collision.path);
                 companionPaths.push_back(collision.path);
             }
-            neoshared::checkResourceOutputs(collisionPaths,protectedInputs);
+            checkOutputs(collisionPaths,protectedInputs);
             if(!confirmCompanionOverwrite(this,companionPaths)) return;
             neoshared::texture::writeFileBytes(companion,exported.mdx);
             neoshared::texture::writeFileBytes(output,exported.mdl);
@@ -3274,7 +3361,9 @@ private:
                      ResourceResolver fileResources = {}, ModelPage* replacement = nullptr,bool preserveEditingContext=false) {
         const auto title = wxui::toWx(document->title());
         auto* page = new ModelPage(tabs_, std::move(document), replacement ? replacement->options() : options_,
-                                   context_.compact, [this] { updateState(); });
+                                   context_.compact,
+                                   [this](const auto& paths,const auto& inputs) {checkOutputs(paths,inputs);},
+                                   [this] { updateState(); });
         page->setResourceSession(std::move(session));
         page->setFileResources(std::move(fileResources));
         if(replacement) {
@@ -3389,6 +3478,7 @@ private:
         file->Append(ID_QuickConvert, "Quick Convert Files...", "Read model files and write their opposite format.");
         file->Append(ID_BatchDecompile, "Batch Decompile...", "Convert selected model files to ASCII.");
         file->Append(ID_BatchCompile, "Batch Compile...", "Compile selected model files to binary MDL/MDX.");
+        file->Append(ID_SaveBinaryWorkingCopy, "Save Binary Working Copy...", "Extract the current archive model and companions, then open the working files.");
         file->Append(ID_BinaryMeshFields, "Binary Mesh Editor...", "Edit the selected binary mesh or open another model, then save a new MDL/MDX copy.");
         file->AppendSeparator();
         file->Append(ID_CloseModel, "&Close Model\tCtrl+W");
@@ -3439,7 +3529,7 @@ private:
         bar->Append(developerMenu_, "&Developer");
 
         helpMenu_ = new wxMenu;
-        helpMenu_->Append(ID_Workflow, "Model Editing Workflow...");
+        (context_.embedded ? tools : helpMenu_)->Append(ID_Workflow, "Model Editing Workflow...");
         helpMenu_->Append(ID_About, "&About NeoMDL");
         bar->Append(helpMenu_, "&Help");
         setModuleMenus(bar);
@@ -3515,7 +3605,8 @@ private:
         inspection->AppendCheckItem(ID_ShowHidden, "Show Meshes with Render Flag Off");
         inspection->AppendCheckItem(ID_NodeHelpers, "Node Helpers");
         if (features & PreviewCameras) inspection->AppendCheckItem(ID_ShowCameras, "Camera Markers");
-        inspection->AppendCheckItem(ID_PreviewAabbs, "Collision Geometry");
+        inspection->AppendCheckItem(ID_PreviewAabbs, "MDL Collision / AABB Geometry",
+            "Inspect collision nodes in the model. Separate WOK/PWK/DWK companions are edited for export.");
         if (area) inspection->AppendCheckItem(ID_PreviewTriggers, "Trigger Volumes");
         view->AppendSubMenu(inspection, "&Inspection");
         view->AppendSeparator();
@@ -3965,7 +4056,9 @@ private:
             "Text report (*.txt)|*.txt",wxFD_SAVE|wxFD_OVERWRITE_PROMPT);
         if(file.ShowModal()!=wxID_OK)return;
         try {
-            std::ofstream out(neosettings::pathFromWx(file.GetPath()),std::ios::binary);
+            const auto path=neosettings::pathFromWx(file.GetPath());
+            checkOutputs({path},openPaths());
+            std::ofstream out(path,std::ios::binary);
             if(!out)throw std::runtime_error("Cannot open execution report");
             out<<page->engineExecutionReport();out.close();
             if(!out)throw std::runtime_error("Cannot complete execution report");
@@ -4289,7 +4382,8 @@ private:
             case ID_BatchDecompile: case ID_BatchCompile: case ID_QuickConvert:
                 showBatchConversion(this,event.GetId()==ID_BatchDecompile?ConversionMode::Ascii:
                     event.GetId()==ID_BatchCompile?ConversionMode::Binary:ConversionMode::Opposite,
-                    [this](const wxString& title,const auto& work){return runJob(title,work);});return;
+                    [this](const wxString& title,const auto& work){return runJob(title,work);},
+                    [this](const auto& paths,const auto& inputs){checkOutputs(paths,inputs);});return;
             case ID_ConversionNaming: chooseConversionNaming(this);return;
             case ID_NodeProperties:
                 if (activePage()->canEditBinaryNode()) editBinaryMesh(activePage()->canEditBinaryMesh() ? BinaryMeshPage::Properties : BinaryMeshPage::Transform);
@@ -4314,12 +4408,14 @@ private:
                 activePage()->convertSelectedMesh([this](const wxString& title,const auto& work) {return runJob(title,work);});return;
             case ID_RecalculateNormals:
                 activePage()->recalculateSelectedNormals([this](const wxString& title,const auto& work) {return runJob(title,work);});return;
+            case ID_SaveBinaryWorkingCopy: saveBinaryWorkingCopy();return;
             case ID_BinaryMeshFields:
                 editBinaryMesh();return;
             case ID_InspectBinary:
                 inspectBinaryFile(this,[this](const wxString& title,const auto& work) {return runJob(title,work);});return;
             case ID_AnalyzeBinaries:
-                analyzeBinaryFiles(this,[this](const wxString& title,const auto& work) {return runJob(title,work);});return;
+                analyzeBinaryFiles(this,[this](const wxString& title,const auto& work) {return runJob(title,work);},
+                    [this](const auto& paths,const auto& inputs){checkOutputs(paths,inputs);});return;
             case ID_CompareBinaries:
                 compareBinaryFiles(this,[this](const wxString& title,const auto& work) {return runJob(title,work);});return;
             case ID_CollisionCompanions: activePage()->asciiEditor()->editCollisions(activePage()->document().sourceModel()); return;
@@ -4335,6 +4431,7 @@ private:
                 activePage()->clearAreaEnvironmentReplay();
                 activePage()->setTextureOverride({});
                 activePage()->showAllMeshes();
+                activePage()->resetPreviewEffects();
                 applyPreviewOptions(options_);
                 updateState();
                 return;
@@ -4457,8 +4554,8 @@ private:
             case ID_Workflow:
                 wxMessageBox(
                     "Open a model, then click a mesh in the viewport or select a node in the tree.\n\n"
-                    "Binary editing: use File > Binary Mesh Editor to edit a model file. Save Copy writes a new MDL/MDX pair and opens it.\n\n"
-                    "ASCII editing: generate Standard or Advanced ASCII for a binary model, or open existing ASCII. Edits update the preview after a short pause. Save ASCII writes source text; File > Compile ASCII to Binary creates the game model. Undo/Redo applies to ASCII edits.\n\n"
+                    "Binary editing: use Binary Mesh Editor to edit a working file. Archive models first save a working copy. Save Copy writes a new MDL/MDX pair and opens it.\n\n"
+                    "ASCII editing: generate Standard or Advanced ASCII for a binary model, or open existing ASCII. Edits update the preview after a short pause. Save ASCII writes source text; Compile ASCII to Binary creates the game model. Undo/Redo applies to ASCII edits.\n\n"
                     "Textures or supermodels missing? Choose Tools > Model Resource Installation, then inspect Resource Scope and Load Report. Changing the installation reloads the model and resets its preview.\n\n"
                     "View and Scene effects, camera changes and playback are previews. These settings are not written into the model. Area previews do not edit or save module placements.\n\n"
                     "Quick Convert and batch conversion read files from disk. Save ASCII edits before converting those files.",
@@ -4503,6 +4600,7 @@ private:
             else if (!area && developerMenu_->FindItem(command.first))
                 developerMenu_->Destroy(command.first);
         }
+        enableModuleCommand(ID_SaveBinaryWorkingCopy,active&&active->canSaveBinaryWorkingCopy());
         enableModuleCommand(ID_SaveAscii,editor&&editor->ready());
         enableModuleCommand(ID_SaveAsciiAs,editor&&editor->ready());
         enableModuleCommand(ID_AsciiEditor,editor&&!area);

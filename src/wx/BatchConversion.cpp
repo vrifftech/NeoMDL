@@ -23,7 +23,8 @@ void chooseConversionNaming(wxWindow* parent) {
     if (dialog.ShowModal() == wxID_OK) saveAsciiNamingPreference(static_cast<AsciiNaming>(dialog.GetSelection()));
 }
 
-void showBatchConversion(wxWindow* parent, ConversionMode mode, const AuthoringJob& runJob) {
+void showBatchConversion(wxWindow* parent, ConversionMode mode, const AuthoringJob& runJob,
+                         const OutputValidator& validateOutputs) {
     const auto title = mode == ConversionMode::Ascii ? "Batch Decompile" :
         mode == ConversionMode::Binary ? "Batch Compile" : "Quick Convert";
     wxDialog dialog(parent, wxID_ANY, title, wxDefaultPosition, parent->FromDIP(wxSize(900,560)),
@@ -114,7 +115,7 @@ void showBatchConversion(wxWindow* parent, ConversionMode mode, const AuthoringJ
                     auto source = conversionInputs(requests.back()); inputs.insert(inputs.end(), source.begin(), source.end());
                     auto target = conversionOutputs(requests.back(), options); outputs.insert(outputs.end(), target.begin(), target.end());
                 }
-                neoshared::checkResourceOutputs(outputs, inputs);
+                validateOutputs(outputs, inputs);
             }
             if (!confirmCompanionOverwrite(&dialog, outputs)) return;
             saveAsciiNamingPreference(style);

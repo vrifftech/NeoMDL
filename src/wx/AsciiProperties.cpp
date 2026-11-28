@@ -298,7 +298,7 @@ void AsciiEditor::exportTextureList() {
     if (file.ShowModal() != wxID_OK) return;
     try {
         const auto path = neosettings::pathFromWx(file.GetPath());
-        neoshared::checkResourceOutput(path, source_->openPaths());
+        validateOutputs_({path}, source_->openPaths());
         std::string list;
         for (const auto& name : textureNames(SourceText(text()))) list += wxui::toStd(name) + '\n';
         neoshared::texture::writeFileBytes(path, {list.begin(), list.end()});

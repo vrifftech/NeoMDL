@@ -5,7 +5,8 @@
 
 namespace neomdl::ui {
 
-void showBatchConversion(wxWindow* parent, ConversionMode mode, const AuthoringJob& runJob);
+void showBatchConversion(wxWindow* parent, ConversionMode mode, const AuthoringJob& runJob,
+                         const OutputValidator& validateOutputs);
 void chooseConversionNaming(wxWindow* parent);
 
 } // namespace neomdl::ui
